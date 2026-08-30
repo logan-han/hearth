@@ -39,6 +39,19 @@ describe('htmlToText', () => {
     expect(text).toContain('7:30 am start')
     expect(text).not.toContain('evil')
   })
+
+  it('drops a script whose end tag is padded or missing altogether', () => {
+    expect(htmlToText('<p>Notice</p><script >evil()</script >tail')).not.toContain('evil')
+    expect(htmlToText('<p>Notice</p><script>evil()')).not.toContain('evil')
+  })
+
+  it('strips tags that only appear once their wrapper is gone', () => {
+    expect(htmlToText('<p>Sports <<b>i>Day</p>')).not.toContain('<')
+  })
+
+  it('decodes entities once, so escaped markup stays escaped', () => {
+    expect(htmlToText('<p>Tom &amp;amp; Jerry &amp;lt;script&amp;gt;</p>')).toBe('Tom &amp; Jerry &lt;script&gt;')
+  })
 })
 
 describe('read_url', () => {

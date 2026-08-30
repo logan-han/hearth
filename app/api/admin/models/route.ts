@@ -29,7 +29,7 @@ export async function GET(req: Request) {
     if (provider === 'self-hosted') return NextResponse.json({ models: await selfHosted() })
     return NextResponse.json({ error: `Unknown provider "${provider}".` }, { status: 400 })
   } catch (err) {
-    console.error(`[models] could not list ${provider}:`, err)
+    console.error('[models] could not list provider:', provider, err)
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Could not reach that provider.' },
       { status: 502 },

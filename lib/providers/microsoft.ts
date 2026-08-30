@@ -1,6 +1,7 @@
 import type { AccountClient, CalendarEvent, MailSummary } from './types'
 import { accessTokenFor } from './token'
 import { timezone } from '../env'
+import { htmlToPlainText } from '../html'
 
 const GRAPH = 'https://graph.microsoft.com/v1.0/me'
 
@@ -49,13 +50,7 @@ function toSummary(m: GraphMessage): MailSummary {
 
 function plainText(body?: { contentType?: string; content?: string }): string {
   const content = body?.content ?? ''
-  if ((body?.contentType ?? '').toLowerCase() !== 'html') return content
-  return content
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
+  return (body?.contentType ?? '').toLowerCase() === 'html' ? htmlToPlainText(content) : content
 }
 
 type GraphEvent = {

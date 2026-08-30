@@ -1,6 +1,7 @@
 import type { AccountClient, CalendarEvent, DraftMail, MailSummary } from './types'
 import { accessTokenFor } from './token'
 import { timezone } from '../env'
+import { htmlToPlainText } from '../html'
 
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me'
 const GCAL = 'https://www.googleapis.com/calendar/v3/calendars/primary'
@@ -42,12 +43,7 @@ function extractBody(part?: GmailPart): string {
     if (found) return found
   }
   if (part.mimeType === 'text/html' && part.body?.data) {
-    return Buffer.from(part.body.data, 'base64url')
-      .toString('utf8')
-      .replace(/<style[\s\S]*?<\/style>/gi, '')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
+    return htmlToPlainText(Buffer.from(part.body.data, 'base64url').toString('utf8'))
   }
   return ''
 }

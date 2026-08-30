@@ -1,6 +1,7 @@
 import { tool } from 'ai'
 import { z } from 'zod'
 import type { ToolContext } from './context'
+import { decodeEntities, stripBlocks, stripTags } from '../html'
 
 /**
  * Following links is what separates "the email mentions a form" from actually
@@ -20,22 +21,15 @@ function blockedHost(hostname: string): boolean {
 }
 
 export function htmlToText(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<!--[\s\S]*?-->/g, ' ')
+  const laidOut = stripBlocks(html)
     // Keep hrefs beside their labels, so the next link can be followed too.
-    .replace(/<a\s[^>]*href="([^"#][^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href: string, label: string) => {
-      const text = label.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+    .replace(/<a\s[^>]*href="([^"#][^"]*)"[^>]*>([\s\S]*?)<\/a\s*>/gi, (_, href: string, label: string) => {
+      const text = stripTags(label).replace(/\s+/g, ' ').trim()
       return text ? ` ${text} [${href}] ` : ` [${href}] `
     })
     .replace(/<(br|\/p|\/div|\/li|\/tr|\/h[1-6])[^>]*>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&#?\w+;/g, ' ')
+
+  return decodeEntities(stripTags(laidOut))
     .replace(/[ \t]+/g, ' ')
     .replace(/\s*\n\s*/g, '\n')
     .trim()

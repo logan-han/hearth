@@ -89,6 +89,12 @@ describe('adding and editing a member', () => {
     expect(String((await res.json()).error)).toContain('not-an-email')
   })
 
+  it('rejects the near misses too', async () => {
+    for (const email of ['@han.life', 'ada@', 'ada@han', 'ada@@han.life', 'ada@han.life.', 'ada@.life']) {
+      expect((await post({ telegramUserId: '999', name: 'Ada', email })).status).toBe(400)
+    }
+  })
+
   it('rejects a malformed body', async () => {
     const res = await POST(new Request('https://hearth.han.life/api/admin/members', { method: 'POST', body: 'oops' }))
     expect(res.status).toBe(400)
