@@ -6,7 +6,7 @@ import * as q from '@/lib/db/queries'
 const generateText = vi.hoisted(() => vi.fn())
 vi.mock('ai', async (orig) => ({ ...(await orig<typeof import('ai')>()), generateText }))
 
-const { runAgent, shouldChimeIn, systemPrompt } = await import('@/lib/agent')
+const { runAgent, shouldChimeIn, systemPrompt, stripPreamble } = await import('@/lib/agent')
 
 let client: PGlite
 
@@ -77,6 +77,53 @@ describe('systemPrompt', () => {
   it('includes household context when there is some', () => {
     expect(systemPrompt({ ...base, chatType: 'private', context: 'Known facts: bins on Monday' }))
       .toContain('bins on Monday')
+  })
+})
+
+describe('systemPrompt money rules', () => {
+  const base = { memberName: 'Logan', now: new Date('2026-08-27T00:00:00Z'), context: '' }
+
+  it('forbids reading a destination out of a payee string', () => {
+    const p = systemPrompt({ ...base, chatType: 'group' })
+    expect(p).toContain("merchant's own trading name and registered city")
+    expect(p).toContain('CHEAPTICKETS SEATTLE')
+  })
+
+  it('forbids inventing routes, stopovers and airport codes', () => {
+    const p = systemPrompt({ ...base, chatType: 'group' })
+    expect(p).toContain('Never reconstruct a trip, route, itinerary or stopover from a transaction')
+    expect(p).toContain('Do not expand airport, station or flight codes from memory')
+  })
+
+  it('sends the model to the confirmation email for a real itinerary', () => {
+    expect(systemPrompt({ ...base, chatType: 'group' })).toContain('is in its confirmation email, not the bank feed')
+  })
+})
+
+describe('stripPreamble', () => {
+  it('cuts reasoning that hands over with "Now the post:"', () => {
+    const text = [
+      'Scooti/Scoot is a known budget airline, and the CHEAPTICKETS SEATTLE line is the other half. Now the post:',
+      '',
+      '*August snapshot*',
+      'Money in **$23,887.18**.',
+    ].join('\n')
+    expect(stripPreamble(text)).toBe('*August snapshot*\nMoney in **$23,887.18**.')
+  })
+
+  it('keeps a reply that simply opens with a lead-in', () => {
+    const text = "Here's the summary:\nTwo new transactions."
+    expect(stripPreamble(text)).toBe(text)
+  })
+
+  it('leaves ordinary prose alone', () => {
+    const text = 'Two new transactions today. The larger one is the school fee instalment.'
+    expect(stripPreamble(text)).toBe(text)
+  })
+
+  it('never eats the whole reply', () => {
+    const text = 'A long enough preamble to clear the guard, and now the post:\n'
+    expect(stripPreamble(text)).toBe(text)
   })
 })
 

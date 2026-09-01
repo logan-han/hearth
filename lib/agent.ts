@@ -115,16 +115,21 @@ export function systemPrompt(input: {
     '- Email and personal calendar tools always act on the account of the person who just spoke.',
     '- Household-wide things (sports, school, appointments others should see) go on the SHARED calendar via add_family_event, not a personal one.',
     '- Shopping and other running lists live in the list tools, not in `remember`.',
+    '- Never claim you cannot check or reach a service one of your tools covers. If a tool exists for it, call it instead of describing what you cannot do.',
+    '- When a message, email or page points at a link, open it with `read_url` and read what is actually there, following further links it reveals when they matter. An email that does not turn up in the inbox may be archived: search with `list_email` and a query before declaring it gone.',
+    '- Events you found rather than were told go through `propose_family_event`, so a person confirms first.',
+    '',
+    'Money — a bank line is a payment, not a story:',
+    '- PocketSmith has categories so prefer it for "what did we spend on X"; Up is the raw account feed. Quote figures exactly as the tools give them.',
+    '- The words in a payee or description are the merchant\'s own trading name and registered city, never where the household went, stayed or flew. `CHEAPTICKETS SEATTLE` is an agent registered in Seattle, not a trip to Seattle.',
+    '- Never reconstruct a trip, route, itinerary or stopover from a transaction. Do not expand airport, station or flight codes from memory, and never add a leg, connection or destination that no source spelled out.',
+    '- Where a booking actually went is in its confirmation email, not the bank feed. If the route matters, find that email with `list_email`; otherwise give the payee as it stands and say the feed does not say.',
     '',
     'Memory — you are the household\'s institutional memory, and it only works if you file things without being asked:',
     '- The moment a message reveals a durable household fact, call `remember` in that same turn. The test: would the household need it again weeks from now? Examples, not limits: names and birthdays, allergies and health, sizes, schools, teachers and coaches, doctors and tradies, pets, vehicles, codes, who drives what, standing arrangements ("bin night is Monday", "swimming is Saturday 9am"), strong preferences and dislikes.',
     '- When someone contradicts a Known household fact, `forget` the old one and `remember` the new one.',
     '- Not memories: one-off plans (calendar), shopping (lists), tasks (the board), passing chatter, anything already in Known household facts.',
     '- Recall is automatic — Known household facts arrive in your context — so never announce what you stored. At most, a brief "noted".',
-    '- Money questions: PocketSmith has categories so prefer it for "what did we spend on X"; Up is the raw account feed. Quote figures exactly as the tools give them.',
-    '- Never claim you cannot check or reach a service one of your tools covers. If a tool exists for it, call it instead of describing what you cannot do.',
-    '- When a message, email or page points at a link, open it with `read_url` and read what is actually there, following further links it reveals when they matter. An email that does not turn up in the inbox may be archived: search with `list_email` and a query before declaring it gone.',
-    '- Events you found rather than were told go through `propose_family_event`, so a person confirms first.',
     '',
     'Commands the app handles before you ever see them — point people at the right one instead of improvising:',
     '- /watch switches on a ready-made watcher (money, inbox, morning brief) that checks on a schedule and posts only when something matters. Point people at it when they ask you to keep an eye on something one of those covers; build a custom automation only for anything else.',
@@ -144,6 +149,24 @@ export function systemPrompt(input: {
   ]
     .filter(Boolean)
     .join('\n')
+}
+
+/**
+ * Models that think out loud sometimes narrate their reasoning and then hand
+ * over with "Now the post:" — which is how "Scooti/Scoot is a known budget
+ * airline ... Now the post:" reached the family chat. The instructions already
+ * forbid a preamble; this is what happens when one arrives anyway. Only a
+ * handover that genuinely follows prose is cut, so a reply that simply opens
+ * "Here's the summary:" keeps its first line.
+ */
+const HANDOVER =
+  /\b(?:now|and now|here(?:'s| is)|so here(?:'s| is))\b[^.\n:]{0,60}\b(?:post|update|message|summary|brief|snapshot|report|answer|reply)\s*:[ \t]*\n/i
+const MIN_PREAMBLE = 40
+
+export function stripPreamble(text: string): string {
+  const match = HANDOVER.exec(text.slice(0, 500))
+  if (!match || match.index < MIN_PREAMBLE) return text
+  return text.slice(match.index + match[0].length).trim() || text
 }
 
 async function historyMessages(chatId: string, excludeId?: number): Promise<ModelMessage[]> {
@@ -198,7 +221,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
       timeout: { stepMs: STEP_TIMEOUT_MS },
       maxOutputTokens: 1500,
     })
-    const text = r.text.trim()
+    const text = stripPreamble(r.text.trim())
     // An empty completion usually means the model ended on a tool call it never
     // summarised; treat it as a failure so the fallback model gets a turn.
     if (!text && ctx.notices.length === 0) throw new Error(`${slot.name} returned no text`)

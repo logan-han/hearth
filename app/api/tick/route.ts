@@ -67,6 +67,8 @@ async function tellAdminQuietly(creator: { telegramUserId: string } | undefined,
 }
 
 const isSkipLine = (line: string) => /^skip[.!]*$/i.test(line.trim())
+/** A marked failure, and nothing else, is what earns an admin a DM. */
+const isProblemLine = (line: string) => /^\**\s*problem\s*\**\s*:/i.test(line.trim())
 
 /**
  * The nightly memory pass: relying on the chat-turn model to file memories
@@ -137,15 +139,15 @@ async function runDue(): Promise<{ ran: number; skipped: number }> {
         text:
           `Scheduled automation "${a.label}" is due now. Carry out this instruction; whatever you write will be posted to the family chat, briefly:\n\n${a.instruction}\n\n` +
           'Interpret rather than relay: a scheduled post should read like a sharp-eyed housemate noticing something, not an API response. ' +
-          'If the instruction only wants a post under some condition and that condition is not met (nothing new, nothing to report), reply with exactly SKIP and nothing will be posted. ' +
-          'If a tool fails or errors, never post the failure to the chat: reply with a one-line diagnosis and then SKIP on its own line — it goes privately to the admins instead. ' +
-          'Reply with the post alone: no preamble, no planning notes, no commentary about what the tools returned.',
+          'If the instruction only wants a post under some condition and that condition is not met (nothing new, nothing to report), reply with exactly SKIP and nothing will be posted. Write nothing beside it: a quiet run needs no explanation of why it was quiet. ' +
+          'If a tool fails or errors, never post the failure to the chat: write PROBLEM: followed by a one-line diagnosis, then SKIP on its own line — that, and only that, reaches the admins privately. ' +
+          'Reply with the post alone: no preamble, no planning notes, no handover line such as "now the post:", no commentary about what the tools returned.',
         history: false,
       })
 
-      // Any part carrying a lone SKIP line stays out of the chat: a bare SKIP
-      // is a quiet run, and anything written around it is a diagnosis for the
-      // admins, not the family. Tool notices without SKIP still post.
+      // Any part carrying a lone SKIP line stays out of the chat, whatever else
+      // it says: a run that chose silence stays silent. Tool notices without
+      // SKIP still post.
       const speak: string[] = []
       const quiet: string[] = []
       for (const part of [result.text, ...result.notices].filter(Boolean)) {
@@ -168,8 +170,14 @@ async function runDue(): Promise<{ ran: number; skipped: number }> {
           model: result.model,
         })
       }
-      if (quiet.length) {
-        await tellAdminQuietly(member, `Watcher **${a.label}** stayed quiet in the chat, but reported:\n\n${quiet.join('\n\n')}`)
+      // Staying quiet is the normal outcome for a watcher, not news: only a
+      // marked PROBLEM reaches an admin. Anything else written beside SKIP is
+      // the model narrating why it said nothing, and that belongs in the logs.
+      const problems = quiet.flatMap((q) => q.split('\n').filter(isProblemLine))
+      if (problems.length) {
+        await tellAdminQuietly(member, `Watcher **${a.label}** hit a problem:\n\n${problems.join('\n')}`)
+      } else if (quiet.length) {
+        console.warn(`[tick] ${a.label} stayed quiet:`, quiet.join(' | '))
       }
       ran++
     } catch (err) {

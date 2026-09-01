@@ -149,10 +149,10 @@ describe('running due automations', () => {
     expect(send).not.toHaveBeenCalledWith('-100999', expect.stringContaining('model exploded'))
   })
 
-  it('routes a diagnosis attached to SKIP to the admins, not the chat', async () => {
+  it('routes a marked problem attached to SKIP to the admins, not the chat', async () => {
     dueAutomations.mockResolvedValue([automation()])
     runAgent.mockResolvedValue({
-      text: 'The Up API is returning a 401 (auth failure).\n\nSKIP',
+      text: 'PROBLEM: the Up API is returning a 401 (auth failure).\n\nSKIP',
       notices: [],
       model: 'primary:test',
     })
@@ -164,6 +164,40 @@ describe('running due automations', () => {
     expect(recordMessage).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: '900', role: 'assistant', content: expect.stringContaining('401') }),
     )
+  })
+
+  it('leaves the admins alone when a quiet run merely explains itself', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    runAgent.mockResolvedValue({
+      text: "Going through the batch: two parcel updates and a newsletter. Nothing to act on.\n\nSKIP",
+      notices: [],
+      model: 'primary:test',
+    })
+    await authed()
+    expect(send).not.toHaveBeenCalled()
+    expect(recordMessage).not.toHaveBeenCalled()
+  })
+
+  it('still tells the admins when the model marks a problem in the middle of its prose', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    runAgent.mockResolvedValue({
+      text: 'Checked the feed.\n**PROBLEM**: PocketSmith returned 502.\nSKIP',
+      notices: [],
+      model: 'primary:test',
+    })
+    await authed()
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('502'))
+    // Only the marked line travels; the narration stays in the logs.
+    expect(send).not.toHaveBeenCalledWith('900', expect.stringContaining('Checked the feed'))
+  })
+
+  it('tells the agent that a quiet run needs no explanation, and how to flag a real one', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    await authed()
+    const prompt = (runAgent.mock.calls[0][0] as { text: string }).text
+    expect(prompt).toContain('a quiet run needs no explanation')
+    expect(prompt).toContain('write PROBLEM:')
+    expect(prompt).toContain('no handover line')
   })
 
   it('offers the agent a way to stay silent, alongside the instruction', async () => {
