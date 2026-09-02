@@ -30,7 +30,7 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
       'New 2Up transactions are listed under DATA. Post one line per transaction: payee as shown, amount, date.',
       'Add a purpose only if a Known household fact, a family calendar event or an email you fetch names that payee, and say which in brackets.',
       'If nothing names it, write "purpose not recorded".',
-      'Flag only what DATA plainly shows: two identical lines are a possible duplicate, a credit is a refund. Do not call a payee new or an amount unusual unless DATA says so.',
+      'Each transaction carries flags worked out from the feed: new_payee, unusually_large, possible_duplicate, money_in. Mention a flag in plain words only when it is there; an empty list means nothing stood out.',
       'A payee string is a trading name and a registered city, never a place the household went or a trip they booked.',
     ].join(' '),
     tools: ['recall', 'list_family_events', 'list_email'],

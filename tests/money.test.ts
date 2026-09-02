@@ -289,6 +289,36 @@ describe('new_transactions', () => {
     wire([])
     expect((await call('new_transactions', { limit: 10 })).account).toBe('2Up Spending')
   })
+
+  it('flags a new, oversized payee against the account history, and says what typical looks like', async () => {
+    const past = Array.from({ length: 12 }, (_, i) =>
+      upTxn(`h${i}`, i % 2 ? '-12.50' : '-84.20', `2026-08-${String(10 + i).padStart(2, '0')}T18:00:00+10:00`, i % 2 ? 'Seven Seeds' : 'Coles 0812 Northcote'),
+    )
+    const seattle = upTxn('s1', '-412.30', '2026-08-27T11:00:00+10:00', 'CHEAPTICKETS SEATTLE')
+    const coles = upTxn('c1', '-60.00', '2026-08-27T11:30:00+10:00', 'Coles 0812 Northcote')
+    wire([seattle, coles, ...past])
+    const r = await call('new_transactions', { account: '2up', limit: 10 })
+    const rows = r.transactions as { description: string; flags: string[] }[]
+    expect(rows.find((t) => t.description === 'CHEAPTICKETS SEATTLE')?.flags).toEqual(['new_payee', 'unusually_large'])
+    expect(rows.find((t) => t.description === 'Coles 0812 Northcote')?.flags).toEqual([])
+    expect(r.typical_debit).toBe('$48.35')
+    expect(r.history_days).toBe(90)
+  })
+
+  it('keeps the transactions when the history read fails', async () => {
+    let calls = 0
+    fetchMock.mockImplementation(async (url: URL) => {
+      if (!String(url).includes('/transactions')) return json(upAccounts)
+      calls++
+      if (calls === 1) return json(feed(upTxn('t1', '-10.00', '2026-08-27T11:00:00+10:00')))
+      return { ok: false, status: 500, text: async () => 'boom', json: async () => ({}) }
+    })
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const r = await call('new_transactions', { account: '2up', limit: 10 })
+    expect(r.count).toBe(1)
+    expect((r.transactions as { flags: string[] }[])[0].flags).toEqual([])
+    expect(r.typical_debit).toBeUndefined()
+  })
 })
 
 describe('pocketsmith client', () => {

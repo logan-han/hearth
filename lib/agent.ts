@@ -198,7 +198,7 @@ function watcherPrompt(tz: string): string[] {
     'WRITE using only the information under DATA, the tool results you fetch, and the instruction you were given. Do not rely on outside knowledge.',
     'POST: one to three short lines a housemate would find useful; names, amounts and dates exactly as given, the key figure in **bold**.',
     'PURPOSE: say what a payment or message is for only when DATA, a Known fact, a calendar event or a fetched email names it, and say which; otherwise write "purpose not recorded".',
-    'FLAGS: point out only what DATA itself marks or plainly shows: two identical lines are a possible duplicate, a credit is a refund, a date may need a calendar entry. Never infer a flag the data does not state, such as calling a payee new or an amount unusual.',
+    'FLAGS: each transaction under DATA carries flags worked out from the feed (new_payee, unusually_large, possible_duplicate, money_in). Put a flag into plain words only when it is there; an empty list means nothing stood out. money_in is a credit, a refund or a transfer in, and say which only if the description does.',
     'NOTHING TO SAY: when nothing is worth posting, reply with exactly SKIP.',
     'PROBLEMS: if a tool fails, write PROBLEM: and one line of diagnosis, then SKIP on its own line. That reaches the admins, not the family.',
     `FORMAT: plain Telegram text in ${language()}, ${units()} units, times in ${tz}; no headings, no preamble, no handover line, no commentary about tools.`,

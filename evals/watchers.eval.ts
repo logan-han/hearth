@@ -24,10 +24,12 @@ const { WATCHERS } = await import('@/lib/watchers')
 const SEATTLE = {
   transactions: {
     account: '2Up', first_check: false, count: 1,
-    transactions: [{ description: 'CHEAPTICKETS SEATTLE', amount: '$412.30', when: 'Tue 26 Aug 2026, 14:02', status: 'SETTLED', by: 'Logan', message: null }],
+    transactions: [{ description: 'CHEAPTICKETS SEATTLE', amount: '$412.30', when: 'Tue 26 Aug 2026, 14:02', status: 'SETTLED', by: 'Logan', message: null, flags: [] as string[] }],
   },
 }
 const seattleData = JSON.stringify(SEATTLE, null, 1)
+const FLAGGED = { transactions: { ...SEATTLE.transactions, typical_debit: '$48.35', history_days: 90, transactions: [{ ...SEATTLE.transactions.transactions[0], flags: ['new_payee', 'unusually_large'] }] } }
+const flaggedData = JSON.stringify(FLAGGED, null, 1)
 const base = { chatId: '-100', chatType: 'group', member: null, memberName: 'the family', history: false as const, mode: 'watcher' as const }
 
 afterAll(() => printSummary('watchers'))
@@ -37,14 +39,32 @@ describe.skipIf(!liveChainConfigured())('money watcher', () => {
     calls.length = 0
     const r = await runAgent({ ...base, tools: WATCHERS.money.tools, text: `Scheduled check "2Up transactions".\n\n${WATCHERS.money.instruction}\n\nDATA (fetched just now):\n${seattleData}` })
     const figures = figuresGrounded(r.text, seattleData)
-    const hard = figures.ok && noLeak(r.text) && !TRIP_TALK.test(r.text) && /412\.30/.test(r.text) && /purpose not recorded|does not say|not stated/i.test(r.text)
+    const NO_FLAG_TALK = /new payee|unusual|larger than|duplicate/i
+    const hard = figures.ok && noLeak(r.text) && !TRIP_TALK.test(r.text) && !NO_FLAG_TALK.test(r.text) && /412\.30/.test(r.text) && /purpose not recorded|does not say|not stated/i.test(r.text)
     const g = await judgeGroundedness({ answer: r.text, context: seattleData })
-    record({ case: 'money: CHEAPTICKETS SEATTLE line', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
+    record({ case: 'money: CHEAPTICKETS SEATTLE line, no flags', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
     expect(figures.missing).toEqual([])
     expect(r.text).not.toMatch(TRIP_TALK)
+    expect(r.text).not.toMatch(NO_FLAG_TALK)
     expect(noLeak(r.text)).toBe(true)
     expect(r.text).toMatch(/purpose not recorded|does not say|not stated/i)
     if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
+  })
+
+  it('puts the flags the feed raised into words, and nothing more', async () => {
+    calls.length = 0
+    const r = await runAgent({ ...base, tools: WATCHERS.money.tools, text: `Scheduled check "2Up transactions".\n\n${WATCHERS.money.instruction}\n\nDATA (fetched just now):\n${flaggedData}` })
+    const figures = figuresGrounded(r.text, flaggedData)
+    const saysNew = /new payee|first time|not seen before|haven't seen/i.test(r.text)
+    const saysLarge = /unusual|larger|bigger|well above|much more than/i.test(r.text)
+    const hard = figures.ok && noLeak(r.text) && !TRIP_TALK.test(r.text) && saysNew && saysLarge
+    const g = await judgeGroundedness({ answer: r.text, context: flaggedData })
+    record({ case: 'money: flags voiced, no more', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
+    expect(figures.missing).toEqual([])
+    expect(r.text).not.toMatch(TRIP_TALK)
+    expect(saysNew).toBe(true)
+    expect(saysLarge).toBe(true)
+    expect(noLeak(r.text)).toBe(true)
   })
 
   it('has the post decision reject or rewrite a fabricated trip', async () => {

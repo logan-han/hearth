@@ -287,7 +287,8 @@ export async function listMemories(limit = 100) {
     .select()
     .from(memories)
     .where(isNull(memories.invalidatedAt))
-    .orderBy(desc(memories.createdAt))
+    // Two facts filed in the same instant tie on created_at; the id settles it.
+    .orderBy(desc(memories.createdAt), desc(memories.id))
     .limit(limit)
 }
 

@@ -3,6 +3,7 @@ import { z } from 'zod'
 import * as up from '../providers/up'
 import * as ps from '../providers/pocketsmith'
 import { readCursor, writeCursor } from './cursor'
+import { flagTransactions, HISTORY_DAYS, type TransactionFlag } from '../money-flags'
 import { localToUtc, formatLocal, localDateKey } from '../cron'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
@@ -193,7 +194,8 @@ export function moneyTools(ctx: ToolContext) {
 
     new_transactions: tool({
       description:
-        'Up Bank transactions that have appeared since the last time this chat checked. Built for scheduled announcements: it advances its own marker, so nothing is ever posted twice. Returns an empty list when there is nothing new.',
+        'Up Bank transactions that have appeared since the last time this chat checked. Built for scheduled announcements: it advances its own marker, so nothing is ever posted twice. Returns an empty list when there is nothing new. ' +
+        `Each transaction carries flags worked out from the last ${HISTORY_DAYS} days of the feed (new_payee, unusually_large, possible_duplicate, money_in); an empty list means nothing stood out.`,
       inputSchema: z.object({
         account: z.string().default('2up').describe('Account name, or "2up" for the shared account'),
         limit: z.number().int().min(1).max(50).default(20),
@@ -218,6 +220,26 @@ export function moneyTools(ctx: ToolContext) {
             .filter((t) => !seen.has(t.id) && new Date(t.createdAt) >= since)
             .slice(0, limit)
 
+          // What counts as new or unusual comes from the feed itself, so the
+          // model has a flag to repeat rather than a hunch to voice. A failed
+          // history read costs the flags, never the transactions.
+          let flags = new Map<string, TransactionFlag[]>()
+          let typicalDebit: number | null = null
+          if (fresh.length > 0) {
+            try {
+              const history = await up.listTransactions({
+                accountId: acct.id,
+                since: new Date(ctx.now.getTime() - HISTORY_DAYS * 24 * 3600_000),
+                limit: 300,
+              })
+              const report = flagTransactions(fresh, history)
+              flags = report.flags
+              typicalDebit = report.typicalDebit
+            } catch (e) {
+              console.warn('[money] could not read history for flags:', describe(e))
+            }
+          }
+
           if (fresh.length > 0) {
             const newest = fresh.reduce((a, b) => (new Date(a.createdAt) > new Date(b.createdAt) ? a : b))
             await writeCursor(key, newest.createdAt, fresh.map((t) => t.id), cursor)
@@ -231,6 +253,7 @@ export function moneyTools(ctx: ToolContext) {
             account: acct.name,
             first_check: !cursor,
             count: fresh.length,
+            ...(typicalDebit !== null ? { typical_debit: money(typicalDebit, acct.currency), history_days: HISTORY_DAYS } : {}),
             transactions: fresh.map((t) => ({
               description: t.description,
               amount: money(t.amount, t.currency),
@@ -238,6 +261,7 @@ export function moneyTools(ctx: ToolContext) {
               status: t.status,
               by: t.performedBy,
               message: t.message,
+              flags: flags.get(t.id) ?? [],
             })),
           }
         } catch (e) {
