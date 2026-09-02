@@ -426,6 +426,20 @@ describe('tool scoping by mode', () => {
     expect(active).not.toContain('create_automation')
   })
 
+  it('names every call for the tracer, by mode', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    await runAgent({ ...input, mode: 'chat' })
+    await runAgent({ ...input, mode: 'watcher' })
+    expect(generateText.mock.calls[0][0].telemetry).toMatchObject({ functionId: 'hearth.chat', recordInputs: true })
+    expect(generateText.mock.calls[1][0].telemetry).toMatchObject({ functionId: 'hearth.watcher' })
+    generateText.mockResolvedValue({ ...reply(''), output: 'stay_silent' })
+    await shouldChimeIn({ chatId: '-100', text: 'hi', memberName: 'Ada' })
+    expect(generateText.mock.calls[2][0].telemetry).toMatchObject({ functionId: 'hearth.gate' })
+    generateText.mockResolvedValue({ ...reply(''), output: { decision: 'skip', confidence: 1 } })
+    await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
+    expect(generateText.mock.calls[3][0].telemetry).toMatchObject({ functionId: 'hearth.decision' })
+  })
+
   it('honours an explicit tool list', async () => {
     generateText.mockResolvedValue(reply('ok'))
     await runAgent({ ...input, mode: 'watcher', tools: ['recall'] })

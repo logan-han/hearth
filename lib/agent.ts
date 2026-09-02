@@ -14,6 +14,7 @@ import type { ToolContext } from './tools/context'
 import { recentMessages, listMemories, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals } from './db/queries'
 import type { Member } from './db/schema'
 import { timezone, language, units, reasoningLevel } from './env'
+import { traced, callTelemetry } from './telemetry'
 import { formatLocal, localDateKey } from './cron'
 
 const MAX_STEPS = 8
@@ -330,18 +331,29 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const reasoning = reasoningLevel()
 
   const result = await withModelFallback(async (slot: ModelSlot) => {
-    const r = await generateText({
-      model: slot.model,
-      system: systemPrompt({ mode, chatType: input.chatType, memberName: input.memberName, now, context }),
-      messages,
-      tools: buildTools(ctx),
-      ...(activeTools ? { activeTools } : {}),
-      stopWhen: isStepCount(MAX_STEPS),
-      timeout: { stepMs: STEP_TIMEOUT_MS },
-      maxOutputTokens: settings.maxOutputTokens,
-      ...(settings.temperature !== undefined ? { temperature: settings.temperature } : {}),
-      ...(reasoning ? { reasoning } : {}),
-    })
+    const r = await traced(
+      {
+        traceName: `hearth.${mode}`,
+        sessionId: input.chatId,
+        ...(input.member ? { userId: input.member.telegramUserId } : {}),
+        tags: [mode, input.chatType],
+        metadata: { model: slot.name },
+      },
+      () =>
+        generateText({
+          model: slot.model,
+          system: systemPrompt({ mode, chatType: input.chatType, memberName: input.memberName, now, context }),
+          messages,
+          tools: buildTools(ctx),
+          ...(activeTools ? { activeTools } : {}),
+          stopWhen: isStepCount(MAX_STEPS),
+          timeout: { stepMs: STEP_TIMEOUT_MS },
+          maxOutputTokens: settings.maxOutputTokens,
+          ...(settings.temperature !== undefined ? { temperature: settings.temperature } : {}),
+          ...(reasoning ? { reasoning } : {}),
+          telemetry: callTelemetry(`hearth.${mode}`),
+        }),
+    )
     const cleaned = cleanReply(r.text)
     if (cleaned.stripped) console.warn(`[agent] ${slot.name} leaked its working into the reply; stripped`)
     // An empty completion usually means the model ended on a tool call it never
@@ -396,15 +408,18 @@ export async function decideWatcherPost(input: {
   evidence: string
 }): Promise<PostDecision & { model: string }> {
   return withModelFallback(async (slot) => {
-    const r = await generateText({
-      model: slot.model,
-      system: DECISION_PROMPT,
-      prompt: `Watcher: ${input.label}\n\nDRAFT:\n${input.draft}\n\nEVIDENCE:\n${input.evidence || '(no tool results)'}`,
-      output: Output.object({ schema: postDecisionSchema, name: 'post_decision' }),
-      temperature: 0.2,
-      maxOutputTokens: 600,
-      timeout: { stepMs: 30_000 },
-    })
+    const r = await traced({ traceName: 'hearth.decision', tags: ['decision'], metadata: { label: input.label, model: slot.name } }, () =>
+      generateText({
+        model: slot.model,
+        system: DECISION_PROMPT,
+        prompt: `Watcher: ${input.label}\n\nDRAFT:\n${input.draft}\n\nEVIDENCE:\n${input.evidence || '(no tool results)'}`,
+        output: Output.object({ schema: postDecisionSchema, name: 'post_decision' }),
+        temperature: 0.2,
+        maxOutputTokens: 600,
+        timeout: { stepMs: 30_000 },
+        telemetry: callTelemetry('hearth.decision'),
+      }),
+    )
     return { ...r.output, model: slot.name }
   })
 }
@@ -444,17 +459,20 @@ async function askGate(
   polarity: 'reply' | 'silence',
 ): Promise<GateChoice> {
   const question = polarity === 'reply' ? 'Should the assistant reply?' : 'Should the assistant stay silent?'
-  const out = await generateText({
-    model: slot.model,
-    system: GATE_RULES,
-    messages: [...history, { role: 'user', content: `${input.memberName}: ${input.text}\n\n${question}` }],
-    output: Output.choice({ options: [...GATE_CHOICES], name: 'gate' }),
-    // Thinking tokens can count against the output budget on some
-    // providers, so leave room for them; the answer itself is one word.
-    maxOutputTokens: 64,
-    temperature: 0.2,
-    timeout: { stepMs: 10_000 },
-  })
+  const out = await traced({ traceName: 'hearth.gate', sessionId: input.chatId, tags: ['gate', polarity], metadata: { model: slot.name } }, () =>
+    generateText({
+      model: slot.model,
+      system: GATE_RULES,
+      messages: [...history, { role: 'user', content: `${input.memberName}: ${input.text}\n\n${question}` }],
+      output: Output.choice({ options: [...GATE_CHOICES], name: 'gate' }),
+      // Thinking tokens can count against the output budget on some
+      // providers, so leave room for them; the answer itself is one word.
+      maxOutputTokens: 64,
+      temperature: 0.2,
+      timeout: { stepMs: 10_000 },
+      telemetry: callTelemetry('hearth.gate'),
+    }),
+  )
   const picked: GateChoice = out.output ?? readGateChoice(out.text)
   console.info(`[gate] ${slot.name} asked:${polarity} -> ${picked} chat=${input.chatId}`)
   return picked

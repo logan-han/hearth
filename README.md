@@ -21,6 +21,7 @@ Tavily, and a local-first OpenAI-compatible LLM with OpenRouter as a fallback.
 - [Sweeping email onto the calendar](#sweeping-email-onto-the-calendar)
 - [Shared lists](#shared-lists) · [Money](#money) · [Notion](#notion) · [Jira](#jira)
 - [The web dashboard](#the-web-dashboard)
+- [Observability](#observability)
 - [Safety properties](#safety-properties)
 - [Development](#development) · [Licence](#licence)
 
@@ -143,6 +144,9 @@ Delegated permissions: `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`,
   [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
 - **OpenRouter** — [openrouter.ai/keys](https://openrouter.ai/keys). Free models
   are capped at 50 requests/day until you buy any credit, then 1000.
+- **Langfuse** — optional; a project's public and secret key from
+  [langfuse.com](https://langfuse.com) turn on tracing of every model call.
+  See [Observability](#observability).
 
 ### Model chain
 
@@ -434,6 +438,23 @@ the webhook back at this deployment after a change. Stored values are
 AES-256-GCM encrypted, override the environment, and are **never sent back to
 the browser** for credential-shaped keys. Resetting one deletes the override
 and falls back to the deployment's own environment.
+
+## Observability
+
+With `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` set,
+every model call is traced to Langfuse: the prompt and reply, each tool call
+and its result, tokens, timing, and the watcher post decisions with their
+confidence. Traces are named by what the bot was doing (`hearth.chat`,
+`hearth.watcher`, `hearth.sweep`, `hearth.gate`, `hearth.decision`), grouped
+into a session per chat, and carry the member's Telegram id, so one bad reply
+can be followed back to the exact tool result it misread. Tracing is
+registered once at server start from `instrumentation.ts` and is inert without
+the keys; the OpenTelemetry modules are not even loaded.
+
+Two things worth knowing. Traces carry the family's messages and mail; set
+`LANGFUSE_RECORD_CONTENT=off` to keep only the shape of each call. And the
+keys are environment variables, not dashboard settings, because the tracer
+starts before the database is read.
 
 ## Safety properties
 

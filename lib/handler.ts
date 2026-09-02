@@ -24,6 +24,7 @@ import {
 import { nextRun, formatLocal } from './cron'
 import { connectLink } from './oauth/state'
 import { WATCHERS, isWatcherKind } from './watchers'
+import { flushTelemetry } from './telemetry'
 import type { Member } from './db/schema'
 
 /**
@@ -569,6 +570,9 @@ export async function processUpdate(update: Update): Promise<void> {
 /** Ack immediately, then keep working past the response. */
 export function processInBackground(update: Update): void {
   waitUntil(
-    processUpdate(update).catch((err) => console.error('[telegram] processing failed:', err)),
+    processUpdate(update)
+      .catch((err) => console.error('[telegram] processing failed:', err))
+      // The function ends when this promise settles; traces must be out first.
+      .finally(() => flushTelemetry()),
   )
 }

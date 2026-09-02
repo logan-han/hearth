@@ -14,6 +14,7 @@ import type { ToolContext } from '@/lib/tools/context'
 import { WATCHERS, isWatcherKind, type WatcherKind } from '@/lib/watchers'
 import { send } from '@/lib/telegram'
 import { hydrateSecrets } from '@/lib/settings'
+import { flushTelemetry } from '@/lib/telemetry'
 import type { Automation, Member } from '@/lib/db/schema'
 
 export const runtime = 'nodejs'
@@ -360,6 +361,7 @@ export async function POST(req: Request) {
   }
   const result = await runDue()
   await maybeConsolidateMemory(new Date())
+  await flushTelemetry()
   return NextResponse.json({ ok: true, ...result })
 }
 
