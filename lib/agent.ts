@@ -424,11 +424,48 @@ function readGateChoice(text: string): GateChoice {
   return /\b(?:reply|yes)\b/i.test(text) ? 'reply' : 'stay_silent'
 }
 
+const GATE_RULES = [
+  'You decide whether a family assistant bot should reply to a group chat message.',
+  'Choose reply only if the message asks a question the assistant can answer, requests an action (reminder, calendar, email, lookup), or clearly addresses the assistant.',
+  'Choose stay_silent for banter, reactions, messages between family members, and anything already answered.',
+  'Choose unsure when you cannot tell; unsure is treated as silence.',
+].join(' ')
+
+/**
+ * One typed choice from the gate model. The question is asked from either
+ * side, because a forced choice leans towards whatever it was asked about:
+ * "should it reply?" over-counts replies, "should it stay silent?" over-counts
+ * silence, and only a message that survives both deserves an answer.
+ */
+async function askGate(
+  slot: ModelSlot,
+  history: ModelMessage[],
+  input: { chatId: string; text: string; memberName: string },
+  polarity: 'reply' | 'silence',
+): Promise<GateChoice> {
+  const question = polarity === 'reply' ? 'Should the assistant reply?' : 'Should the assistant stay silent?'
+  const out = await generateText({
+    model: slot.model,
+    system: GATE_RULES,
+    messages: [...history, { role: 'user', content: `${input.memberName}: ${input.text}\n\n${question}` }],
+    output: Output.choice({ options: [...GATE_CHOICES], name: 'gate' }),
+    // Thinking tokens can count against the output budget on some
+    // providers, so leave room for them; the answer itself is one word.
+    maxOutputTokens: 64,
+    temperature: 0.2,
+    timeout: { stepMs: 10_000 },
+  })
+  const picked: GateChoice = out.output ?? readGateChoice(out.text)
+  console.info(`[gate] ${slot.name} asked:${polarity} -> ${picked} chat=${input.chatId}`)
+  return picked
+}
+
 /**
  * Cheap gate for ambient group chatter: should the bot chime in at all?
  * Runs on the primary model only, fails closed (stay quiet) on any error, and
- * answers through a typed choice rather than a regex over free text, with
- * "unsure" available so doubt has somewhere to go other than a reply.
+ * replies only when the question answered from both sides agrees. Most
+ * chatter is settled by the first call; the second is only spent on a
+ * message the first call wanted to answer.
  */
 export async function shouldChimeIn(input: {
   chatId: string
@@ -438,36 +475,17 @@ export async function shouldChimeIn(input: {
 }): Promise<boolean> {
   const history = (await historyMessages(input.chatId, input.excludeMessageId)).slice(-6)
   try {
-    const choice = await withModelFallback(
+    return await withModelFallback(
       async (slot) => {
-        const out = await generateText({
-          model: slot.model,
-          system: [
-            'You decide whether a family assistant bot should reply to a group chat message.',
-            'Choose reply only if the message asks a question the assistant can answer, requests an action (reminder, calendar, email, lookup), or clearly addresses the assistant.',
-            'Choose stay_silent for banter, reactions, messages between family members, and anything already answered.',
-            'Choose unsure when you cannot tell; unsure is treated as silence.',
-          ].join(' '),
-          messages: [
-            ...history,
-            { role: 'user', content: `${input.memberName}: ${input.text}\n\nShould the assistant reply?` },
-          ],
-          output: Output.choice({ options: [...GATE_CHOICES], name: 'gate' }),
-          // Thinking tokens can count against the output budget on some
-          // providers, so leave room for them; the answer itself is one word.
-          maxOutputTokens: 64,
-          temperature: 0.2,
-          timeout: { stepMs: 10_000 },
-        })
-        const picked: GateChoice = out.output ?? readGateChoice(out.text)
-        console.info(`[gate] ${slot.name} ${picked} chat=${input.chatId}`)
-        return picked
+        const first = await askGate(slot, history, input, 'reply')
+        if (first !== 'reply') return false
+        const second = await askGate(slot, history, input, 'silence')
+        return second === 'reply'
       },
       // Gate on the cheapest model only; falling through the whole chain would
       // spend the day's quota on a coin flip.
       [gateModel()],
     )
-    return choice === 'reply'
   } catch {
     return false
   }

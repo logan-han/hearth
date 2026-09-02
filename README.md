@@ -227,7 +227,9 @@ In a group, @mention the bot or reply to one of its messages. Every group messag
 is stored as context either way. Set `AMBIENT_MODE=on` to let the bot decide for
 itself whether an unaddressed message deserves an answer. The decision is a
 typed choice (reply, stay silent, unsure) from the head of the model chain,
-unsure counts as silence, and every decision is logged.
+asked from both sides ("should it reply?", then "should it stay silent?") and
+acted on only when the two agree; unsure counts as silence, and every decision
+is logged.
 
 ## Reading photos, scans and voice notes
 

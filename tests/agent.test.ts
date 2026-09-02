@@ -313,9 +313,23 @@ describe('runAgent', () => {
 describe('shouldChimeIn', () => {
   const input = { chatId: '-100', text: 'anyone know the wifi password?', memberName: 'Ada' }
 
-  it('says yes on a clear YES', async () => {
+  it('says yes when the question answered from both sides agrees', async () => {
     generateText.mockResolvedValue(reply('YES'))
     expect(await shouldChimeIn(input)).toBe(true)
+    expect(generateText).toHaveBeenCalledTimes(2)
+    expect(String(generateText.mock.calls[0][0].messages.at(-1).content)).toContain('Should the assistant reply?')
+    expect(String(generateText.mock.calls[1][0].messages.at(-1).content)).toContain('Should the assistant stay silent?')
+  })
+
+  it('stays quiet when the two framings disagree', async () => {
+    generateText.mockResolvedValueOnce({ ...reply(''), output: 'reply' }).mockResolvedValueOnce({ ...reply(''), output: 'stay_silent' })
+    expect(await shouldChimeIn(input)).toBe(false)
+  })
+
+  it('settles banter with a single call', async () => {
+    generateText.mockResolvedValue({ ...reply(''), output: 'stay_silent' })
+    expect(await shouldChimeIn(input)).toBe(false)
+    expect(generateText).toHaveBeenCalledTimes(1)
   })
 
   it('says no on NO', async () => {
@@ -351,6 +365,11 @@ describe('shouldChimeIn', () => {
     generateText.mockResolvedValue({ ...reply('no idea'), output: 'reply' })
     expect(await shouldChimeIn(input)).toBe(true)
     expect(generateText.mock.calls[0][0].output).toBeDefined()
+  })
+
+  it('fails closed if the second framing errors', async () => {
+    generateText.mockResolvedValueOnce({ ...reply(''), output: 'reply' }).mockRejectedValueOnce(new Error('down'))
+    expect(await shouldChimeIn(input)).toBe(false)
   })
 
   it('treats unsure as silence', async () => {
