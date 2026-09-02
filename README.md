@@ -476,7 +476,12 @@ the keys; the OpenTelemetry modules are not even loaded.
 Two things worth knowing. Traces carry the family's messages and mail; set
 `LANGFUSE_RECORD_CONTENT=off` to keep only the shape of each call. And the
 keys are environment variables, not dashboard settings, because the tracer
-starts before the database is read.
+starts before the database is read. The integration is built for Langfuse v4:
+ingestion goes over OpenTelemetry through `@langfuse/otel` 5.4 or later, trace
+attributes are propagated before each model call so every child observation
+carries them, and nothing uses the legacy `langfuse` SDK, the old ingestion
+endpoint or trace-level input/output setters. `tests/langfuse-v4.test.ts`
+guards that contract.
 
 Inside Langfuse, an LLM-as-a-judge rule ("Groundedness of watcher posts")
 scores every `hearth.watcher` and `hearth.decision` trace, the draft and the
