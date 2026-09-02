@@ -115,6 +115,10 @@ export const memories = pgTable(
     content: text('content').notNull(),
     createdBy: integer('created_by').references(() => members.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Set when forgotten or corrected. Rows stay, so a correction keeps its history. */
+    invalidatedAt: timestamp('invalidated_at', { withTimezone: true }),
+    /** The memory that replaced this one, when a correction did the forgetting. */
+    supersededBy: integer('superseded_by'),
   },
   (t) => [index('memories_created_at_idx').on(t.createdAt)],
 )

@@ -457,6 +457,19 @@ and falls back to the deployment's own environment.
 
 ## Development
 
+### Evals
+
+`npm run evals` runs the prompts against the live model chain with recorded
+tool results, and scores the replies two ways: deterministic checks (every
+dollar figure appears in what the tools returned, no trip read into a payee
+string, no working shown, the right tool called) and an LLM judge for
+groundedness and usefulness. The judge defaults to the paid OpenRouter slot so
+it is not from the family under test; `EVAL_JUDGE_MODEL=provider:model`
+overrides it. Judge scores are reported and only fail the run with
+`EVAL_STRICT=1`. The cases in `evals/` are the failures the family has actually
+seen; when a new one turns up, it belongs there before the prompt is touched.
+It spends quota, so it is not part of `npm test` or CI.
+
 ```bash
 npm run dev           # http://localhost:3000
 npm test              # vitest

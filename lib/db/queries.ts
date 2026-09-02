@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, lte, ne, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, lte, ne, sql, isNull } from 'drizzle-orm'
 import { db } from './index'
 import {
   members, chats, connections, messages, familyEvents, memories, automations, settings, emailDrafts,
@@ -274,17 +274,32 @@ export async function cancelFamilyEvent(id: number) {
 
 /* --------------------------------------------------------------- memories */
 
-export async function addMemory(content: string, createdBy?: number | null) {
+/** Store a fact; when it corrects an older one, that one is superseded in the same step. */
+export async function addMemory(content: string, createdBy?: number | null, replaces?: number | null) {
   const [row] = await db().insert(memories).values({ content, createdBy: createdBy ?? null }).returning()
+  if (replaces) await deleteMemory(replaces, row.id)
   return row
 }
 
+/** Current facts only, newest first. Forgotten and superseded rows stay as history. */
 export async function listMemories(limit = 100) {
-  return db().select().from(memories).orderBy(desc(memories.createdAt)).limit(limit)
+  return db()
+    .select()
+    .from(memories)
+    .where(isNull(memories.invalidatedAt))
+    .orderBy(desc(memories.createdAt))
+    .limit(limit)
 }
 
-export async function deleteMemory(id: number) {
-  await db().delete(memories).where(eq(memories.id, id))
+/**
+ * Forgetting is soft: the row is marked rather than removed, so "what did we
+ * think before" survives and a wrong correction can be undone by hand.
+ */
+export async function deleteMemory(id: number, supersededBy?: number | null) {
+  await db()
+    .update(memories)
+    .set({ invalidatedAt: new Date(), supersededBy: supersededBy ?? null })
+    .where(and(eq(memories.id, id), isNull(memories.invalidatedAt)))
 }
 
 /* ------------------------------------------------------------ automations */

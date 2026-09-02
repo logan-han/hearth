@@ -198,13 +198,32 @@ describe('family events and the ICS feed', () => {
 })
 
 describe('memories', () => {
-  it('stores, lists newest first, and deletes', async () => {
+  it('stores, lists newest first, and forgets', async () => {
     const a = await q.addMemory('bin night is Monday')
     await q.addMemory('milk allergy')
     const rows = await q.listMemories()
     expect(rows.map((r) => r.content)).toEqual(['milk allergy', 'bin night is Monday'])
     await q.deleteMemory(a.id)
     expect(await q.listMemories()).toHaveLength(1)
+  })
+
+  it('keeps a forgotten fact as history rather than deleting the row', async () => {
+    const a = await q.addMemory('bin night is Monday')
+    await q.deleteMemory(a.id)
+    const { db, schema } = await import('@/lib/db')
+    const [row] = await db().select().from(schema.memories)
+    expect(row.id).toBe(a.id)
+    expect(row.invalidatedAt).not.toBeNull()
+    expect(row.supersededBy).toBeNull()
+  })
+
+  it('supersedes the old fact in the same step as storing the correction', async () => {
+    const old = await q.addMemory('bin night is Tuesday')
+    const fresh = await q.addMemory('bin night is Monday', null, old.id)
+    expect((await q.listMemories()).map((m) => m.id)).toEqual([fresh.id])
+    const { db, schema } = await import('@/lib/db')
+    const rows = await db().select().from(schema.memories)
+    expect(rows.find((r) => r.id === old.id)?.supersededBy).toBe(fresh.id)
   })
 })
 

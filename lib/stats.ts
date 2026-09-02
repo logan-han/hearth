@@ -26,7 +26,7 @@ export async function gatherStats(month?: string) {
         (select count(*) from connections) as connections,
         (select count(*) from messages) as messages,
         (select count(*) from family_events where not cancelled) as events,
-        (select count(*) from memories) as memories,
+        (select count(*) from memories where invalidated_at is null) as memories,
         (select count(*) from event_proposals where status = 'pending') as proposals,
         (select count(*) from email_drafts where status = 'pending') as drafts,
         (select count(*) from email_drafts where status = 'sent') as sent
@@ -183,7 +183,7 @@ export async function gatherFamilyStats(month?: string) {
     db().execute(sql`
       select
         (select count(*) from family_events where not cancelled) as events,
-        (select count(*) from memories) as memories,
+        (select count(*) from memories where invalidated_at is null) as memories,
         (select count(*) from event_proposals where status = 'pending') as proposals
     `),
     db().execute(sql`

@@ -373,6 +373,30 @@ describe('memory tools', () => {
     await call(memoryTools(ctx), 'forget', { id: (filtered.memories as { id: number }[])[0].id })
     expect((await call(memoryTools(ctx), 'recall', {})).memories).toHaveLength(1)
   })
+
+  it('turns away a fact that is already known, reworded', async () => {
+    const first = await call(memoryTools(ctx), 'remember', { fact: 'bin night is Monday' })
+    const again = await call(memoryTools(ctx), 'remember', { fact: 'Bin night is Monday by the way' })
+    expect(again.stored).toBe(false)
+    expect(again.already_known).toMatchObject({ id: first.id })
+    expect((await call(memoryTools(ctx), 'recall', {})).memories).toHaveLength(1)
+  })
+
+  it('stores a related fact but points at what it may supersede', async () => {
+    const old = await call(memoryTools(ctx), 'remember', { fact: 'bin night is Tuesday' })
+    const fresh = await call(memoryTools(ctx), 'remember', { fact: 'bin night is Monday' })
+    expect(fresh.stored).toBe('bin night is Monday')
+    expect(fresh.possibly_overlapping).toEqual([{ id: old.id, fact: 'bin night is Tuesday' }])
+    expect((await call(memoryTools(ctx), 'recall', {})).memories).toHaveLength(2)
+  })
+
+  it('replaces the old fact when told which one a correction supersedes', async () => {
+    const old = await call(memoryTools(ctx), 'remember', { fact: 'bin night is Tuesday' })
+    const fresh = await call(memoryTools(ctx), 'remember', { fact: 'bin night is Monday', replaces: old.id })
+    expect(fresh.replaced).toBe(old.id)
+    const left = (await call(memoryTools(ctx), 'recall', {})).memories as { id: number }[]
+    expect(left.map((m) => m.id)).toEqual([fresh.id])
+  })
 })
 
 describe('automation tools', () => {

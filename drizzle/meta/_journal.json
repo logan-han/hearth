@@ -15,6 +15,13 @@
       "when": 1788342181310,
       "tag": "0001_watcher_kind",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788343100721,
+      "tag": "0002_memory_history",
+      "breakpoints": true
     }
   ]
 }

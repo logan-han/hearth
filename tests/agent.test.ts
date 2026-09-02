@@ -55,7 +55,7 @@ describe('systemPrompt', () => {
   it('leaves proactive memory filing to the nightly pass, and keeps corrections in the chat', () => {
     const p = systemPrompt({ ...base, chatType: 'group' })
     expect(p).toContain('Do not file facts on your own initiative')
-    expect(p).toContain('forget the old id first')
+    expect(p).toContain('pass the old id as replaces')
   })
 
   it('speaks the household language and units', () => {
@@ -375,7 +375,7 @@ describe('per-mode prompts', () => {
   it('gives the sweep only the memory rules', () => {
     const p = systemPrompt({ ...base, mode: 'sweep', chatType: 'private' })
     expect(p).toContain('nightly memory pass')
-    expect(p).toContain('forget the old id and remember the new fact')
+    expect(p).toContain('replaces set to the old id')
     expect(p).not.toContain('send_email')
   })
 })

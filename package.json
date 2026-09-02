@@ -15,7 +15,8 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "set-webhook": "tsx scripts/set-webhook.ts",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "evals": "vitest run --config vitest.evals.config.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.43",

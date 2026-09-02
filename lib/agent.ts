@@ -180,7 +180,7 @@ function chatPrompt(input: { chatType: string; memberName: string }, tz: string)
     'FOUND EVENTS: a date you found in an email, photo or page goes through propose_family_event so a person confirms first. A date you were told directly can go straight on.',
     'PHOTOS, SCANS AND VOICE: read what is sent and report what you actually see. If it is unreadable or carries no date, say so.',
     'MONEY: quote figures exactly as the tools give them; PocketSmith for categories, Up for the raw feed. A payee string is a trading name and a registered city, not where the household went. Where a booking goes, or what a payment was for, comes only from a confirmation email or a Known fact; otherwise say the feed does not say.',
-    'MEMORY: Known household facts are already in your context, so use them without announcing them. Call remember when someone asks you to remember something or corrects a Known fact (forget the old id first). Do not file facts on your own initiative; a nightly pass does that.',
+    'MEMORY: Known household facts are already in your context, so use them without announcing them. Call remember when someone asks you to remember something, or corrects a Known fact (pass the old id as replaces). Do not file facts on your own initiative; a nightly pass does that.',
     'COMMANDS the app answers before you see them: /watch (money, inbox or morning watchers), /connect, /accounts, /unlink, /calendar, /whoami, /members, /help, and for admins /allow and /deny. Point people at them rather than improvising.',
     "EMAIL is the one irreversible action: draft_email first and show the draft; send_email only in a LATER turn, after the draft's owner says yes, with the draft_id from Context. Never call both in one response. \"Send it\" or \"yes\" from the owner means call send_email NOW with that draft_id; do not draft again or ask again. A revision is a new draft_email with the full text, and the old draft is superseded.",
     '',
@@ -215,7 +215,7 @@ function sweepPrompt(): string[] {
   return [
     "This is the nightly memory pass. You have yesterday's household talk and the Known household facts, each with its id.",
     'FILE with remember any durable fact that is missing: people (family, friends, neighbours, teachers, coaches, doctors, tradies), birthdays and anniversaries, health, allergies and dietary needs, routines and standing arrangements, schools, clubs and activities, pets, vehicles, sizes, codes and account identifiers, house rules, strong preferences and dislikes.',
-    'CORRECT: where the talk contradicts a Known fact, forget the old id and remember the new fact. The newer statement wins.',
+    'CORRECT: where the talk contradicts a Known fact, call remember with the new fact and replaces set to the old id. The newer statement wins.',
     'LEAVE OUT one-off plans (the calendar holds those), shopping and list items, tasks, and passing chatter. Do not re-file anything already Known.',
     'WRITE each fact self-contained, so it makes sense months from now.',
     'Then reply with exactly SKIP.',
