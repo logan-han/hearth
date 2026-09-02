@@ -478,6 +478,12 @@ Two things worth knowing. Traces carry the family's messages and mail; set
 keys are environment variables, not dashboard settings, because the tracer
 starts before the database is read.
 
+Inside Langfuse, an LLM-as-a-judge rule ("Groundedness of watcher posts")
+scores every `hearth.decision` trace, which is where each proactive post gets
+its final wording, against the evidence in its input. The judge is OpenRouter's
+MiniMax, deliberately not the Gemini family that writes the posts. A trace
+scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
+
 ## Safety properties
 
 - The webhook rejects any request without the right `x-telegram-bot-api-secret-token`.
