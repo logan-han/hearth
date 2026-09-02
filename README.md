@@ -44,6 +44,14 @@ Telegram retries any webhook it does not get an ack for within seconds, so
 `/api/telegram` validates, acks, and finishes the work in `waitUntil()` under
 Vercel Fluid compute (300 s ceiling).
 
+A chat turn does not see all 46 tools. About twenty are always in reach (search,
+weather, lists, the shared calendar and its proposals, memory); mail, personal
+calendar, money, Notion, Jira and automations are switched on by cues in the
+message, and the model can unlock any group itself with `more_tools`. Fewer
+tools per call is one of the better-evidenced ways to keep a small model
+picking the right one. Watchers and the nightly memory pass get a fixed short
+list instead.
+
 ## Layout
 
 | Path | What it is |
@@ -64,6 +72,7 @@ Vercel Fluid compute (300 s ceiling).
 | `lib/watchers.ts` | The ready-made watchers: schedule, phrasing rules, context tools |
 | `lib/model.ts` | Tiered model chain: local, Gemini, OpenRouter |
 | `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations |
+| `lib/tools/router.ts` | Which tool groups a chat turn sees, and the `more_tools` escape hatch |
 | `lib/providers/` | Gmail and Microsoft Graph behind one interface |
 | `lib/db/` | Drizzle schema and queries |
 | `lib/crypto.ts` | AES-256-GCM for refresh tokens at rest |

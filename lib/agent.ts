@@ -9,7 +9,7 @@ import {
 } from 'ai'
 import { z } from 'zod'
 import { withModelFallback, gateSlot, type ModelSlot } from './model'
-import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, type ToolName } from './tools'
+import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
 import type { ToolContext } from './tools/context'
 import { recentMessages, listMemories, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals } from './db/queries'
 import type { Member } from './db/schema'
@@ -77,12 +77,14 @@ function defaultTools(mode: AgentMode): ToolName[] | undefined {
  * and looks facts up with `recall` when a payee or sender calls for it; the
  * sweep gets every memory, because deduplicating against them is its job.
  */
-async function ambientContext(chatId: string, member: Member | null, mode: AgentMode): Promise<string> {
-  if (mode === 'watcher') return ''
+type Ambient = { text: string; pendingDrafts: boolean }
+
+async function ambientContext(chatId: string, member: Member | null, mode: AgentMode): Promise<Ambient> {
+  if (mode === 'watcher') return { text: '', pendingDrafts: false }
   if (mode === 'sweep') {
     const memories = await listMemories(SWEEP_MEMORY_LIMIT).catch(() => [])
-    if (memories.length === 0) return ''
-    return ['Known household facts:', ...memories.map((m) => `- [${m.id}] ${m.content}`)].join('\n')
+    if (memories.length === 0) return { text: '', pendingDrafts: false }
+    return { text: ['Known household facts:', ...memories.map((m) => `- [${m.id}] ${m.content}`)].join('\n'), pendingDrafts: false }
   }
 
   const [memories, members, connections, drafts, proposals] = await Promise.all([
@@ -124,7 +126,7 @@ async function ambientContext(chatId: string, member: Member | null, mode: Agent
     lines.push('Known household facts:')
     lines.push(...memories.map((m) => `- [${m.id}] ${m.content}`))
   }
-  return lines.join('\n')
+  return { text: lines.join('\n'), pendingDrafts: drafts.length > 0 }
 }
 
 /** A caption-less photo still needs something for the model to act on. */
@@ -177,7 +179,7 @@ function chatPrompt(input: { chatType: string; memberName: string }, tz: string)
     'REPLY: a couple of sentences, the answer only. No preamble, no restating the question, no account of what you searched or discarded.',
     `FORMAT: **bold**, *italic*, \`code\` and - bullets only; no headings or tables. Write in ${language()} with ${units()} units, and read and write every time as ${tz}.`,
     'GROUNDING: state only what a tool result, the chat history or a Known household fact says. When a detail is missing, say it is not stated and offer to find it. Search when a current fact matters (hours, prices, news); weather questions go to the weather tool.',
-    'TOOLS: when a tool covers a request, call it rather than saying you cannot. Email and personal calendar tools act on the person who just spoke. Household-wide events go on the SHARED calendar with add_family_event. Running lists live in the list tools. Open links with read_url and read what is there. An email missing from the inbox may be archived: search with list_email and a query.',
+    'TOOLS: when a tool covers a request, call it rather than saying you cannot. If the tool you need is not in your list, call more_tools with its group (mail, personal_calendar, money, notion, jira, automations) and use it in the next step. Email and personal calendar tools act on the person who just spoke. Household-wide events go on the SHARED calendar with add_family_event. Running lists live in the list tools. Open links with read_url and read what is there. An email missing from the inbox may be archived: search with list_email and a query.',
     'FOUND EVENTS: a date you found in an email, photo or page goes through propose_family_event so a person confirms first. A date you were told directly can go straight on.',
     'PHOTOS, SCANS AND VOICE: read what is sent and report what you actually see. If it is unreadable or carries no date, say so.',
     'MONEY: quote figures exactly as the tools give them; PocketSmith for categories, Up for the raw feed. A payee string is a trading name and a registered city, not where the household went. Where a booking goes, or what a payment was for, comes only from a confirmation email or a Known fact; otherwise say the feed does not say.',
@@ -304,7 +306,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     notices: [],
   }
 
-  const [context, history] = await Promise.all([
+  const [ambient, history] = await Promise.all([
     ambientContext(input.chatId, input.member, mode),
     input.history === false
       ? Promise.resolve([] as ModelMessage[])
@@ -326,7 +328,12 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     : `${input.memberName}: ${said}`
 
   const messages: ModelMessage[] = [...history, { role: 'user', content }]
+  const context = ambient.text
   const activeTools = input.tools ?? defaultTools(mode)
+  // A chat turn routes: the core set plus the groups its wording calls for,
+  // widened by any more_tools call the model makes along the way.
+  const routing = mode === 'chat' && !input.tools
+  const initialGroups = routing ? routeGroups(input.text, { pendingDrafts: ambient.pendingDrafts }) : []
   const settings = MODE_SETTINGS[mode]
   const reasoning = reasoningLevel()
 
@@ -337,7 +344,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         sessionId: input.chatId,
         ...(input.member ? { userId: input.member.telegramUserId } : {}),
         tags: [mode, input.chatType],
-        metadata: { model: slot.name },
+        metadata: { model: slot.name, ...(routing ? { tool_groups: initialGroups.join(',') || 'core' } : {}) },
       },
       () =>
         generateText({
@@ -346,6 +353,9 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           messages,
           tools: buildTools(ctx),
           ...(activeTools ? { activeTools } : {}),
+          ...(routing
+            ? { prepareStep: ({ steps }) => ({ activeTools: activeToolsFor(groupsAfter(initialGroups, steps)) }) }
+            : {}),
           stopWhen: isStepCount(MAX_STEPS),
           timeout: { stepMs: STEP_TIMEOUT_MS },
           maxOutputTokens: settings.maxOutputTokens,

@@ -11,6 +11,7 @@ import { memoryTools } from './memory'
 import { automationTools } from './automation'
 import { weatherTools } from './weather'
 import { browseTools } from './browse'
+import { routerTools } from './router'
 import type { ToolContext } from './context'
 
 export function buildTools(ctx: ToolContext) {
@@ -28,10 +29,12 @@ export function buildTools(ctx: ToolContext) {
     ...automationTools(ctx),
     ...weatherTools(ctx),
     ...browseTools(ctx),
+    ...routerTools(),
   }
 }
 
 export type { ToolContext }
+export { TOOL_GROUPS, CORE_TOOLS, routeGroups, groupsAfter, activeToolsFor, type ToolGroup } from './router'
 
 export type ToolName = keyof ReturnType<typeof buildTools>
 

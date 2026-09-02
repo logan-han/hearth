@@ -402,10 +402,46 @@ describe('per-mode prompts', () => {
 describe('tool scoping by mode', () => {
   const input = { chatId: '-100', chatType: 'group', member: null, memberName: 'the family', text: 'go', history: false }
 
-  it('leaves every tool open to a chat turn', async () => {
+  it('routes a chat turn: core tools plus the groups its wording calls for', async () => {
     generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, mode: 'chat' })
-    expect(generateText.mock.calls[0][0].activeTools).toBeUndefined()
+    await runAgent({ ...input, mode: 'chat', text: 'how much did we spend this month?' })
+    const call = generateText.mock.calls[0][0]
+    expect(call.activeTools).toBeUndefined()
+    const first: string[] = call.prepareStep({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools
+    expect(first).toContain('spending_summary')
+    expect(first).toContain('web_search')
+    expect(first).toContain('more_tools')
+    expect(first).not.toContain('list_email')
+    expect(first).not.toContain('jira_search')
+  })
+
+  it('widens a chat turn when the model asks for more tools', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    await runAgent({ ...input, mode: 'chat', text: 'what did the school say about sports day?' })
+    const prepare = generateText.mock.calls[0][0].prepareStep
+    const before: string[] = prepare({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools
+    expect(before).not.toContain('list_email')
+    const after: string[] = prepare({
+      steps: [{ toolCalls: [{ toolName: 'more_tools', input: { group: 'mail' } }] }],
+      stepNumber: 1, model: {}, messages: [],
+    }).activeTools
+    expect(after).toContain('list_email')
+    expect(after).toContain('read_email')
+  })
+
+  it('opens the mail tools when a draft is waiting, whatever the wording', async () => {
+    const m = await q.upsertMember('111', 'Logan', { allowed: true })
+    await q.createDraft({ chatId: '-100', memberId: m.id, provider: 'google', to: ['x@y.com'], subject: 'Hi', body: 'b' })
+    generateText.mockResolvedValue(reply('ok'))
+    await runAgent({ ...input, mode: 'chat', member: m, text: 'yes send it' })
+    const first: string[] = generateText.mock.calls[0][0].prepareStep({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools
+    expect(first).toContain('send_email')
+  })
+
+  it('does not route watchers or the sweep', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    await runAgent({ ...input, mode: 'watcher', text: 'how much did we spend?' })
+    expect(generateText.mock.calls[0][0].prepareStep).toBeUndefined()
   })
 
   it('gives the sweep only the memory tools', async () => {

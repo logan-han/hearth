@@ -16,7 +16,15 @@ const STUBS = vi.hoisted(() => ({
   spending_summary: () => ({ error: 'PocketSmith is not configured.' }),
   list_calendar: () => ({ events: [] }),
   list_family_events: () => ({ timezone: 'Australia/Melbourne', events: [] }),
-  list_email: () => ({ accounts: [{ provider: 'google', messages: [] }] }),
+  list_email: () => ({
+    accounts: [{ provider: 'google', messages: [
+      { id: 'm1', from: 'office@northcoteps.vic.edu.au', subject: 'Sports Day', snippet: 'Dear families, Sports Day is on Wednesday 10 September...', date: '2026-09-01T08:10:00+10:00' },
+    ] }],
+  }),
+  read_email: () => ({
+    id: 'm1', from: 'office@northcoteps.vic.edu.au', subject: 'Sports Day', date: '2026-09-01T08:10:00+10:00',
+    body: 'Dear families, Sports Day is on Wednesday 10 September 2026 from 9am to 12pm at the school oval. Students wear house colours.',
+  }),
   web_search: () => ({ answer: null, results: [] }),
 }))
 vi.mock('@/lib/tools', async (orig) => {
@@ -55,6 +63,35 @@ describe.skipIf(!liveChainConfigured())('chat grounding', () => {
       expect(g.score).toBeGreaterThanOrEqual(0.9)
       expect(u.score).toBeGreaterThanOrEqual(0.5)
     }
+  })
+
+  it('reaches the mail tools from an email cue and reads the date off the notice', async () => {
+    const logan = await q.upsertMember('111', 'Logan', { allowed: true })
+    await q.saveConnection({ memberId: logan.id, provider: 'google', email: 'logan@example.com', refreshToken: 'r', scopes: null })
+    const text = 'did the school email say when sports day is?'
+    const r = await runAgent({ chatId: '111', chatType: 'private', member: logan, memberName: 'Logan', text })
+    const usedMail = calls.some((c) => c.tool === 'list_email' || c.tool === 'read_email')
+    const hard = usedMail && /10 sep|september 10|10\/09|wednesday 10/i.test(r.text) && noLeak(r.text) && !CLOCK_TIME.test(r.text.replace(/9\s?am|12\s?pm|9:00|12:00/gi, ''))
+    const g = await judgeGroundedness({ answer: r.text, context: context() })
+    record({ case: 'chat: email cue routes to mail', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
+    expect(usedMail).toBe(true)
+    expect(r.text).toMatch(/10 sep|september 10|10\/09|wednesday 10/i)
+    expect(noLeak(r.text)).toBe(true)
+  })
+
+  it('unlocks the mail tools itself when the wording gave no cue', async () => {
+    const logan = await q.upsertMember('111', 'Logan', { allowed: true })
+    await q.saveConnection({ memberId: logan.id, provider: 'google', email: 'logan@example.com', refreshToken: 'r', scopes: null })
+    const text = 'what did the school say about sports day?'
+    const r = await runAgent({ chatId: '111', chatType: 'private', member: logan, memberName: 'Logan', text })
+    const unlocked = calls.some((c) => c.tool === 'more_tools' && (c.input as { group?: string }).group === 'mail')
+    const usedMail = calls.some((c) => c.tool === 'list_email' || c.tool === 'read_email')
+    const hard = unlocked && usedMail && /10 sep|september 10|wednesday 10/i.test(r.text) && noLeak(r.text)
+    const g = await judgeGroundedness({ answer: r.text, context: context() })
+    record({ case: 'chat: more_tools escape hatch', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: `${calls.map((c) => c.tool).join('>')} | ${r.text.slice(0, 60)}` })
+    expect(unlocked).toBe(true)
+    expect(usedMail).toBe(true)
+    expect(noLeak(r.text)).toBe(true)
   })
 
   it('says an appointment is not on record rather than making one up', async () => {
