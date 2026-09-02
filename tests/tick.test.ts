@@ -4,6 +4,12 @@ import type { Automation } from '@/lib/db/schema'
 const dueAutomations = vi.fn<(now: Date) => Promise<Automation[]>>()
 const claimAutomation = vi.fn<(id: number, expected: Date, next: Date | null) => Promise<boolean>>()
 const runAgent = vi.fn()
+const decideWatcherPost = vi.fn()
+const newTransactions = vi.fn()
+const newMail = vi.fn()
+const listEvents = vi.fn()
+const boardSummary = vi.fn()
+const weatherTool = vi.fn()
 const send = vi.fn<(chatId: string, text: string) => Promise<void>>()
 const verify = vi.fn<() => Promise<boolean>>()
 const insertValues = vi.fn()
@@ -25,7 +31,16 @@ vi.mock('@/lib/db/queries', () => ({
     { id: 9, telegramUserId: '900', name: 'Boss', isAdmin: true, allowed: true },
   ]),
 }))
-vi.mock('@/lib/agent', () => ({ runAgent }))
+vi.mock('@/lib/agent', () => ({ runAgent, decideWatcherPost }))
+vi.mock('@/lib/tools', () => ({
+  buildTools: () => ({
+    new_transactions: { execute: newTransactions },
+    new_mail: { execute: newMail },
+    list_family_events: { execute: listEvents },
+    jira_board_summary: { execute: boardSummary },
+    weather: { execute: weatherTool },
+  }),
+}))
 vi.mock('@/lib/telegram', () => ({ send }))
 vi.mock('@upstash/qstash', () => ({ Receiver: class { verify = verify } }))
 vi.mock('@/lib/db', () => ({
@@ -46,6 +61,7 @@ function automation(over: Partial<Automation> = {}): Automation {
     label: 'bin night',
     cronExpr: '0 19 * * 1',
     instruction: 'Remind everyone to put the bins out.',
+    kind: null,
     nextRunAt: new Date('2026-09-07T09:00:00Z'),
     lastRunAt: null,
     enabled: true,
@@ -61,6 +77,7 @@ function tick(headers: Record<string, string> = {}) {
 beforeEach(() => {
   vi.clearAllMocks()
   vi.spyOn(console, 'error').mockImplementation(() => {})
+  vi.spyOn(console, 'info').mockImplementation(() => {})
   vi.spyOn(console, 'warn').mockImplementation(() => {})
   for (const k of ['QSTASH_CURRENT_SIGNING_KEY', 'QSTASH_NEXT_SIGNING_KEY', 'TICK_SECRET']) {
     delete process.env[k]
@@ -69,6 +86,12 @@ beforeEach(() => {
   dueAutomations.mockResolvedValue([])
   claimAutomation.mockResolvedValue(true)
   runAgent.mockResolvedValue({ text: 'Bins out tonight.', notices: [], model: 'primary:test' })
+  decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.9, model: 'primary:test' })
+  newTransactions.mockResolvedValue({ account: '2Up', count: 0, transactions: [] })
+  newMail.mockResolvedValue({ accounts: [] })
+  listEvents.mockResolvedValue({ events: [] })
+  boardSummary.mockResolvedValue({ error: 'Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).' })
+  weatherTool.mockResolvedValue({ error: 'Weather is not configured (OPENWEATHER_API_KEY missing).' })
   // The nightly memory pass reports done-for-today by default, so ordinary
   // tests never depend on what the wall clock says.
   messagesSince.mockResolvedValue([])
@@ -254,9 +277,10 @@ describe('running due automations', () => {
       ] as never)
       await authed()
       expect(setSetting).toHaveBeenCalledWith('memory_sweep_day', expect.any(String))
-      const prompt = (runAgent.mock.calls.at(-1)![0] as { text: string }).text
-      expect(prompt).toContain('Nightly memory pass')
-      expect(prompt).toContain('Bin night is Monday')
+      const call = runAgent.mock.calls.at(-1)![0] as { text: string; mode: string }
+      expect(call.text).toContain('Nightly memory pass')
+      expect(call.text).toContain('Bin night is Monday')
+      expect(call.mode).toBe('sweep')
       expect(send).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
@@ -306,5 +330,180 @@ describe('running due automations', () => {
     dueAutomations.mockResolvedValue([automation()])
     await authed()
     expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ history: false }))
+  })
+})
+
+describe('the post decision', () => {
+  beforeEach(() => {
+    process.env.TICK_SECRET = 'let-me-in'
+    dueAutomations.mockResolvedValue([automation()])
+  })
+  const authed = () => tick({ 'x-tick-secret': 'let-me-in' })
+
+  it('checks the draft against the instruction and the tool results', async () => {
+    runAgent.mockResolvedValue({ text: 'Bins out tonight.', notices: [], model: 'primary:test', evidence: 'recall({}) -> {"memories":[]}' })
+    await authed()
+    expect(decideWatcherPost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        label: 'bin night',
+        draft: 'Bins out tonight.',
+        evidence: expect.stringContaining('Remind everyone to put the bins out.'),
+      }),
+    )
+    expect((decideWatcherPost.mock.calls[0][0] as { evidence: string }).evidence).toContain('recall({})')
+    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
+  })
+
+  it('holds a draft back when the decision is skip', async () => {
+    decideWatcherPost.mockResolvedValue({ decision: 'skip', confidence: 0.8, model: 'primary:test', reason: 'nothing the household needs' })
+    await authed()
+    expect(send).not.toHaveBeenCalled()
+    expect(insertValues).not.toHaveBeenCalled()
+  })
+
+  it('holds a draft back when the decision is not confident enough', async () => {
+    decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.4, model: 'primary:test' })
+    await authed()
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('posts the rewritten message when the decision offers one', async () => {
+    decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.95, message: 'Bins out tonight, recycling week.', model: 'primary:test' })
+    await authed()
+    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight, recycling week.')
+  })
+
+  it('posts the draft unchecked and warns an admin when the decision itself fails', async () => {
+    decideWatcherPost.mockRejectedValue(new Error('No object generated'))
+    await authed()
+    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('post decision failed'))
+  })
+
+  it('never puts a tool notice through the decision', async () => {
+    runAgent.mockResolvedValue({ text: 'SKIP', notices: ['Added to the family calendar: **Sports day**'], model: 'primary:test' })
+    await authed()
+    expect(decideWatcherPost).not.toHaveBeenCalled()
+    expect(send).toHaveBeenCalledWith('-100999', 'Added to the family calendar: **Sports day**')
+  })
+
+  it('gives a custom automation the watcher prompt with read-only tools', async () => {
+    await authed()
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ mode: 'watcher', history: false }))
+    expect((runAgent.mock.calls[0][0] as { tools?: unknown }).tools).toBeUndefined()
+  })
+})
+
+describe('ready-made watchers', () => {
+  beforeEach(() => {
+    process.env.TICK_SECRET = 'let-me-in'
+  })
+  const authed = () => tick({ 'x-tick-secret': 'let-me-in' })
+  const money = (over: Partial<Automation> = {}) => automation({ kind: 'money', label: '2Up transactions', ...over })
+
+  it('skips a money check in code when nothing is new, with no model call', async () => {
+    dueAutomations.mockResolvedValue([money()])
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
+    expect(newTransactions).toHaveBeenCalledWith(expect.objectContaining({ account: '2up' }), expect.anything())
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(decideWatcherPost).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('hands new transactions to the model as data, with only the context tools, then posts once approved', async () => {
+    dueAutomations.mockResolvedValue([money()])
+    newTransactions.mockResolvedValue({
+      account: '2Up', count: 1,
+      transactions: [{ description: 'CHEAPTICKETS SEATTLE', amount: '$412.30', when: 'Tue 26 Aug 2026, 14:02', status: 'SETTLED', by: 'Logan' }],
+    })
+    runAgent.mockResolvedValue({ text: '2Up: **$412.30** CHEAPTICKETS SEATTLE, Tue 26 Aug. Purpose not recorded.', notices: [], model: 'primary:test' })
+    await authed()
+    const call = runAgent.mock.calls[0][0] as { mode: string; tools: string[]; text: string; chatType: string }
+    expect(call.mode).toBe('watcher')
+    expect(call.tools).toEqual(['recall', 'list_family_events', 'list_email'])
+    expect(call.chatType).toBe('group')
+    expect(call.text).toContain('CHEAPTICKETS SEATTLE')
+    expect(call.text).toContain('purpose not recorded')
+    expect(call.text).not.toContain('likely is')
+    const decision = decideWatcherPost.mock.calls[0][0] as { evidence: string }
+    expect(decision.evidence).toContain('$412.30')
+    expect(send).toHaveBeenCalledWith('-100999', '2Up: **$412.30** CHEAPTICKETS SEATTLE, Tue 26 Aug. Purpose not recorded.')
+  })
+
+  it('tells an admin when the money fetch errors, and leaves the chat alone', async () => {
+    dueAutomations.mockResolvedValue([money()])
+    newTransactions.mockResolvedValue({ error: 'Up Bank is not configured.' })
+    await authed()
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('Up Bank is not configured'))
+    expect(runAgent).not.toHaveBeenCalled()
+  })
+
+  it('sweeps every mailbox from a group and only the owner\'s from a DM', async () => {
+    dueAutomations.mockResolvedValue([
+      automation({ id: 1, kind: 'inbox', label: 'Family inbox sweep', chatId: '-100999' }),
+      automation({ id: 2, kind: 'inbox', label: "Logan's inbox", chatId: '111' }),
+    ])
+    await authed()
+    expect(newMail).toHaveBeenNthCalledWith(1, expect.objectContaining({ everyone: true }), expect.anything())
+    expect(newMail).toHaveBeenNthCalledWith(2, expect.objectContaining({ everyone: false }), expect.anything())
+    expect(runAgent).not.toHaveBeenCalled()
+  })
+
+  it('phrases new mail with the mail tools and asks whose mailbox it came from in a group', async () => {
+    dueAutomations.mockResolvedValue([automation({ kind: 'inbox', label: 'Family inbox sweep' })])
+    newMail.mockResolvedValue({
+      accounts: [{ member: 'Yuna', provider: 'microsoft', first_check: false, messages: [{ id: 'm1', from: 'school', subject: 'Sports day', snippet: 'Wed 10 Sep', date: '2026-09-01' }] }],
+    })
+    runAgent.mockResolvedValue({ text: 'Yuna: school says sports day is Wed 10 Sep.', notices: [], model: 'primary:test' })
+    await authed()
+    const call = runAgent.mock.calls[0][0] as { tools: string[]; text: string }
+    expect(call.tools).toEqual(['read_email', 'propose_family_event', 'list_family_events', 'recall'])
+    expect(call.text).toContain('whose mailbox')
+    expect(call.text).toContain('Sports day')
+    expect(send).toHaveBeenCalledWith('-100999', 'Yuna: school says sports day is Wed 10 Sep.')
+  })
+
+  it('reports a broken mailbox to an admin but still phrases the rest', async () => {
+    dueAutomations.mockResolvedValue([automation({ kind: 'inbox', label: 'Family inbox sweep' })])
+    newMail.mockResolvedValue({
+      accounts: [
+        { member: 'Yuna', provider: 'microsoft', error: 'token revoked' },
+        { member: 'Logan', provider: 'google', first_check: false, messages: [{ id: 'm2', from: 'clinic', subject: 'Appointment', snippet: 'Fri', date: '2026-09-01' }] },
+      ],
+    })
+    await authed()
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('token revoked'))
+    expect(runAgent).toHaveBeenCalled()
+  })
+
+  it('skips the morning brief when nothing is on and nothing is due, and treats missing integrations as settings', async () => {
+    dueAutomations.mockResolvedValue([automation({ kind: 'morning', label: 'Morning brief' })])
+    await authed()
+    expect(listEvents).toHaveBeenCalledWith(expect.objectContaining({ include_cancelled: false }), expect.anything())
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('briefs the day when something is on, with weather included only when it worked', async () => {
+    dueAutomations.mockResolvedValue([automation({ kind: 'morning', label: 'Morning brief' })])
+    listEvents.mockResolvedValue({ events: [{ id: 1, title: 'Swimming', start_local: 'Wed 3 Sep 2026, 09:00' }] })
+    weatherTool.mockResolvedValue({ place: 'Melbourne', now: { summary: 'Rain' } })
+    runAgent.mockResolvedValue({ text: 'Swimming at 9am; take an umbrella, rain is forecast.', notices: [], model: 'primary:test' })
+    await authed()
+    const call = runAgent.mock.calls[0][0] as { text: string; tools: string[] }
+    expect(call.text).toContain('Swimming')
+    expect(call.text).toContain('Rain')
+    expect(call.text).not.toContain('not configured')
+    expect(call.tools).toEqual(['recall'])
+    expect(send).toHaveBeenCalledWith('-100999', 'Swimming at 9am; take an umbrella, rain is forecast.')
+  })
+
+  it('briefs on an overdue board item even with an empty calendar', async () => {
+    dueAutomations.mockResolvedValue([automation({ kind: 'morning', label: 'Morning brief' })])
+    boardSummary.mockResolvedValue({ project: 'HTL', open: 3, overdue: [{ key: 'HTL-344', summary: 'Pay rates' }] })
+    await authed()
+    expect(runAgent).toHaveBeenCalled()
+    expect((runAgent.mock.calls[0][0] as { text: string }).text).toContain('HTL-344')
   })
 })

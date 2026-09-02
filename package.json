@@ -18,7 +18,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@ai-sdk/openai-compatible": "^3.0.39",
+    "@ai-sdk/openai-compatible": "^3.0.43",
     "@neondatabase/serverless": "^1.1.0",
     "@upstash/qstash": "^2.11.3",
     "@vercel/functions": "^3.9.5",

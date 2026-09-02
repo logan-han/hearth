@@ -53,3 +53,18 @@ export function language(): string {
 export function units(): 'metric' | 'imperial' {
   return (process.env.UNITS ?? '').toLowerCase() === 'imperial' ? 'imperial' : 'metric'
 }
+
+const REASONING_LEVELS = ['none', 'minimal', 'low', 'medium', 'high'] as const
+export type ReasoningLevel = (typeof REASONING_LEVELS)[number]
+
+/**
+ * How hard the model may think before answering, passed through as the
+ * OpenAI-compatible `reasoning_effort`. Unset means the provider's default.
+ * Gemini's compatibility layer silently ignores values it does not know and
+ * cannot switch thinking off on Gemini 3 models, so treat a change here as
+ * something to verify from token counts, not assume.
+ */
+export function reasoningLevel(): ReasoningLevel | undefined {
+  const v = (process.env.LLM_REASONING ?? '').trim().toLowerCase()
+  return (REASONING_LEVELS as readonly string[]).includes(v) ? (v as ReasoningLevel) : undefined
+}

@@ -295,6 +295,7 @@ export async function addAutomation(input: {
   label: string
   cronExpr: string
   instruction: string
+  kind?: string | null
   nextRunAt: Date
 }) {
   const [row] = await db().insert(automations).values({
@@ -303,6 +304,7 @@ export async function addAutomation(input: {
     label: input.label,
     cronExpr: input.cronExpr,
     instruction: input.instruction,
+    kind: input.kind ?? null,
     nextRunAt: input.nextRunAt,
   }).returning()
   return row

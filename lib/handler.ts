@@ -23,6 +23,7 @@ import {
 } from './db/queries'
 import { nextRun, formatLocal } from './cron'
 import { connectLink } from './oauth/state'
+import { WATCHERS, isWatcherKind } from './watchers'
 import type { Member } from './db/schema'
 
 /**
@@ -150,44 +151,6 @@ async function cleanText(text: string): Promise<string> {
   return text.replace(new RegExp(`@${self.username}`, 'gi'), '').trim()
 }
 
-/**
- * Ready-made watchers: the proactive half of the bot, one message to switch
- * on. Each is an ordinary automation, so /watch list, pausing and deleting all
- * work the same as anything scheduled by hand — and each instruction ends by
- * earning its silence, so a quiet run posts nothing.
- */
-const WATCHERS: Record<string, { label: string; cron: string; instruction: string; needs?: string }> = {
-  money: {
-    label: '2Up transactions',
-    cron: '0 9-22 * * *',
-    instruction:
-      'Call new_transactions on account "2up". If it returns any, post them — but explain, don\'t relay: ' +
-      'say what each one likely is in household terms (the school, the mechanic, groceries), and point out anything ' +
-      'notable — unusually large, a new merchant, a possible duplicate, a refund. If something stands out, you may pull ' +
-      'quick context (recent spending, known household facts) before posting. The family can read raw amounts in their ' +
-      'banking app; your job is the sentence that makes sense of them. If there are none, SKIP.',
-  },
-  inbox: {
-    label: 'Inbox sweep',
-    cron: '45 7 * * *',
-    needs: 'a linked email account (send /connect first)',
-    instruction:
-      'Call new_mail. To read a full message found in someone else\'s mailbox, use read_email with of: their name. Mention only what the household would actually care about: appointments, school notices, bills, ' +
-      'deliveries, bookings. For each, say why it matters and what needs doing, not just that it arrived. ' +
-      'Propose any calendar-worthy dates with propose_family_event. Ignore newsletters and promotions. ' +
-      'If there is nothing new, or nothing worth mentioning, SKIP.',
-  },
-  morning: {
-    label: 'Morning brief',
-    cron: '0 7 * * 1-5',
-    instruction:
-      "List today's family calendar events with list_family_events, any Jira tasks due today or overdue if Jira is configured, " +
-      "and the day's weather via the weather tool if it is configured. " +
-      'Post one short brief for the day, flagging anything that needs preparation — a form, a payment, an umbrella, an early start. ' +
-      'If there is nothing on, nothing due and no weather worth a warning, SKIP.',
-  },
-}
-
 async function handleWatch(c: TelegramContext, member: Member): Promise<void> {
   const which = c.text.split(/\s+/)[1]?.toLowerCase()
   const existing = await listAutomations(c.chatId)
@@ -208,7 +171,7 @@ async function handleWatch(c: TelegramContext, member: Member): Promise<void> {
     return
   }
 
-  const watcher = which ? WATCHERS[which] : undefined
+  const watcher = isWatcherKind(which) ? WATCHERS[which] : undefined
   if (!watcher) {
     await send(
       c.chatId,
@@ -229,15 +192,14 @@ async function handleWatch(c: TelegramContext, member: Member): Promise<void> {
   }
 
   // An inbox watcher in the family group sweeps everyone's linked mailboxes;
-  // in a DM it is personal, bound to whoever switched it on.
+  // in a DM it is personal, bound to whoever switched it on. The tick route
+  // fetches the mail itself; the instruction only says how to phrase it.
   let label = watcher.label
   let instruction = watcher.instruction
-  if (which === 'inbox') {
+  if (watcher.kind === 'inbox') {
     if (c.chatType !== 'private') {
       label = 'Family inbox sweep'
-      instruction =
-        'Call new_mail with everyone set to true — every linked mailbox in the family, saying whose mailbox each item came from. ' +
-        instruction.replace('Call new_mail. ', '')
+      instruction = `${instruction} Say whose mailbox each item came from.`
       const people = await allMembersWithLinks()
       if (!people.some((m) => m.allowed && m.linked.length > 0)) {
         await send(c.chatId, `That one needs ${WATCHERS.inbox.needs}.`)
@@ -269,6 +231,7 @@ async function handleWatch(c: TelegramContext, member: Member): Promise<void> {
     label,
     cronExpr: watcher.cron,
     instruction,
+    kind: watcher.kind,
     nextRunAt: next,
   })
   await send(

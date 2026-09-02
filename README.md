@@ -58,8 +58,9 @@ Vercel Fluid compute (300 s ceiling).
 | `app/settings/` | Admin: family, keys, model pickers, Telegram webhook |
 | `lib/settings.ts` | Encrypted, DB-backed overrides for a fixed set of keys |
 | `lib/auth/session.ts` | Admin sign-in, and who counts as an admin |
-| `lib/agent.ts` | System prompt, agent loop, ambient gate |
+| `lib/agent.ts` | Per-mode prompts, agent loop, post decision, ambient gate |
 | `lib/handler.ts` | Update parsing, allowlist, commands, reply routing |
+| `lib/watchers.ts` | The ready-made watchers: schedule, phrasing rules, context tools |
 | `lib/model.ts` | Tiered model chain: local, Gemini, OpenRouter |
 | `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations |
 | `lib/providers/` | Gmail and Microsoft Graph behind one interface |
@@ -179,6 +180,12 @@ provider outage, or a model that cannot drive tools all collapse to the same
 behaviour: move to the next slot. Every model in the chain must support tool
 calling.
 
+`LLM_REASONING` (none, minimal, low, medium, high) is passed through as
+`reasoning_effort` when set. Leave it empty for the provider default. Gemini's
+OpenAI-compatible layer ignores values it does not know and cannot switch
+thinking off on Gemini 3 models, so check token counts after changing it rather
+than assuming it took.
+
 ### 5. Deploy
 
 ```bash
@@ -218,8 +225,9 @@ SSO redirect.
 
 In a group, @mention the bot or reply to one of its messages. Every group message
 is stored as context either way. Set `AMBIENT_MODE=on` to let the bot decide for
-itself whether an unaddressed message deserves an answer — the decision is a
-one-word call to the primary (local) model, so it costs nothing.
+itself whether an unaddressed message deserves an answer. The decision is a
+typed choice (reply, stay silent, unsure) from the head of the model chain,
+unsure counts as silence, and every decision is logged.
 
 ## Reading photos, scans and voice notes
 
@@ -255,13 +263,17 @@ and posts **only when there is something worth saying**:
   on the board, flagging what needs preparation.
 - `/watch list` — what this chat is already watching.
 
-Watchers interpret rather than relay: a new transaction arrives with a sentence
-about what it likely is and whether it looks unusual, not just an amount — the
-raw figures are already in the banking app. The commands are registered with
-Telegram, so the `/` menu lists them; nothing to remember. Anything the
-templates don't cover is a sentence away: describe a schedule in plain words
-and it becomes a custom automation, with the same permission to stay silent
-when a run finds nothing.
+Watchers are grounded before they are clever. Each ready-made watcher fetches
+its data in code first, so an hour with nothing new never reaches a model at
+all. When there is something, the model only phrases it, with a handful of
+context tools: a transaction arrives as payee, amount and date, with a purpose
+only when a household fact, calendar entry or email names one, and "purpose not
+recorded" otherwise. A second, tool-free call then decides post or skip against
+the evidence and gives a confidence; anything under 0.7 is held back and
+logged. The commands are registered with Telegram, so the `/` menu lists them;
+nothing to remember. Anything the templates don't cover is a sentence away:
+describe a schedule in plain words and it becomes a custom automation with
+read-only tools, the same right to stay silent, and the same post decision.
 
 ## Sweeping email onto the calendar
 

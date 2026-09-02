@@ -14,10 +14,16 @@ export async function freshDb() {
   const client = new PGlite()
   const db = drizzle(client, { schema })
 
-  const migration = readFileSync(new URL('../../drizzle/0000_init.sql', import.meta.url), 'utf8')
-  for (const statement of migration.split('--> statement-breakpoint')) {
-    const trimmed = statement.trim()
-    if (trimmed) await db.execute(sql.raw(trimmed))
+  // Every migration in journal order, so the test schema is the deployed one.
+  const journal = JSON.parse(
+    readFileSync(new URL('../../drizzle/meta/_journal.json', import.meta.url), 'utf8'),
+  ) as { entries: { tag: string }[] }
+  for (const { tag } of journal.entries) {
+    const migration = readFileSync(new URL(`../../drizzle/${tag}.sql`, import.meta.url), 'utf8')
+    for (const statement of migration.split('--> statement-breakpoint')) {
+      const trimmed = statement.trim()
+      if (trimmed) await db.execute(sql.raw(trimmed))
+    }
   }
 
   __setDb(db)

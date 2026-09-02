@@ -4,18 +4,24 @@ import {
   dueAutomations, claimAutomation, allowedMembers, recordMessage,
   messagesSince, getSetting, setSetting,
 } from '@/lib/db/queries'
-import { localDateKey, tzOffsetMs } from '@/lib/cron'
+import { localDateKey, tzOffsetMs, nextRun } from '@/lib/cron'
 import { timezone } from '@/lib/env'
 import { db, schema } from '@/lib/db'
 import { eq } from 'drizzle-orm'
-import { runAgent } from '@/lib/agent'
-import { nextRun } from '@/lib/cron'
+import { runAgent, decideWatcherPost, type AgentResult } from '@/lib/agent'
+import { buildTools, type ToolName } from '@/lib/tools'
+import type { ToolContext } from '@/lib/tools/context'
+import { WATCHERS, isWatcherKind, type WatcherKind } from '@/lib/watchers'
 import { send } from '@/lib/telegram'
 import { hydrateSecrets } from '@/lib/settings'
+import type { Automation, Member } from '@/lib/db/schema'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
 export const dynamic = 'force-dynamic'
+
+/** A draft posts only when the decision is post and at least this sure. */
+const POST_CONFIDENCE = 0.7
 
 /** QStash signs every delivery; without keys we only accept a manual admin secret. */
 async function authorised(req: Request, body: string): Promise<boolean> {
@@ -70,11 +76,14 @@ const isSkipLine = (line: string) => /^skip[.!]*$/i.test(line.trim())
 /** A marked failure, and nothing else, is what earns an admin a DM. */
 const isProblemLine = (line: string) => /^\**\s*problem\s*\**\s*:/i.test(line.trim())
 
+/** Telegram gives groups negative ids; a private chat's id is the person's own. */
+const isGroupChat = (chatId: string) => chatId.startsWith('-')
+
 /**
  * The nightly memory pass: relying on the chat-turn model to file memories
  * while it is busy answering leaves most facts on the floor, so once a day the
  * previous day's talk is re-read purely for what deserves keeping. One model
- * call, silent, add/update/delete through the ordinary memory tools.
+ * call, silent, with only the memory tools in reach.
  */
 async function maybeConsolidateMemory(now: Date): Promise<void> {
   const localHour = new Date(now.getTime() + tzOffsetMs(now, timezone())).getUTCHours()
@@ -97,19 +106,211 @@ async function maybeConsolidateMemory(now: Date): Promise<void> {
       chatType: 'private',
       member: null,
       memberName: 'the household',
+      mode: 'sweep',
       history: false,
       text:
-        "Nightly memory pass. Below is yesterday's household talk; your Known household facts are in context. " +
-        'Store any durable fact that is missing with `remember`, and where the talk contradicts a known fact, `forget` the old one and `remember` the new (the newer statement wins). ' +
-        'The test for durable is simple: would the household need this again weeks or months from now? Examples, not limits: who people are (family, friends, neighbours, teachers, coaches, doctors, tradies), recurring dates like birthdays and anniversaries, health, allergies and dietary needs, routines and standing arrangements, schools, clubs and activities, pets, vehicles, sizes, codes and account identifiers, house rules, strong preferences and dislikes. ' +
-        'Not durable: one-off plans (the calendar holds those), shopping and list items, tasks, and passing chatter. ' +
-        'Then reply with exactly SKIP.\n\n' +
+        "Nightly memory pass. Yesterday's household talk follows; the Known household facts are in your context.\n\n" +
         transcript,
     })
   } catch (err) {
     // A failed pass costs nothing; tomorrow re-reads a fresh day.
     console.error('[tick] memory pass failed:', err)
   }
+}
+
+type Tools = ReturnType<typeof buildTools>
+
+/** Run one of the agent's own tools directly, the way a model turn would. */
+async function runTool(tools: Tools, name: ToolName, args: unknown): Promise<Record<string, unknown>> {
+  const t = tools[name] as unknown as { execute?: (input: unknown, options: unknown) => Promise<unknown> }
+  if (!t.execute) throw new Error(`${name} cannot run outside a model turn`)
+  const out = await t.execute(args, { toolCallId: `tick-${name}`, messages: [] })
+  return (out ?? {}) as Record<string, unknown>
+}
+
+const errorOf = (r: Record<string, unknown>): string | null => (typeof r.error === 'string' ? r.error : null)
+/** Optional integrations answer "not configured"; that is a setting, not a fault. */
+const isUnconfigured = (err: string | null) => Boolean(err && /not configured/i.test(err))
+
+type Fetched = { data: Record<string, unknown>; empty: boolean; problems: string[] }
+
+/**
+ * The deterministic half of a ready-made watcher: fetch what it watches and
+ * decide in code whether there is anything at all. A quiet hour then costs no
+ * model call and cannot produce a speculative post, and when there is
+ * something, the model only has to phrase what is already in hand.
+ */
+async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tools: Tools): Promise<Fetched> {
+  const problems: string[] = []
+  switch (kind) {
+    case 'money': {
+      const r = await runTool(tools, 'new_transactions', { account: '2up', limit: 20 })
+      const err = errorOf(r)
+      if (err) problems.push(`new_transactions: ${err}`)
+      const transactions = Array.isArray(r.transactions) ? r.transactions : []
+      return { data: { transactions: r }, empty: transactions.length === 0, problems }
+    }
+    case 'inbox': {
+      const r = await runTool(tools, 'new_mail', { limit: 10, everyone: isGroupChat(a.chatId) })
+      const err = errorOf(r)
+      if (err) problems.push(`new_mail: ${err}`)
+      const accounts = Array.isArray(r.accounts) ? (r.accounts as Record<string, unknown>[]) : []
+      let count = 0
+      for (const acct of accounts) {
+        const e = errorOf(acct)
+        if (e) problems.push(`new_mail (${String(acct.member)}, ${String(acct.provider)}): ${e}`)
+        if (Array.isArray(acct.messages)) count += acct.messages.length
+      }
+      return { data: { mail: r }, empty: count === 0, problems }
+    }
+    case 'morning': {
+      const day = localDateKey(ctx.now)
+      const [events, board, weather] = await Promise.all([
+        runTool(tools, 'list_family_events', { from: `${day}T00:00`, to: `${day}T23:59`, include_cancelled: false }),
+        runTool(tools, 'jira_board_summary', {}),
+        runTool(tools, 'weather', {}),
+      ])
+      const eventsErr = errorOf(events)
+      if (eventsErr) problems.push(`list_family_events: ${eventsErr}`)
+      for (const [name, r] of [['jira_board_summary', board], ['weather', weather]] as const) {
+        const e = errorOf(r)
+        if (e && !isUnconfigured(e)) problems.push(`${name}: ${e}`)
+      }
+      const todays = Array.isArray(events.events) ? events.events : []
+      const overdue = Array.isArray(board.overdue) ? board.overdue : []
+      const data: Record<string, unknown> = { events }
+      if (!errorOf(board)) data.board = board
+      if (!errorOf(weather)) data.weather = weather
+      // A day with nothing on and nothing due gets no brief; weather alone is
+      // not news the household needs pushed at it.
+      return { data, empty: todays.length === 0 && overdue.length === 0, problems }
+    }
+  }
+}
+
+async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | undefined): Promise<void> {
+  const now = new Date()
+  const memberName = member?.name ?? 'the family'
+  const ctx: ToolContext = { chatId: a.chatId, member: member ?? null, memberName, now, notices: [] }
+  const tools = buildTools(ctx)
+
+  const fetched = await fetchFor(kind, a, ctx, tools)
+  if (fetched.problems.length) {
+    await tellAdminQuietly(member, `Watcher **${a.label}** hit a problem:\n\n${fetched.problems.join('\n')}`)
+  }
+  if (fetched.empty) {
+    console.info(`[tick] ${a.label}: nothing new, no model call`)
+    return
+  }
+
+  const watcher = WATCHERS[kind]
+  const familyNote = kind === 'inbox' && isGroupChat(a.chatId) ? ' Say whose mailbox each item came from.' : ''
+  const data = JSON.stringify(fetched.data, null, 1)
+  const result = await runAgent({
+    chatId: a.chatId,
+    chatType: isGroupChat(a.chatId) ? 'group' : 'private',
+    member: member ?? null,
+    memberName,
+    mode: 'watcher',
+    tools: watcher.tools,
+    history: false,
+    text: `Scheduled check "${a.label}".\n\n${watcher.instruction}${familyNote}\n\nDATA (fetched just now):\n${data}`,
+  })
+  await deliver(a, member, result, `INSTRUCTION:\n${watcher.instruction}\n\nDATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`)
+}
+
+/** A member's own scheduled instruction: the model decides what to fetch, with read-only tools. */
+async function runCustom(a: Automation, member: Member | undefined): Promise<void> {
+  const result = await runAgent({
+    chatId: a.chatId,
+    chatType: isGroupChat(a.chatId) ? 'group' : 'private',
+    member: member ?? null,
+    memberName: member?.name ?? 'the family',
+    mode: 'watcher',
+    history: false,
+    text:
+      `Scheduled automation "${a.label}" is due now. Carry out this instruction; whatever you write will be posted to the family chat, briefly:\n\n${a.instruction}\n\n` +
+      'If the instruction only wants a post under some condition and that condition is not met (nothing new, nothing to report), reply with exactly SKIP and nothing will be posted. Write nothing beside it: a quiet run needs no explanation of why it was quiet. ' +
+      'If a tool fails or errors, never post the failure to the chat: write PROBLEM: followed by a one-line diagnosis, then SKIP on its own line. That, and only that, reaches the admins privately. ' +
+      'Reply with the post alone: no preamble, no planning notes, no handover line such as "now the post:", no commentary about what the tools returned.',
+  })
+  await deliver(a, member, result, `INSTRUCTION:\n${a.instruction}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`)
+}
+
+/**
+ * Post-or-skip is decided in a fresh context against the evidence, with
+ * announced payoffs and a confidence, rather than left to the model that
+ * wrote the draft. If the decision itself cannot be made (a provider that
+ * will not return the structured object) the draft goes out as it always
+ * did, and an admin hears that the safety net was down.
+ */
+async function approve(a: Automation, member: Member | undefined, draft: string, evidence: string): Promise<string | null> {
+  try {
+    const d = await decideWatcherPost({ label: a.label, draft, evidence })
+    console.info(
+      '[tick] decision',
+      JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, model: d.model, reason: d.reason ?? null }),
+    )
+    if (d.decision === 'post' && d.confidence >= POST_CONFIDENCE) return d.message?.trim() || draft
+    console.warn(`[tick] ${a.label}: held back (${d.decision} at ${d.confidence.toFixed(2)})${d.reason ? `: ${d.reason}` : ''}`)
+    return null
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    console.error(`[tick] ${a.label}: post decision unavailable, posting the draft:`, reason)
+    await tellAdminQuietly(member, `Watcher **${a.label}**: the post decision failed (${reason}), so its draft went out unchecked.`)
+    return draft
+  }
+}
+
+/**
+ * Turn a run's output into at most one chat message. A lone SKIP line keeps
+ * that part out of the chat whatever else it says; a marked PROBLEM goes to
+ * the admins; the draft itself posts only once approved; tool notices report
+ * actions already taken, so they always post.
+ */
+async function deliver(a: Automation, member: Member | undefined, result: AgentResult, evidence: string): Promise<void> {
+  const split = (part: string) => {
+    const lines = part.split('\n')
+    const skip = lines.some(isSkipLine)
+    return { skip, rest: skip ? lines.filter((l) => !isSkipLine(l)).join('\n').trim() : part.trim() }
+  }
+
+  const quiet: string[] = []
+  const notices: string[] = []
+  const draft = split(result.text)
+  if (draft.skip && draft.rest) quiet.push(draft.rest)
+  for (const n of result.notices) {
+    const s = split(n)
+    if (!s.skip) notices.push(n)
+    else if (s.rest) quiet.push(s.rest)
+  }
+
+  // Staying quiet is the normal outcome for a watcher, not news: only a marked
+  // PROBLEM reaches an admin. Anything else written beside SKIP is the model
+  // narrating why it said nothing, and that belongs in the logs.
+  const problems = quiet.flatMap((q) => q.split('\n').filter(isProblemLine))
+  if (problems.length) {
+    await tellAdminQuietly(member, `Watcher **${a.label}** hit a problem:\n\n${problems.join('\n')}`)
+  } else if (quiet.length) {
+    console.warn(`[tick] ${a.label} stayed quiet:`, quiet.join(' | '))
+  }
+
+  const parts: string[] = []
+  if (!draft.skip && draft.rest) {
+    const approved = await approve(a, member, draft.rest, evidence)
+    if (approved) parts.push(approved)
+  }
+  parts.push(...notices.filter((n) => !parts.some((p) => p.includes(n))))
+
+  const message = parts.join('\n\n').trim()
+  if (!message) return
+  await send(a.chatId, message)
+  await db().insert(schema.messages).values({
+    chatId: a.chatId,
+    role: 'assistant',
+    content: message,
+    model: result.model,
+  })
 }
 
 async function runDue(): Promise<{ ran: number; skipped: number }> {
@@ -131,54 +332,8 @@ async function runDue(): Promise<{ ran: number; skipped: number }> {
         ? (await db().select().from(schema.members).where(eq(schema.members.id, a.memberId)).limit(1))[0]
         : undefined
 
-      const result = await runAgent({
-        chatId: a.chatId,
-        chatType: 'group',
-        member: member ?? null,
-        memberName: member?.name ?? 'the family',
-        text:
-          `Scheduled automation "${a.label}" is due now. Carry out this instruction; whatever you write will be posted to the family chat, briefly:\n\n${a.instruction}\n\n` +
-          'Interpret rather than relay: a scheduled post should read like a sharp-eyed housemate noticing something, not an API response. ' +
-          'If the instruction only wants a post under some condition and that condition is not met (nothing new, nothing to report), reply with exactly SKIP and nothing will be posted. Write nothing beside it: a quiet run needs no explanation of why it was quiet. ' +
-          'If a tool fails or errors, never post the failure to the chat: write PROBLEM: followed by a one-line diagnosis, then SKIP on its own line — that, and only that, reaches the admins privately. ' +
-          'Reply with the post alone: no preamble, no planning notes, no handover line such as "now the post:", no commentary about what the tools returned.',
-        history: false,
-      })
-
-      // Any part carrying a lone SKIP line stays out of the chat, whatever else
-      // it says: a run that chose silence stays silent. Tool notices without
-      // SKIP still post.
-      const speak: string[] = []
-      const quiet: string[] = []
-      for (const part of [result.text, ...result.notices].filter(Boolean)) {
-        const lines = part.split('\n')
-        if (lines.some(isSkipLine)) {
-          const rest = lines.filter((l) => !isSkipLine(l)).join('\n').trim()
-          if (rest) quiet.push(rest)
-        } else {
-          speak.push(part)
-        }
-      }
-
-      const message = speak.join('\n\n').trim()
-      if (message) {
-        await send(a.chatId, message)
-        await db().insert(schema.messages).values({
-          chatId: a.chatId,
-          role: 'assistant',
-          content: message,
-          model: result.model,
-        })
-      }
-      // Staying quiet is the normal outcome for a watcher, not news: only a
-      // marked PROBLEM reaches an admin. Anything else written beside SKIP is
-      // the model narrating why it said nothing, and that belongs in the logs.
-      const problems = quiet.flatMap((q) => q.split('\n').filter(isProblemLine))
-      if (problems.length) {
-        await tellAdminQuietly(member, `Watcher **${a.label}** hit a problem:\n\n${problems.join('\n')}`)
-      } else if (quiet.length) {
-        console.warn(`[tick] ${a.label} stayed quiet:`, quiet.join(' | '))
-      }
+      if (isWatcherKind(a.kind)) await runReadyMade(a.kind, a, member)
+      else await runCustom(a, member)
       ran++
     } catch (err) {
       console.error(`[tick] automation ${a.id} failed:`, err)

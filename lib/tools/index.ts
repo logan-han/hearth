@@ -32,3 +32,24 @@ export function buildTools(ctx: ToolContext) {
 }
 
 export type { ToolContext }
+
+export type ToolName = keyof ReturnType<typeof buildTools>
+
+/**
+ * What a member's own scheduled instruction may reach for: read, look up and
+ * propose. Nothing that sends, deletes or reschedules, because a run happens
+ * with nobody watching and cannot ask for a yes.
+ */
+export const CUSTOM_AUTOMATION_TOOLS: ToolName[] = [
+  'web_search', 'read_url', 'weather', 'recall',
+  'list_email', 'new_mail', 'read_email',
+  'list_calendar', 'list_family_events', 'propose_family_event', 'list_event_proposals',
+  'show_list', 'show_lists', 'add_to_list',
+  'list_bank_accounts', 'list_transactions', 'spending_summary', 'new_transactions', 'budget_summary',
+  'notion_search', 'notion_read_page', 'notion_query_database',
+  'jira_search', 'jira_board_summary', 'jira_read_issue',
+]
+
+/** The nightly memory pass only files and corrects facts. */
+export const SWEEP_TOOLS: ToolName[] = ['remember', 'forget', 'recall']
+

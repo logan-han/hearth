@@ -27,6 +27,10 @@ function slots(opts: {
     baseURL: opts.baseURL,
     apiKey: opts.apiKey,
     headers: opts.headers,
+    // Without this the provider only logs a warning when a JSON schema is
+    // requested and never sends response_format, so structured decisions
+    // (watcher post-or-skip, the ambient gate) would silently degrade to prose.
+    supportsStructuredOutputs: true,
   })
   return opts.models.map((id) => ({ name: `${opts.label}:${id}`, model: provider(id) }))
 }

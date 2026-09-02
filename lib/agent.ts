@@ -1,14 +1,31 @@
-import { generateText, isStepCount, type ModelMessage, type UserContent } from 'ai'
+import {
+  generateText,
+  isStepCount,
+  Output,
+  NoObjectGeneratedError,
+  NoOutputGeneratedError,
+  type ModelMessage,
+  type UserContent,
+} from 'ai'
+import { z } from 'zod'
 import { withModelFallback, gateSlot, type ModelSlot } from './model'
-import { buildTools } from './tools'
+import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, type ToolName } from './tools'
 import type { ToolContext } from './tools/context'
 import { recentMessages, listMemories, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals } from './db/queries'
 import type { Member } from './db/schema'
-import { timezone, language, units } from './env'
+import { timezone, language, units, reasoningLevel } from './env'
 import { formatLocal, localDateKey } from './cron'
 
 const MAX_STEPS = 8
 const STEP_TIMEOUT_MS = 60_000
+
+/**
+ * The three jobs the model does, each with its own prompt, tools and
+ * settings. One prompt for all of them was the old shape, and a Flash-Lite
+ * class model given forty rules at once follows fewer of them than it is
+ * given ten.
+ */
+export type AgentMode = 'chat' | 'watcher' | 'sweep'
 
 export type AgentInput = {
   chatId: string
@@ -22,14 +39,53 @@ export type AgentInput = {
   excludeMessageId?: number
   /** Photos, scans or voice notes to read alongside the text. */
   attachments?: { bytes: Uint8Array; mediaType: string; filename?: string; kind: string }[]
+  /** Which prompt, tools and settings to run with. Defaults to chat. */
+  mode?: AgentMode
+  /** Narrow the tools the model may call this run. Defaults per mode. */
+  tools?: ToolName[]
 }
 
-export type AgentResult = { text: string; notices: string[]; model: string }
+export type AgentResult = {
+  text: string
+  notices: string[]
+  model: string
+  /** Watcher runs: what the tools actually returned, for the post decision. */
+  evidence?: string
+}
 
-/** Facts the model needs that never come from the conversation itself. */
-async function ambientContext(chatId: string, member: Member | null): Promise<string> {
+/** Memories are cheap to store and expensive to read; the chat sees the newest few dozen. */
+const CHAT_MEMORY_LIMIT = 50
+const SWEEP_MEMORY_LIMIT = 200
+
+/** Per-mode sampling. Chat keeps the provider default; the rest run cooler. */
+const MODE_SETTINGS: Record<AgentMode, { temperature?: number; maxOutputTokens: number }> = {
+  chat: { maxOutputTokens: 1500 },
+  watcher: { temperature: 0.3, maxOutputTokens: 800 },
+  sweep: { temperature: 0.2, maxOutputTokens: 1200 },
+}
+
+function defaultTools(mode: AgentMode): ToolName[] | undefined {
+  if (mode === 'sweep') return SWEEP_TOOLS
+  if (mode === 'watcher') return CUSTOM_AUTOMATION_TOOLS
+  return undefined
+}
+
+/**
+ * Facts the model needs that never come from the conversation itself. A chat
+ * turn gets the household and its open business; a watcher gets none of it
+ * and looks facts up with `recall` when a payee or sender calls for it; the
+ * sweep gets every memory, because deduplicating against them is its job.
+ */
+async function ambientContext(chatId: string, member: Member | null, mode: AgentMode): Promise<string> {
+  if (mode === 'watcher') return ''
+  if (mode === 'sweep') {
+    const memories = await listMemories(SWEEP_MEMORY_LIMIT).catch(() => [])
+    if (memories.length === 0) return ''
+    return ['Known household facts:', ...memories.map((m) => `- [${m.id}] ${m.content}`)].join('\n')
+  }
+
   const [memories, members, connections, drafts, proposals] = await Promise.all([
-    listMemories(60).catch(() => []),
+    listMemories(CHAT_MEMORY_LIMIT).catch(() => []),
     allMembersWithLinks().catch(() => []),
     member ? connectionsFor(member.id).catch(() => []) : Promise.resolve([]),
     pendingDrafts(chatId).catch(() => []),
@@ -61,7 +117,7 @@ async function ambientContext(chatId: string, member: Member | null): Promise<st
   }
   if (proposals.length) {
     lines.push('Event proposals awaiting a yes in this chat (settle with accept_event_proposal or reject_event_proposal and the id):')
-    lines.push(...proposals.map((p) => `- proposal_id ${p.id}: "${p.title}" — ${formatLocal(p.startsAt)}`))
+    lines.push(...proposals.map((p) => `- proposal_id ${p.id}: "${p.title}" at ${formatLocal(p.startsAt)}`))
   }
   if (memories.length) {
     lines.push('Known household facts:')
@@ -81,74 +137,89 @@ function describeAttachments(
   return `[sent ${kinds.join(' and ')} with no message]`
 }
 
+/**
+ * Plain attribute-style lines, one concern each, and a handful of canonical
+ * examples in place of a list of prohibitions. Gemini Flash in particular
+ * follows plain lines far better than prose once a prompt carries dozens of
+ * rules, and every mode here stays well under that.
+ */
 export function systemPrompt(input: {
+  mode?: AgentMode
   chatType: string
   memberName: string
   now: Date
   context: string
 }): string {
+  const mode = input.mode ?? 'chat'
+  const tz = timezone()
+  const head = [
+    'You are Hearth, the household assistant for one family, on Telegram.',
+    `NOW: ${formatLocal(input.now)} (${tz}). TODAY: ${localDateKey(input.now)}.`,
+  ]
+  const body = mode === 'sweep' ? sweepPrompt() : mode === 'watcher' ? watcherPrompt(tz) : chatPrompt(input, tz)
+  return [...head, ...body, input.context ? `\nContext:\n${input.context}` : '']
+    .filter((line) => line !== '' || true)
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function chatPrompt(input: { chatType: string; memberName: string }, tz: string): string[] {
   const isGroup = input.chatType !== 'private'
   return [
-    'You are Hearth, the household assistant for one family. You talk to them on Telegram.',
+    `SPEAKING WITH: ${input.memberName}, ${
+      isGroup
+        ? 'in the family group chat; several people are present, and "my calendar" means the calendar of whoever just spoke'
+        : 'in a direct message, so their own email and calendar can be discussed freely'
+    }.`,
     '',
-    `Right now it is ${formatLocal(input.now)} (${timezone()}). Today is ${localDateKey(input.now)}.`,
-    `You are speaking with ${input.memberName}${isGroup ? ' in the family group chat' : ' in a direct message'}.`,
+    'REPLY: a couple of sentences, the answer only. No preamble, no restating the question, no account of what you searched or discarded.',
+    `FORMAT: **bold**, *italic*, \`code\` and - bullets only; no headings or tables. Write in ${language()} with ${units()} units, and read and write every time as ${tz}.`,
+    'GROUNDING: state only what a tool result, the chat history or a Known household fact says. When a detail is missing, say it is not stated and offer to find it. Search when a current fact matters (hours, prices, news); weather questions go to the weather tool.',
+    'TOOLS: when a tool covers a request, call it rather than saying you cannot. Email and personal calendar tools act on the person who just spoke. Household-wide events go on the SHARED calendar with add_family_event. Running lists live in the list tools. Open links with read_url and read what is there. An email missing from the inbox may be archived: search with list_email and a query.',
+    'FOUND EVENTS: a date you found in an email, photo or page goes through propose_family_event so a person confirms first. A date you were told directly can go straight on.',
+    'PHOTOS, SCANS AND VOICE: read what is sent and report what you actually see. If it is unreadable or carries no date, say so.',
+    'MONEY: quote figures exactly as the tools give them; PocketSmith for categories, Up for the raw feed. A payee string is a trading name and a registered city, not where the household went. Where a booking goes, or what a payment was for, comes only from a confirmation email or a Known fact; otherwise say the feed does not say.',
+    'MEMORY: Known household facts are already in your context, so use them without announcing them. Call remember when someone asks you to remember something or corrects a Known fact (forget the old id first). Do not file facts on your own initiative; a nightly pass does that.',
+    'COMMANDS the app answers before you see them: /watch (money, inbox or morning watchers), /connect, /accounts, /unlink, /calendar, /whoami, /members, /help, and for admins /allow and /deny. Point people at them rather than improvising.',
+    "EMAIL is the one irreversible action: draft_email first and show the draft; send_email only in a LATER turn, after the draft's owner says yes, with the draft_id from Context. Never call both in one response. \"Send it\" or \"yes\" from the owner means call send_email NOW with that draft_id; do not draft again or ask again. A revision is a new draft_email with the full text, and the old draft is superseded.",
     '',
-    'How to behave:',
-    '- Be brief. Telegram, not email: a couple of sentences beats a report. No preamble, no restating the question.',
-    '- Format for a chat bubble: **bold**, *italic*, `code` and - bullets only. Never headings or tables.',
-    '- Answer with what is relevant. Never narrate your working: what you searched, which results you discarded, or why. If a search finds an old and a current version of something, silently use the current one.',
-    `- Reply and draft in ${language()}, with ${units()} units.`,
-    '- Interpret every date and time as ' + timezone() + ' unless told otherwise.',
-    '- When you are unsure of a current fact (opening hours, prices, news), search rather than guess. Weather questions go to the `weather` tool.',
-    '- Never invent specifics: locations, addresses, times, prices, platforms, links. A calendar entry or reply must only carry details a source actually stated; if a detail is missing, say it is not stated and offer to chase it.',
-    isGroup
-      ? '- In the group, remember several people are present. "My calendar" means the calendar of whoever just spoke.'
-      : '- This is a private chat, so you may discuss this member\'s own email and calendar freely.',
-    '',
-    'Photos, scans and voice notes:',
-    '- Read anything sent to you. School notices, invitations, permission slips and letters usually carry a date.',
-    '- When you find a date in one, use `propose_family_event` and ask before adding. Never add it silently.',
-    '- Say what you actually see. If the image is unreadable or has no date, say so rather than inventing one.',
-    '',
-    'Tools:',
-    '- Email and personal calendar tools always act on the account of the person who just spoke.',
-    '- Household-wide things (sports, school, appointments others should see) go on the SHARED calendar via add_family_event, not a personal one.',
-    '- Shopping and other running lists live in the list tools, not in `remember`.',
-    '- Never claim you cannot check or reach a service one of your tools covers. If a tool exists for it, call it instead of describing what you cannot do.',
-    '- When a message, email or page points at a link, open it with `read_url` and read what is actually there, following further links it reveals when they matter. An email that does not turn up in the inbox may be archived: search with `list_email` and a query before declaring it gone.',
-    '- Events you found rather than were told go through `propose_family_event`, so a person confirms first.',
-    '',
-    'Money — a bank line is a payment, not a story:',
-    '- PocketSmith has categories so prefer it for "what did we spend on X"; Up is the raw account feed. Quote figures exactly as the tools give them.',
-    '- The words in a payee or description are the merchant\'s own trading name and registered city, never where the household went, stayed or flew. `CHEAPTICKETS SEATTLE` is an agent registered in Seattle, not a trip to Seattle.',
-    '- Never reconstruct a trip, route, itinerary or stopover from a transaction. Do not expand airport, station or flight codes from memory, and never add a leg, connection or destination that no source spelled out.',
-    '- Where a booking actually went is in its confirmation email, not the bank feed. If the route matters, find that email with `list_email`; otherwise give the payee as it stands and say the feed does not say.',
-    '',
-    'Memory — you are the household\'s institutional memory, and it only works if you file things without being asked:',
-    '- The moment a message reveals a durable household fact, call `remember` in that same turn. The test: would the household need it again weeks from now? Examples, not limits: names and birthdays, allergies and health, sizes, schools, teachers and coaches, doctors and tradies, pets, vehicles, codes, who drives what, standing arrangements ("bin night is Monday", "swimming is Saturday 9am"), strong preferences and dislikes.',
-    '- When someone contradicts a Known household fact, `forget` the old one and `remember` the new one.',
-    '- Not memories: one-off plans (calendar), shopping (lists), tasks (the board), passing chatter, anything already in Known household facts.',
-    '- Recall is automatic — Known household facts arrive in your context — so never announce what you stored. At most, a brief "noted".',
-    '',
-    'Commands the app handles before you ever see them — point people at the right one instead of improvising:',
-    '- /watch switches on a ready-made watcher (money, inbox, morning brief) that checks on a schedule and posts only when something matters. Point people at it when they ask you to keep an eye on something one of those covers; build a custom automation only for anything else.',
-    '- /connect links their Google or Microsoft account, which is what lets you read that person\'s email and calendar. /accounts lists links, /unlink google|microsoft removes one.',
-    '- /calendar hands out the shared family calendar subscription link.',
-    '- /whoami shows someone their Telegram id; /members lists who I answer to; /help lists everything.',
-    '- /allow and /deny let an admin grant or revoke a person (id, or reply to their message).',
-    '',
-    'Sending email is the one irreversible action you have:',
-    '- Always `draft_email` first, show the draft, and ask for confirmation.',
-    '- Only call `send_email` in a LATER turn, after the same member has clearly said yes.',
-    '- Never call `draft_email` and `send_email` in the same response.',
-    '- "Send", "do it", "yes" from the draft\'s owner means: call `send_email` NOW with the draft_id shown in Context. Do not draft again, do not ask again.',
-    '- Revising a draft means calling `draft_email` again with the full new text; the old pending draft to the same recipients is superseded automatically.',
-    '',
-    input.context ? `Context:\n${input.context}` : '',
+    'EXAMPLES',
+    'Good: "Sports day is Wed 10 Sep, 9am to 12pm, per the school email. Add it to the family calendar?"',
+    'Good: "The feed shows CHEAPTICKETS SEATTLE, $412.30 on 26 Aug. It does not say where the booking goes; I can look for the confirmation email."',
+    'Bad: "Looks like someone booked flights to Seattle!" No source names a trip.',
+    'Bad: "Let me check the calendar first... Now the answer:" Working shown; give the answer alone.',
   ]
-    .filter(Boolean)
-    .join('\n')
+}
+
+function watcherPrompt(tz: string): string[] {
+  return [
+    'This is a scheduled check, not a conversation. Whatever you write may be posted to the family chat.',
+    'WRITE using only the information under DATA, the tool results you fetch, and the instruction you were given. Do not rely on outside knowledge.',
+    'POST: one to three short lines a housemate would find useful; names, amounts and dates exactly as given, the key figure in **bold**.',
+    'PURPOSE: say what a payment or message is for only when DATA, a Known fact, a calendar event or a fetched email names it, and say which; otherwise write "purpose not recorded".',
+    'FLAGS: point out only what DATA itself marks or plainly shows: two identical lines are a possible duplicate, a credit is a refund, a date may need a calendar entry. Never infer a flag the data does not state, such as calling a payee new or an amount unusual.',
+    'NOTHING TO SAY: when nothing is worth posting, reply with exactly SKIP.',
+    'PROBLEMS: if a tool fails, write PROBLEM: and one line of diagnosis, then SKIP on its own line. That reaches the admins, not the family.',
+    `FORMAT: plain Telegram text in ${language()}, ${units()} units, times in ${tz}; no headings, no preamble, no handover line, no commentary about tools.`,
+    '',
+    'EXAMPLES',
+    'Good: "2Up: **$412.30** CHEAPTICKETS SEATTLE, Tue 26 Aug. Purpose not recorded."',
+    'Bad: "Looks like someone booked flights to Seattle, planning a trip?" No source names a trip.',
+    'Bad: "Scoot is a budget airline, so this is probably the other half. Now the post:" Working shown; post alone.',
+    'Skip: DATA lists nothing new. Reply SKIP.',
+  ]
+}
+
+function sweepPrompt(): string[] {
+  return [
+    "This is the nightly memory pass. You have yesterday's household talk and the Known household facts, each with its id.",
+    'FILE with remember any durable fact that is missing: people (family, friends, neighbours, teachers, coaches, doctors, tradies), birthdays and anniversaries, health, allergies and dietary needs, routines and standing arrangements, schools, clubs and activities, pets, vehicles, sizes, codes and account identifiers, house rules, strong preferences and dislikes.',
+    'CORRECT: where the talk contradicts a Known fact, forget the old id and remember the new fact. The newer statement wins.',
+    'LEAVE OUT one-off plans (the calendar holds those), shopping and list items, tasks, and passing chatter. Do not re-file anything already Known.',
+    'WRITE each fact self-contained, so it makes sense months from now.',
+    'Then reply with exactly SKIP.',
+  ]
 }
 
 /**
@@ -169,6 +240,25 @@ export function stripPreamble(text: string): string {
   return text.slice(match.index + match[0].length).trim() || text
 }
 
+/**
+ * Some endpoints return a model's thinking inline as <think> blocks instead of
+ * in a separate reasoning field. Everything inside is working, never the
+ * answer; an unclosed block is a reply that never got past thinking.
+ */
+const THINK_BLOCK = /<think>[\s\S]*?<\/think>/gi
+const THINK_OPEN = /<think>[\s\S]*$/i
+
+export function stripReasoning(text: string): string {
+  return text.replace(THINK_BLOCK, '').replace(THINK_OPEN, '').trim()
+}
+
+/** Everything that keeps a model's working out of the family chat. */
+export function cleanReply(raw: string): { text: string; stripped: boolean } {
+  const trimmed = raw.trim()
+  const text = stripPreamble(stripReasoning(trimmed))
+  return { text, stripped: text !== trimmed }
+}
+
 async function historyMessages(chatId: string, excludeId?: number): Promise<ModelMessage[]> {
   const rows = await recentMessages(chatId, undefined, excludeId).catch(() => [])
   return rows.map((r) =>
@@ -178,7 +268,32 @@ async function historyMessages(chatId: string, excludeId?: number): Promise<Mode
   )
 }
 
+const EVIDENCE_ITEM_CHARS = 2_000
+const EVIDENCE_TOTAL_CHARS = 12_000
+
+/**
+ * What the tools actually said, compactly, so the post decision can check a
+ * draft against its sources rather than against the model's memory of them.
+ */
+type ToolResultLike = { toolName: string; input: unknown; output: unknown }
+
+export function collectEvidence(steps: ReadonlyArray<{ toolResults?: ReadonlyArray<ToolResultLike> }>): string {
+  const parts: string[] = []
+  let total = 0
+  for (const step of steps) {
+    for (const r of step.toolResults ?? []) {
+      const line = `${r.toolName}(${JSON.stringify(r.input)}) -> ${JSON.stringify(r.output)}`
+      const clipped = line.length > EVIDENCE_ITEM_CHARS ? `${line.slice(0, EVIDENCE_ITEM_CHARS)}…` : line
+      if (total + clipped.length > EVIDENCE_TOTAL_CHARS) return parts.join('\n')
+      parts.push(clipped)
+      total += clipped.length
+    }
+  }
+  return parts.join('\n')
+}
+
 export async function runAgent(input: AgentInput): Promise<AgentResult> {
+  const mode = input.mode ?? 'chat'
   const now = new Date()
   const ctx: ToolContext = {
     chatId: input.chatId,
@@ -189,7 +304,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   }
 
   const [context, history] = await Promise.all([
-    ambientContext(input.chatId, input.member),
+    ambientContext(input.chatId, input.member, mode),
     input.history === false
       ? Promise.resolve([] as ModelMessage[])
       : historyMessages(input.chatId, input.excludeMessageId),
@@ -210,34 +325,110 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     : `${input.memberName}: ${said}`
 
   const messages: ModelMessage[] = [...history, { role: 'user', content }]
+  const activeTools = input.tools ?? defaultTools(mode)
+  const settings = MODE_SETTINGS[mode]
+  const reasoning = reasoningLevel()
 
   const result = await withModelFallback(async (slot: ModelSlot) => {
     const r = await generateText({
       model: slot.model,
-      system: systemPrompt({ chatType: input.chatType, memberName: input.memberName, now, context }),
+      system: systemPrompt({ mode, chatType: input.chatType, memberName: input.memberName, now, context }),
       messages,
       tools: buildTools(ctx),
+      ...(activeTools ? { activeTools } : {}),
       stopWhen: isStepCount(MAX_STEPS),
       timeout: { stepMs: STEP_TIMEOUT_MS },
-      maxOutputTokens: 1500,
+      maxOutputTokens: settings.maxOutputTokens,
+      ...(settings.temperature !== undefined ? { temperature: settings.temperature } : {}),
+      ...(reasoning ? { reasoning } : {}),
     })
-    const text = stripPreamble(r.text.trim())
+    const cleaned = cleanReply(r.text)
+    if (cleaned.stripped) console.warn(`[agent] ${slot.name} leaked its working into the reply; stripped`)
     // An empty completion usually means the model ended on a tool call it never
     // summarised; treat it as a failure so the fallback model gets a turn.
-    if (!text && ctx.notices.length === 0) throw new Error(`${slot.name} returned no text`)
-    return { text, model: slot.name }
+    if (!cleaned.text && ctx.notices.length === 0) throw new Error(`${slot.name} returned no text`)
+    return {
+      text: cleaned.text,
+      model: slot.name,
+      evidence: mode === 'watcher' ? collectEvidence(r.steps ?? []) : undefined,
+    }
   })
 
   return {
     text: result.text || ctx.notices.join('\n'),
     notices: ctx.notices,
     model: result.model,
+    ...(result.evidence !== undefined ? { evidence: result.evidence } : {}),
   }
 }
 
+/* ------------------------------------------------------------ post decision */
+
+const postDecisionSchema = z.object({
+  decision: z.enum(['post', 'skip']),
+  confidence: z.number().min(0).max(1).describe('How sure you are that this decision is right, 0 to 1'),
+  message: z
+    .string()
+    .optional()
+    .describe('The final text to post. Only names, figures, dates and purposes present in the evidence. Empty when skipping.'),
+  reason: z.string().optional().describe('One line on why'),
+})
+
+export type PostDecision = z.infer<typeof postDecisionSchema>
+
+const DECISION_PROMPT = [
+  'You decide whether a scheduled family-assistant post goes to the family chat.',
+  'You receive +1 if the post is accurate and useful to the household, +0.4 if you choose skip, and -1 if the post contains anything not in the evidence or that the household would not need.',
+  'The evidence is the instruction that produced the draft and the results the tools returned. Every name, amount, date and stated purpose in the post must appear there. A claim the evidence does not make means either skip, or remove that claim and post the rest as message.',
+  'Statements of what is not known ("purpose not recorded") are accurate and welcome. A reminder whose wording comes from the instruction is grounded in the instruction.',
+  'Give your confidence from 0 to 1. Answer with the structured object only.',
+].join('\n')
+
 /**
- * Cheap yes/no gate for ambient group chatter: should the bot chime in at all?
- * Runs on the primary model only, and fails closed (stay quiet) on any error.
+ * A payoff-framed, confidence-bearing decision in a fresh context, checking
+ * the draft against what the tools actually said. A bare "reply SKIP if there
+ * is nothing" leaves the choice to the model that wrote the draft, which is
+ * the one least able to see its own embellishments.
+ */
+export async function decideWatcherPost(input: {
+  label: string
+  draft: string
+  evidence: string
+}): Promise<PostDecision & { model: string }> {
+  return withModelFallback(async (slot) => {
+    const r = await generateText({
+      model: slot.model,
+      system: DECISION_PROMPT,
+      prompt: `Watcher: ${input.label}\n\nDRAFT:\n${input.draft}\n\nEVIDENCE:\n${input.evidence || '(no tool results)'}`,
+      output: Output.object({ schema: postDecisionSchema, name: 'post_decision' }),
+      temperature: 0.2,
+      maxOutputTokens: 600,
+      timeout: { stepMs: 30_000 },
+    })
+    return { ...r.output, model: slot.name }
+  })
+}
+
+/** A structured call that produced no usable object, as opposed to a transport failure. */
+export function isStructuredOutputError(err: unknown): boolean {
+  return NoObjectGeneratedError.isInstance(err) || NoOutputGeneratedError.isInstance(err)
+}
+
+/* ------------------------------------------------------------ ambient gate */
+
+const GATE_CHOICES = ['reply', 'stay_silent', 'unsure'] as const
+type GateChoice = (typeof GATE_CHOICES)[number]
+
+/** For providers that answer in prose anyway: only an unmistakable yes counts. */
+function readGateChoice(text: string): GateChoice {
+  return /\b(?:reply|yes)\b/i.test(text) ? 'reply' : 'stay_silent'
+}
+
+/**
+ * Cheap gate for ambient group chatter: should the bot chime in at all?
+ * Runs on the primary model only, fails closed (stay quiet) on any error, and
+ * answers through a typed choice rather than a regex over free text, with
+ * "unsure" available so doubt has somewhere to go other than a reply.
  */
 export async function shouldChimeIn(input: {
   chatId: string
@@ -247,31 +438,36 @@ export async function shouldChimeIn(input: {
 }): Promise<boolean> {
   const history = (await historyMessages(input.chatId, input.excludeMessageId)).slice(-6)
   try {
-    const r = await withModelFallback(
+    const choice = await withModelFallback(
       async (slot) => {
         const out = await generateText({
           model: slot.model,
           system: [
             'You decide whether a family assistant bot should reply to a group chat message.',
-            'Answer YES only if the message asks a question the assistant can answer, requests an action',
-            '(reminder, calendar, email, lookup), or clearly addresses the assistant.',
-            'Answer NO for banter, reactions, messages between family members, and anything already answered.',
-            'Reply with exactly one word: YES or NO.',
+            'Choose reply only if the message asks a question the assistant can answer, requests an action (reminder, calendar, email, lookup), or clearly addresses the assistant.',
+            'Choose stay_silent for banter, reactions, messages between family members, and anything already answered.',
+            'Choose unsure when you cannot tell; unsure is treated as silence.',
           ].join(' '),
           messages: [
             ...history,
             { role: 'user', content: `${input.memberName}: ${input.text}\n\nShould the assistant reply?` },
           ],
-          maxOutputTokens: 4,
+          output: Output.choice({ options: [...GATE_CHOICES], name: 'gate' }),
+          // Thinking tokens can count against the output budget on some
+          // providers, so leave room for them; the answer itself is one word.
+          maxOutputTokens: 64,
+          temperature: 0.2,
           timeout: { stepMs: 10_000 },
         })
-        return out.text
+        const picked: GateChoice = out.output ?? readGateChoice(out.text)
+        console.info(`[gate] ${slot.name} ${picked} chat=${input.chatId}`)
+        return picked
       },
       // Gate on the cheapest model only; falling through the whole chain would
       // spend the day's quota on a coin flip.
       [gateModel()],
     )
-    return /\byes\b/i.test(r)
+    return choice === 'reply'
   } catch {
     return false
   }

@@ -218,7 +218,9 @@ describe('/watch', () => {
     const [a] = await q.listAutomations('111')
     expect(a.label).toBe('2Up transactions')
     expect(a.cronExpr).toBe('0 9-22 * * *')
-    expect(a.instruction).toContain('SKIP')
+    expect(a.kind).toBe('money')
+    expect(a.instruction).toContain('purpose not recorded')
+    expect(a.instruction).not.toContain('likely is')
   })
 
   it('refuses to watch the same thing twice', async () => {
@@ -272,7 +274,7 @@ describe('/watch', () => {
     await processUpdate(group('/watch inbox'))
     const [a] = await q.listAutomations('-100')
     expect(a.label).toBe('Family inbox sweep')
-    expect(a.instruction).toContain('everyone set to true')
+    expect(a.kind).toBe('inbox')
     expect(a.instruction).toContain('whose mailbox')
   })
 
