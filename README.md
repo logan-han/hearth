@@ -479,8 +479,8 @@ keys are environment variables, not dashboard settings, because the tracer
 starts before the database is read.
 
 Inside Langfuse, an LLM-as-a-judge rule ("Groundedness of watcher posts")
-scores every `hearth.decision` trace, which is where each proactive post gets
-its final wording, against the evidence in its input. The judge is OpenRouter's
+scores every `hearth.watcher` and `hearth.decision` trace, the draft and the
+final wording of each proactive post, against the evidence in its input. The judge is OpenRouter's
 MiniMax, deliberately not the Gemini family that writes the posts. A trace
 scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
 
