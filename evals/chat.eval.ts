@@ -35,6 +35,7 @@ vi.mock('@/lib/tools', async (orig) => {
 const { freshDb, closeDb } = await import('@/tests/helpers/db')
 const q = await import('@/lib/db/queries')
 const { runAgent } = await import('@/lib/agent')
+const { maybeSummarise } = await import('@/lib/summary')
 
 let client: PGlite
 beforeEach(async () => {
@@ -92,6 +93,26 @@ describe.skipIf(!liveChainConfigured())('chat grounding', () => {
     expect(unlocked).toBe(true)
     expect(usedMail).toBe(true)
     expect(noLeak(r.text)).toBe(true)
+  })
+
+  it('remembers a fact that scrolled out of the raw window, through the summary', async () => {
+    const logan = await q.upsertMember('111', 'Logan', { allowed: true })
+    await q.rememberChat('111', 'private', null)
+    await q.recordMessage({ chatId: '111', authorName: 'Logan', role: 'user', content: "Ada's dentist appointment is Thursday 11 Sep at 2pm, Northcote Dental" })
+    await q.recordMessage({ chatId: '111', role: 'assistant', content: 'Noted.' })
+    for (let i = 0; i < 24; i++) {
+      await q.recordMessage({ chatId: '111', authorName: 'Logan', role: 'user', content: ['what a day', 'traffic was awful', 'did you see the game', 'pasta tonight?', 'ok', 'lol'][i % 6] })
+    }
+    const wrote = await maybeSummarise('111')
+    const summary = (await q.chatSummary('111')).summary ?? ''
+    const text = "when is Ada's dentist appointment?"
+    const r = await runAgent({ chatId: '111', chatType: 'private', member: logan, memberName: 'Logan', text })
+    const remembered = /thursday|11 sep/i.test(r.text) && /\b2(?::00)?\s?pm|14:00/i.test(r.text)
+    const hard = wrote && /dentist/i.test(summary) && remembered && noLeak(r.text)
+    record({ case: 'chat: fact survives via summary', hard: hard ? 'pass' : 'fail', model: r.model, note: `summary ${summary.length} chars | ${r.text.slice(0, 60)}` })
+    expect(wrote).toBe(true)
+    expect(summary).toMatch(/dentist/i)
+    expect(remembered).toBe(true)
   })
 
   it('says an appointment is not on record rather than making one up', async () => {

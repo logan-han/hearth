@@ -6,6 +6,7 @@ const calendarToken = vi.fn<() => Promise<string>>()
 const allFamilyEventsForFeed = vi.fn<(since: Date) => Promise<FamilyEvent[]>>()
 
 vi.mock('@/lib/handler', () => ({ processInBackground }))
+vi.mock('@/lib/summary', () => ({ maybeSummarise: vi.fn(async () => false) }))
 vi.mock('@/lib/db/queries', () => ({ calendarToken, allFamilyEventsForFeed }))
 // The webhook route hydrates dashboard settings before checking the secret;
 // here the environment is the whole configuration.

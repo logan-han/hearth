@@ -8,13 +8,14 @@ import { localDateKey, tzOffsetMs, nextRun } from '@/lib/cron'
 import { timezone } from '@/lib/env'
 import { db, schema } from '@/lib/db'
 import { eq } from 'drizzle-orm'
-import { runAgent, decideWatcherPost, type AgentResult } from '@/lib/agent'
+import { runAgent, decideWatcherPost, reviewDraft, type AgentResult } from '@/lib/agent'
 import { buildTools, type ToolName } from '@/lib/tools'
 import type { ToolContext } from '@/lib/tools/context'
 import { WATCHERS, isWatcherKind, type WatcherKind } from '@/lib/watchers'
 import { send } from '@/lib/telegram'
 import { hydrateSecrets } from '@/lib/settings'
 import { flushTelemetry } from '@/lib/telemetry'
+import { parseLog, prune, underCap, recordPost, shouldWarn, markWarned, PROACTIVE_POSTS_PER_HOUR } from '@/lib/rate-cap'
 import type { Automation, Member } from '@/lib/db/schema'
 
 export const runtime = 'nodejs'
@@ -246,20 +247,36 @@ async function runCustom(a: Automation, member: Member | undefined): Promise<voi
  * did, and an admin hears that the safety net was down.
  */
 async function approve(a: Automation, member: Member | undefined, draft: string, evidence: string): Promise<string | null> {
+  // First the factored check: each claim against the evidence, in a context
+  // that never sees the draft. What fails is cut; if nothing survives, silence.
+  let reviewed = draft
   try {
-    const d = await decideWatcherPost({ label: a.label, draft, evidence })
+    const review = await reviewDraft({ label: a.label, draft, evidence })
+    if (review.message === null) {
+      console.warn(`[tick] ${a.label}: held back, no claim survived the check: ${review.unsupported.join(' | ')}`)
+      return null
+    }
+    if (review.unsupported.length) {
+      console.warn(`[tick] ${a.label}: cut ${review.unsupported.length} unsupported claim(s): ${review.unsupported.join(' | ')}`)
+    }
+    reviewed = review.message
+  } catch (err) {
+    console.error(`[tick] ${a.label}: claim check unavailable, deciding on the raw draft:`, err instanceof Error ? err.message : err)
+  }
+  try {
+    const d = await decideWatcherPost({ label: a.label, draft: reviewed, evidence })
     console.info(
       '[tick] decision',
       JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, model: d.model, reason: d.reason ?? null }),
     )
-    if (d.decision === 'post' && d.confidence >= POST_CONFIDENCE) return d.message?.trim() || draft
+    if (d.decision === 'post' && d.confidence >= POST_CONFIDENCE) return d.message?.trim() || reviewed
     console.warn(`[tick] ${a.label}: held back (${d.decision} at ${d.confidence.toFixed(2)})${d.reason ? `: ${d.reason}` : ''}`)
     return null
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
     console.error(`[tick] ${a.label}: post decision unavailable, posting the draft:`, reason)
     await tellAdminQuietly(member, `Watcher **${a.label}**: the post decision failed (${reason}), so its draft went out unchecked.`)
-    return draft
+    return reviewed
   }
 }
 
@@ -305,7 +322,26 @@ async function deliver(a: Automation, member: Member | undefined, result: AgentR
 
   const message = parts.join('\n\n').trim()
   if (!message) return
+
+  // The last guard: however the run got here, a chat hears from its watchers
+  // only so often. An admin hears about the first held-back post each hour.
+  const now = new Date()
+  const capKey = `proactive_posts:${a.chatId}`
+  const log = prune(parseLog(await getSetting(capKey)), now)
+  if (!underCap(log)) {
+    console.warn(`[tick] ${a.label}: held back, ${log.posts.length} scheduled posts in the last hour for chat ${a.chatId}`)
+    if (shouldWarn(log, now)) {
+      await setSetting(capKey, JSON.stringify(markWarned(log, now)))
+      await tellAdminQuietly(
+        member,
+        `Watcher **${a.label}** was held back: this chat has had ${PROACTIVE_POSTS_PER_HOUR} scheduled posts in the last hour. A schedule may be too eager.`,
+      )
+    }
+    return
+  }
+
   await send(a.chatId, message)
+  await setSetting(capKey, JSON.stringify(recordPost(log, now)))
   await db().insert(schema.messages).values({
     chatId: a.chatId,
     role: 'assistant',

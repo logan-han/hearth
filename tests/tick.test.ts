@@ -5,6 +5,7 @@ const dueAutomations = vi.fn<(now: Date) => Promise<Automation[]>>()
 const claimAutomation = vi.fn<(id: number, expected: Date, next: Date | null) => Promise<boolean>>()
 const runAgent = vi.fn()
 const decideWatcherPost = vi.fn()
+const reviewDraft = vi.fn()
 const newTransactions = vi.fn()
 const newMail = vi.fn()
 const listEvents = vi.fn()
@@ -17,8 +18,8 @@ const insertValues = vi.fn()
 const { recordMessage, messagesSince, getSetting, setSetting } = vi.hoisted(() => ({
   recordMessage: vi.fn(async () => 1),
   messagesSince: vi.fn(async () => [] as unknown[]),
-  getSetting: vi.fn(async () => null as string | null),
-  setSetting: vi.fn(async () => {}),
+  getSetting: vi.fn<(key: string) => Promise<string | null>>(async () => null),
+  setSetting: vi.fn<(key: string, value: string) => Promise<void>>(async () => {}),
 }))
 vi.mock('@/lib/db/queries', () => ({
   dueAutomations,
@@ -31,7 +32,7 @@ vi.mock('@/lib/db/queries', () => ({
     { id: 9, telegramUserId: '900', name: 'Boss', isAdmin: true, allowed: true },
   ]),
 }))
-vi.mock('@/lib/agent', () => ({ runAgent, decideWatcherPost }))
+vi.mock('@/lib/agent', () => ({ runAgent, decideWatcherPost, reviewDraft }))
 vi.mock('@/lib/tools', () => ({
   buildTools: () => ({
     new_transactions: { execute: newTransactions },
@@ -87,6 +88,7 @@ beforeEach(() => {
   claimAutomation.mockResolvedValue(true)
   runAgent.mockResolvedValue({ text: 'Bins out tonight.', notices: [], model: 'primary:test' })
   decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.9, model: 'primary:test' })
+  reviewDraft.mockImplementation(async ({ draft }: { draft: string }) => ({ claims: [], unsupported: [], message: draft }))
   newTransactions.mockResolvedValue({ account: '2Up', count: 0, transactions: [] })
   newMail.mockResolvedValue({ accounts: [] })
   listEvents.mockResolvedValue({ events: [] })
@@ -96,7 +98,8 @@ beforeEach(() => {
   // tests never depend on what the wall clock says.
   messagesSince.mockResolvedValue([])
   setSetting.mockResolvedValue(undefined)
-  getSetting.mockImplementation(async () => {
+  getSetting.mockImplementation(async (key: string) => {
+    if (key !== 'memory_sweep_day') return null
     const melbourneDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Melbourne' }).format(new Date())
     return melbourneDay
   })
@@ -271,7 +274,7 @@ describe('running due automations', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-08-30T18:30:00Z')) // 4:30am in Melbourne
     try {
-      getSetting.mockResolvedValue(null)
+      getSetting.mockImplementation(async () => null)
       messagesSince.mockResolvedValue([
         { chatId: '-100999', authorName: 'Logan', role: 'user', content: 'Bin night is Monday by the way' },
       ] as never)
@@ -291,7 +294,7 @@ describe('running due automations', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-08-30T15:30:00Z')) // 1:30am in Melbourne
     try {
-      getSetting.mockResolvedValue(null)
+      getSetting.mockImplementation(async () => null)
       await authed()
       expect(runAgent).not.toHaveBeenCalled()
       expect(setSetting).not.toHaveBeenCalled()
@@ -304,7 +307,7 @@ describe('running due automations', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-08-30T18:30:00Z'))
     try {
-      getSetting.mockResolvedValue('2026-08-31') // already done for this local day
+      getSetting.mockImplementation(async (key: string) => (key === 'memory_sweep_day' ? '2026-08-31' : null)) // already done for this local day
       messagesSince.mockResolvedValue([{ chatId: 'x', authorName: 'L', role: 'user', content: 'hi' }] as never)
       await authed()
       expect(runAgent).not.toHaveBeenCalled()
@@ -378,6 +381,29 @@ describe('the post decision', () => {
     await authed()
     expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
     expect(send).toHaveBeenCalledWith('900', expect.stringContaining('post decision failed'))
+  })
+
+  it('checks the claims before deciding, and decides on what survived', async () => {
+    reviewDraft.mockResolvedValue({ claims: ['bins tonight', 'recycling week'], unsupported: ['recycling week'], message: 'Bins out tonight.' })
+    runAgent.mockResolvedValue({ text: 'Bins out tonight, recycling week.', notices: [], model: 'primary:test' })
+    await authed()
+    expect(reviewDraft).toHaveBeenCalledWith(expect.objectContaining({ draft: 'Bins out tonight, recycling week.' }))
+    expect(decideWatcherPost).toHaveBeenCalledWith(expect.objectContaining({ draft: 'Bins out tonight.' }))
+    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
+  })
+
+  it('stays silent when no claim survives the check', async () => {
+    reviewDraft.mockResolvedValue({ claims: ['a trip to Seattle'], unsupported: ['a trip to Seattle'], message: null })
+    await authed()
+    expect(decideWatcherPost).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('falls back to deciding on the raw draft when the check itself fails', async () => {
+    reviewDraft.mockRejectedValue(new Error('No object generated'))
+    await authed()
+    expect(decideWatcherPost).toHaveBeenCalledWith(expect.objectContaining({ draft: 'Bins out tonight.' }))
+    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
   })
 
   it('never puts a tool notice through the decision', async () => {
@@ -505,5 +531,44 @@ describe('ready-made watchers', () => {
     await authed()
     expect(runAgent).toHaveBeenCalled()
     expect((runAgent.mock.calls[0][0] as { text: string }).text).toContain('HTL-344')
+  })
+})
+
+describe('the proactive post cap', () => {
+  beforeEach(() => {
+    process.env.TICK_SECRET = 'let-me-in'
+    dueAutomations.mockResolvedValue([automation()])
+  })
+  const authed = () => tick({ 'x-tick-secret': 'let-me-in' })
+  const recent = (n: number) => Array.from({ length: n }, (_, i) => new Date(Date.now() - (i + 1) * 60_000).toISOString())
+
+  it('records each post it makes', async () => {
+    await authed()
+    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
+    const [key, value] = setSetting.mock.calls.find(([k]) => String(k).startsWith('proactive_posts:'))!
+    expect(key).toBe('proactive_posts:-100999')
+    expect(JSON.parse(String(value)).posts).toHaveLength(1)
+  })
+
+  it('holds a post back once the chat has heard enough this hour, and tells an admin once', async () => {
+    getSetting.mockImplementation(async (key: string) => (key === 'proactive_posts:-100999' ? JSON.stringify({ posts: recent(6) }) : null))
+    await authed()
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('held back'))
+    expect(insertValues).not.toHaveBeenCalled()
+    // Already warned this hour: quiet.
+    send.mockClear()
+    getSetting.mockImplementation(async (key: string) =>
+      key === 'proactive_posts:-100999' ? JSON.stringify({ posts: recent(6), cappedAt: new Date().toISOString() }) : null,
+    )
+    await authed()
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('lets old posts age out of the window', async () => {
+    const stale = Array.from({ length: 6 }, (_, i) => new Date(Date.now() - (61 + i) * 60_000).toISOString())
+    getSetting.mockImplementation(async (key: string) => (key === 'proactive_posts:-100999' ? JSON.stringify({ posts: stale }) : null))
+    await authed()
+    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
   })
 })

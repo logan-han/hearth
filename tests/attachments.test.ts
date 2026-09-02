@@ -23,6 +23,7 @@ vi.mock('@/lib/telegram', async (orig) => ({
   bot: () => ({ api: { getMe: async () => ({ id: 1, username: 'heart_family_bot' }) } }),
 }))
 vi.mock('@/lib/agent', () => ({ runAgent, shouldChimeIn: vi.fn(async () => false) }))
+vi.mock('@/lib/summary', () => ({ maybeSummarise: vi.fn(async () => false) }))
 vi.mock('@/lib/db/queries', () => ({
   upsertMember: vi.fn(async () => ({ id: 3, telegramUserId: '111', name: 'Logan', allowed: true, isAdmin: true })),
   memberByTelegramId: vi.fn(async () => undefined),

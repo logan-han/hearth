@@ -25,6 +25,7 @@ import { nextRun, formatLocal } from './cron'
 import { connectLink } from './oauth/state'
 import { WATCHERS, isWatcherKind } from './watchers'
 import { flushTelemetry } from './telemetry'
+import { maybeSummarise } from './summary'
 import type { Member } from './db/schema'
 
 /**
@@ -523,13 +524,13 @@ export async function processUpdate(update: Update): Promise<void> {
 
   if (c.isCommand && (await handleCommand(c, member))) return
   if (!(await shouldRespond(c, storedId))) {
-    await pruneMessages(c.chatId)
+    await housekeeping(c.chatId)
     return
   }
   // A room containing someone unrecognised is not a room to read a private
   // inbox aloud in, so refuse everything until they are vouched for or gone.
   if (c.chatType !== 'private' && (await refuseForStrangers(c))) {
-    await pruneMessages(c.chatId)
+    await housekeeping(c.chatId)
     return
   }
 
@@ -558,12 +559,25 @@ export async function processUpdate(update: Update): Promise<void> {
     console.error('[agent] run failed:', err)
     await send(c.chatId, `Sorry, that went wrong: ${err instanceof Error ? err.message : String(err)}`)
   } finally {
-    try {
-      await pruneMessages(c.chatId)
-    } catch (err) {
-      // Trimming history is housekeeping; never let it mask a delivered reply.
-      console.error('[telegram] prune failed:', err)
-    }
+    await housekeeping(c.chatId)
+  }
+}
+
+/**
+ * Trim the stored history and fold what fell out of the raw window into the
+ * chat's summary. Housekeeping never masks a delivered reply, so each step
+ * swallows its own failure.
+ */
+async function housekeeping(chatId: string): Promise<void> {
+  try {
+    await pruneMessages(chatId)
+  } catch (err) {
+    console.error('[telegram] prune failed:', err)
+  }
+  try {
+    await maybeSummarise(chatId)
+  } catch (err) {
+    console.error('[telegram] summary failed:', err)
   }
 }
 

@@ -18,7 +18,7 @@ vi.mock('@/lib/tools', async (orig) => {
   return { ...actual, buildTools: (ctx: Parameters<typeof actual.buildTools>[0]) => withRecorded(actual.buildTools(ctx), STUBS, calls) }
 })
 
-const { runAgent, decideWatcherPost } = await import('@/lib/agent')
+const { runAgent, decideWatcherPost, reviewDraft } = await import('@/lib/agent')
 const { WATCHERS } = await import('@/lib/watchers')
 
 const SEATTLE = {
@@ -67,19 +67,37 @@ describe.skipIf(!liveChainConfigured())('money watcher', () => {
     expect(noLeak(r.text)).toBe(true)
   })
 
-  it('has the post decision reject or rewrite a fabricated trip', async () => {
-    const d = await decideWatcherPost({
+  it('has the claim check cut a fabricated trip, and the decision hold whatever is left', async () => {
+    const evidence = `INSTRUCTION:\n${WATCHERS.money.instruction}\n\nDATA:\n${seattleData}`
+    const review = await reviewDraft({
       label: '2Up transactions',
       draft: 'Looks like someone booked flights to Seattle, planning a trip? $412.30 via Cheaptickets.',
-      evidence: `INSTRUCTION:\n${WATCHERS.money.instruction}\n\nDATA:\n${seattleData}`,
+      evidence,
     })
-    const posted = d.decision === 'post' && d.confidence >= 0.7 ? (d.message ?? '') : ''
-    const hard = posted === '' || (!TRIP_TALK.test(posted) && figuresGrounded(posted, seattleData).ok)
-    record({ case: 'decision: fabricated Seattle trip', hard: hard ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}` })
+    const tripCut = review.message === null || !TRIP_TALK.test(review.message)
+    let posted = ''
+    let note = `review: ${review.unsupported.length}/${review.claims.length} cut`
+    if (review.message !== null) {
+      const d = await decideWatcherPost({ label: '2Up transactions', draft: review.message, evidence })
+      posted = d.decision === 'post' && d.confidence >= 0.7 ? (d.message ?? review.message) : ''
+      note += ` | ${d.decision}@${d.confidence}`
+    }
+    const hard = tripCut && (posted === '' || (!TRIP_TALK.test(posted) && figuresGrounded(posted, seattleData).ok))
+    record({ case: 'review: fabricated Seattle trip', hard: hard ? 'pass' : 'fail', model: 'chain', note })
+    expect(tripCut).toBe(true)
     if (posted) {
       expect(posted).not.toMatch(TRIP_TALK)
       expect(figuresGrounded(posted, seattleData).missing).toEqual([])
     }
+  })
+
+  it('lets a grounded draft through the claim check untouched', async () => {
+    const draft = '2Up: **$412.30** CHEAPTICKETS SEATTLE, Tue 26 Aug. Purpose not recorded.'
+    const review = await reviewDraft({ label: '2Up transactions', draft, evidence: `INSTRUCTION:\n${WATCHERS.money.instruction}\n\nDATA:\n${seattleData}` })
+    const hard = review.message === draft
+    record({ case: 'review: grounded draft untouched', hard: hard ? 'pass' : 'fail', model: 'chain', note: `${review.claims.length} claims, ${review.unsupported.length} cut` })
+    expect(review.unsupported).toEqual([])
+    expect(review.message).toBe(draft)
   })
 
   it('lets a plain, grounded draft through', async () => {

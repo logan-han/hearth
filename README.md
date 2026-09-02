@@ -52,6 +52,17 @@ tools per call is one of the better-evidenced ways to keep a small model
 picking the right one. Watchers and the nightly memory pass get a fixed short
 list instead.
 
+History is the last 15 messages verbatim plus a rolling summary of everything
+older, refreshed after a reply once six or more messages have fallen out of the
+window. The summary keeps names, dates, amounts and open requests and drops
+chatter, so a fact from last week is still in reach without the transcript.
+
+Before anything a watcher wrote reaches the chat it passes two checks in fresh
+contexts: each checkable claim is tested against the evidence by a call that
+never sees the draft, and what fails is cut; then a payoff-framed decision says
+post or skip with a confidence. A chat also hears from its watchers at most six
+times an hour, with an admin told the first time the cap holds something back.
+
 ## Layout
 
 | Path | What it is |
@@ -73,6 +84,8 @@ list instead.
 | `lib/model.ts` | Tiered model chain: local, Gemini, OpenRouter |
 | `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations |
 | `lib/tools/router.ts` | Which tool groups a chat turn sees, and the `more_tools` escape hatch |
+| `lib/summary.ts` | The rolling summary each chat keeps of what fell out of the raw history window |
+| `lib/rate-cap.ts` | The ceiling on scheduled posts per chat per hour |
 | `lib/providers/` | Gmail and Microsoft Graph behind one interface |
 | `lib/db/` | Drizzle schema and queries |
 | `lib/crypto.ts` | AES-256-GCM for refresh tokens at rest |
@@ -516,8 +529,8 @@ as a partial and holds it against the total. Judge changes against the badge,
 since it is the stricter of the two.
 
 Query-layer tests run against a real Postgres, in process, via PGlite. The
-harness in `tests/helpers/db.ts` applies `drizzle/0000_init.sql` to a fresh
-database per test, so constraints, defaults and the claim-by-predicate updates
+harness in `tests/helpers/db.ts` applies every migration in `drizzle/` to a
+fresh database per test, so constraints, defaults and the claim-by-predicate updates
 that stop double-sends behave exactly as they do on Neon. `lib/db/index.ts`
 exposes `__setDb` purely so that instance can be swapped in.
 

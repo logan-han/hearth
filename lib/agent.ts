@@ -11,7 +11,7 @@ import { z } from 'zod'
 import { withModelFallback, gateSlot, type ModelSlot } from './model'
 import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
 import type { ToolContext } from './tools/context'
-import { recentMessages, listMemories, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals } from './db/queries'
+import { recentMessages, listMemories, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals, chatSummary } from './db/queries'
 import type { Member } from './db/schema'
 import { timezone, language, units, reasoningLevel } from './env'
 import { traced, callTelemetry } from './telemetry'
@@ -87,15 +87,21 @@ async function ambientContext(chatId: string, member: Member | null, mode: Agent
     return { text: ['Known household facts:', ...memories.map((m) => `- [${m.id}] ${m.content}`)].join('\n'), pendingDrafts: false }
   }
 
-  const [memories, members, connections, drafts, proposals] = await Promise.all([
+  const [memories, members, connections, drafts, proposals, summary] = await Promise.all([
     listMemories(CHAT_MEMORY_LIMIT).catch(() => []),
     allMembersWithLinks().catch(() => []),
     member ? connectionsFor(member.id).catch(() => []) : Promise.resolve([]),
     pendingDrafts(chatId).catch(() => []),
     pendingProposals(chatId).catch(() => []),
+    chatSummary(chatId).catch(() => ({ summary: null, through: 0 })),
   ])
 
   const lines: string[] = []
+  if (summary.summary) {
+    // What the raw window no longer holds; the newest messages follow verbatim.
+    lines.push('Earlier in this chat, summarised (the latest messages follow in full):')
+    lines.push(summary.summary)
+  }
   const family = members.filter((m) => m.allowed)
   if (family.length) {
     // Every member's links, not just the speaker's: without this the model
@@ -432,6 +438,112 @@ export async function decideWatcherPost(input: {
     )
     return { ...r.output, model: slot.name }
   })
+}
+
+/* -------------------------------------------------------------- draft review */
+
+const MAX_CLAIMS = 6
+const claimsSchema = z.object({
+  claims: z.array(z.string()).max(MAX_CLAIMS).describe('Checkable statements, one short sentence each, self-contained'),
+})
+const checkSchema = z.object({
+  supported: z.boolean(),
+  excerpt: z.string().optional().describe('The words in the evidence that establish it, when supported'),
+})
+const rewriteSchema = z.object({ message: z.string().describe('The post rebuilt from the supported statements only; empty if they amount to nothing worth posting') })
+
+const EXTRACT_PROMPT = [
+  'You list the checkable statements in a short post from a family assistant.',
+  'One fact per statement, one short self-contained sentence each: a figure, a date or time, a name, a place, a stated purpose, a flag such as new payee, unusual, duplicate or refund. Never combine two facts in one statement: "$412.30 was paid to Cheaptickets for flights to Seattle" is three statements (the amount, the payee, the flights).',
+  'Copy names, payee strings, figures and dates exactly as the post writes them; never shorten or normalise them.',
+  'Leave out hedges, offers, questions and statements of what is not known, such as "purpose not recorded".',
+  'Return an empty list when there is nothing checkable.',
+].join(' ')
+
+const CHECK_PROMPT = [
+  'You check one statement against evidence and nothing else.',
+  'supported is true when the evidence states the statement or it follows directly from it: a figure that appears, a date that appears, an instruction that says to post exactly this, a sum of listed figures.',
+  'Differences of form do not matter: case, punctuation, currency symbols, and a name that is part of a longer string in the evidence (CHEAPTICKETS within CHEAPTICKETS SEATTLE) all count as the same thing.',
+  'Differences of substance do: a purpose, place, trip, plan or cause is supported only if the evidence names it. A payee string is not a place anyone went. A statement with any unsupported part is not supported. Do not use outside knowledge.',
+  'Quote the excerpt that establishes a supported statement.',
+].join(' ')
+
+const REWRITE_PROMPT = [
+  'You rebuild a short post for a family chat from a list of supported statements.',
+  'Use only the supported statements, in the original post\'s style and order, and reuse its wording where the wording is about those statements.',
+  'Nothing from the original that is not in the supported list may appear, however it is phrased: not as a hedge, a question, or a hint.',
+  'Return an empty message when the supported statements amount to nothing worth posting.',
+].join(' ')
+
+export type DraftReview = { claims: string[]; unsupported: string[]; message: string | null }
+
+/**
+ * Chain-of-Verification, factored: pull the checkable claims out of the draft,
+ * ask about each one in a fresh context that sees only the evidence (never the
+ * draft, so the checker cannot be talked into agreeing with it), then strip
+ * what failed. Statements of what is not known are not claims, so a draft
+ * that says "purpose not recorded" passes untouched.
+ */
+export async function reviewDraft(input: { label: string; draft: string; evidence: string }): Promise<DraftReview> {
+  const evidence = input.evidence || '(no tool results)'
+  const meta = (step: string, model: string) => ({ traceName: 'hearth.verify', tags: ['verify', step], metadata: { label: input.label, model } })
+
+  const claims = (
+    await withModelFallback((slot) =>
+      traced(meta('extract', slot.name), () =>
+        generateText({
+          model: slot.model,
+          system: EXTRACT_PROMPT,
+          prompt: `POST:\n${input.draft}`,
+          output: Output.object({ schema: claimsSchema, name: 'claims' }),
+          temperature: 0,
+          maxOutputTokens: 500,
+          timeout: { stepMs: 30_000 },
+          telemetry: callTelemetry('hearth.verify'),
+        }),
+      ).then((r) => r.output.claims),
+    )
+  ).slice(0, MAX_CLAIMS)
+  if (claims.length === 0) return { claims, unsupported: [], message: input.draft }
+
+  const checks = await Promise.all(
+    claims.map((claim) =>
+      withModelFallback((slot) =>
+        traced(meta('check', slot.name), () =>
+          generateText({
+            model: slot.model,
+            system: CHECK_PROMPT,
+            prompt: `EVIDENCE:\n${evidence}\n\nSTATEMENT TO CHECK:\n${claim}`,
+            output: Output.object({ schema: checkSchema, name: 'check' }),
+            temperature: 0,
+            maxOutputTokens: 300,
+            timeout: { stepMs: 30_000 },
+            telemetry: callTelemetry('hearth.verify'),
+          }),
+        ).then((r) => r.output),
+      ),
+    ),
+  )
+  const unsupported = claims.filter((_, i) => !checks[i].supported)
+  if (unsupported.length === 0) return { claims, unsupported, message: input.draft }
+  if (unsupported.length === claims.length) return { claims, unsupported, message: null }
+
+  const supported = claims.filter((_, i) => checks[i].supported)
+  const rewritten = await withModelFallback((slot) =>
+    traced(meta('rewrite', slot.name), () =>
+      generateText({
+        model: slot.model,
+        system: REWRITE_PROMPT,
+        prompt: `ORIGINAL POST (for style only):\n${input.draft}\n\nSUPPORTED STATEMENTS:\n${supported.map((c) => `- ${c}`).join('\n')}\n\nNOT SUPPORTED, must not appear in any form:\n${unsupported.map((u) => `- ${u}`).join('\n')}`,
+        output: Output.object({ schema: rewriteSchema, name: 'rewrite' }),
+        temperature: 0,
+        maxOutputTokens: 600,
+        timeout: { stepMs: 30_000 },
+        telemetry: callTelemetry('hearth.verify'),
+      }),
+    ).then((r) => r.output.message.trim()),
+  )
+  return { claims, unsupported, message: rewritten || null }
 }
 
 /** A structured call that produced no usable object, as opposed to a transport failure. */

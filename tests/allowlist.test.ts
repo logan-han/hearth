@@ -10,6 +10,7 @@ const clearStranger = vi.fn()
 const rememberChat = vi.fn()
 const send = vi.fn<(chatId: string, text: string, reply?: number) => Promise<void>>()
 
+vi.mock('@/lib/summary', () => ({ maybeSummarise: vi.fn(async () => false) }))
 vi.mock('@/lib/db/queries', () => ({
   upsertMember, memberByTelegramId, strangersIn, noteStranger, clearStranger, rememberChat,
   setMemberAllowed: vi.fn(async () => undefined),

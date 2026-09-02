@@ -227,6 +227,23 @@ describe('memories', () => {
   })
 })
 
+describe('chat summaries', () => {
+  it('starts empty and remembers what it has covered', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    expect(await q.chatSummary('-100')).toEqual({ summary: null, through: 0 })
+    await q.setChatSummary('-100', 'Talked about bins.', 42)
+    expect(await q.chatSummary('-100')).toEqual({ summary: 'Talked about bins.', through: 42 })
+  })
+
+  it('lists messages after an id, oldest first', async () => {
+    const a = await q.recordMessage({ chatId: '-100', authorName: 'Logan', role: 'user', content: 'one' })
+    await q.recordMessage({ chatId: '-100', authorName: 'Logan', role: 'user', content: 'two' })
+    await q.recordMessage({ chatId: '-200', authorName: 'Logan', role: 'user', content: 'elsewhere' })
+    expect((await q.messagesAfter('-100', a)).map((m) => m.content)).toEqual(['two'])
+    expect((await q.messagesAfter('-100', 0)).map((m) => m.content)).toEqual(['one', 'two'])
+  })
+})
+
 describe('automations', () => {
   const soon = new Date('2026-09-01T00:00:00Z')
 

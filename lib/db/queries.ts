@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, lte, ne, sql, isNull } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, lte, ne, sql, isNull, gt } from 'drizzle-orm'
 import { db } from './index'
 import {
   members, chats, connections, messages, familyEvents, memories, automations, settings, emailDrafts,
@@ -10,7 +10,8 @@ import { encrypt, decrypt, randomToken } from '../crypto'
 import type { Provider } from '../oauth/providers'
 
 export const MAX_HISTORY = 200
-const CONTEXT_WINDOW = 30
+/** Raw messages the model sees verbatim; older talk arrives as the chat's summary. */
+export const CONTEXT_WINDOW = 15
 
 /* ---------------------------------------------------------------- members */
 
@@ -65,6 +66,32 @@ export async function rememberChat(chatId: string, type: string, title: string |
     .insert(chats)
     .values({ chatId, type, title })
     .onConflictDoUpdate({ target: chats.chatId, set: { type, title } })
+}
+
+export async function chatSummary(chatId: string): Promise<{ summary: string | null; through: number }> {
+  const [row] = await db()
+    .select({ summary: chats.summary, through: chats.summaryThrough })
+    .from(chats)
+    .where(eq(chats.chatId, chatId))
+    .limit(1)
+  return { summary: row?.summary ?? null, through: row?.through ?? 0 }
+}
+
+export async function setChatSummary(chatId: string, summary: string, through: number): Promise<void> {
+  await db()
+    .update(chats)
+    .set({ summary, summaryThrough: through, summaryAt: new Date() })
+    .where(eq(chats.chatId, chatId))
+}
+
+/** Messages newer than an id, oldest first. */
+export async function messagesAfter(chatId: string, afterId: number, limit = MAX_HISTORY) {
+  return db()
+    .select()
+    .from(messages)
+    .where(and(eq(messages.chatId, chatId), gt(messages.id, afterId)))
+    .orderBy(asc(messages.id))
+    .limit(limit)
 }
 
 export async function strangersIn(chatId: string): Promise<Stranger[]> {

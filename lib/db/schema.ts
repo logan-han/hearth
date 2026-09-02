@@ -43,6 +43,11 @@ export const chats = pgTable(
     title: text('title'),
     strangers: text('strangers').notNull().default('[]'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Rolling summary of everything older than the raw history window. */
+    summary: text('summary'),
+    /** The newest message id the summary covers. */
+    summaryThrough: integer('summary_through'),
+    summaryAt: timestamp('summary_at', { withTimezone: true }),
   },
   (t) => [uniqueIndex('chats_chat_id_idx').on(t.chatId)],
 )

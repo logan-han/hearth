@@ -6,7 +6,7 @@ import * as q from '@/lib/db/queries'
 const generateText = vi.hoisted(() => vi.fn())
 vi.mock('ai', async (orig) => ({ ...(await orig<typeof import('ai')>()), generateText }))
 
-const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, isStructuredOutputError } = await import('@/lib/agent')
+const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, isStructuredOutputError } = await import('@/lib/agent')
 
 let client: PGlite
 
@@ -571,5 +571,54 @@ describe('decideWatcherPost', () => {
 
   it('tells a plain error apart from a structured-output failure', () => {
     expect(isStructuredOutputError(new Error('boom'))).toBe(false)
+  })
+})
+
+describe('reviewDraft', () => {
+  const out = (o: unknown) => ({ ...reply(''), output: o })
+
+  it('passes a draft whose every claim the evidence supports', async () => {
+    generateText
+      .mockResolvedValueOnce(out({ claims: ['$412.30 to CHEAPTICKETS SEATTLE', 'on Tue 26 Aug'] }))
+      .mockResolvedValueOnce(out({ supported: true, excerpt: '$412.30' }))
+      .mockResolvedValueOnce(out({ supported: true, excerpt: 'Tue 26 Aug' }))
+    const r = await reviewDraft({ label: 'x', draft: '2Up: $412.30 CHEAPTICKETS SEATTLE, Tue 26 Aug. Purpose not recorded.', evidence: 'DATA ...' })
+    expect(r.unsupported).toEqual([])
+    expect(r.message).toBe('2Up: $412.30 CHEAPTICKETS SEATTLE, Tue 26 Aug. Purpose not recorded.')
+    expect(generateText).toHaveBeenCalledTimes(3)
+    // The checker never sees the draft, only the evidence and one statement.
+    const check = String(generateText.mock.calls[1][0].prompt)
+    expect(check).toContain('EVIDENCE:')
+    expect(check).not.toContain('Purpose not recorded')
+  })
+
+  it('cuts the claims that fail and keeps the rest', async () => {
+    generateText
+      .mockResolvedValueOnce(out({ claims: ['$412.30 to CHEAPTICKETS', 'a trip to Seattle was booked'] }))
+      .mockResolvedValueOnce(out({ supported: true }))
+      .mockResolvedValueOnce(out({ supported: false }))
+      .mockResolvedValueOnce(out({ message: '2Up: $412.30 CHEAPTICKETS SEATTLE.' }))
+    const r = await reviewDraft({ label: 'x', draft: '2Up: $412.30 CHEAPTICKETS SEATTLE. Looks like a trip to Seattle!', evidence: 'DATA ...' })
+    expect(r.unsupported).toEqual(['a trip to Seattle was booked'])
+    expect(r.message).toBe('2Up: $412.30 CHEAPTICKETS SEATTLE.')
+    const rewrite = String(generateText.mock.calls[3][0].prompt)
+    expect(rewrite).toContain('SUPPORTED STATEMENTS:\n- $412.30 to CHEAPTICKETS')
+    expect(rewrite).toContain('NOT SUPPORTED')
+  })
+
+  it('returns silence when nothing survives', async () => {
+    generateText
+      .mockResolvedValueOnce(out({ claims: ['a trip to Seattle was booked'] }))
+      .mockResolvedValueOnce(out({ supported: false }))
+    const r = await reviewDraft({ label: 'x', draft: 'Looks like a trip to Seattle!', evidence: 'DATA ...' })
+    expect(r.message).toBeNull()
+    expect(generateText).toHaveBeenCalledTimes(2)
+  })
+
+  it('leaves a draft with nothing checkable alone', async () => {
+    generateText.mockResolvedValueOnce(out({ claims: [] }))
+    const r = await reviewDraft({ label: 'x', draft: 'Nothing new worth flagging.', evidence: '' })
+    expect(r.message).toBe('Nothing new worth flagging.')
+    expect(generateText).toHaveBeenCalledTimes(1)
   })
 })
