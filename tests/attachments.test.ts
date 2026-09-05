@@ -120,6 +120,31 @@ describe('photos', () => {
     expect(runAgent).toHaveBeenCalled()
   })
 
+  it('keeps a calendar file, naming it in the history so a later mention makes sense', async () => {
+    downloadFile.mockResolvedValue({ bytes: new TextEncoder().encode('BEGIN:VCALENDAR\r\nEND:VCALENDAR'), path: 'documents/file_2.ics' })
+    await processUpdate({
+      update_id: 4,
+      message: {
+        message_id: 8, date: 1787000000,
+        from: { id: 111, is_bot: false, first_name: 'Logan' },
+        chat: { id: 111, type: 'private' },
+        document: { file_id: 'i', file_unique_id: 'i', file_name: 'cuboree.ics', mime_type: 'text/calendar' },
+        caption: 'Add uploaded .ics file into family calendar',
+      },
+    } as never)
+    const arg = runAgent.mock.calls[0][0]
+    expect(arg.attachments).toHaveLength(1)
+    expect(arg.attachments?.[0]).toMatchObject({ mediaType: 'text/calendar', kind: 'document' })
+    expect(recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'Add uploaded .ics file into family calendar [sent document cuboree.ics]' }),
+    )
+  })
+
+  it('works out the type of a calendar file from its name when Telegram gives none', () => {
+    expect(mediaTypeFor('documents/file_2.ics')).toBe('text/calendar')
+    expect(mediaTypeFor('notes.txt', 'application/octet-stream')).toBe('text/plain')
+  })
+
   it('ignores a file type no model can read', async () => {
     downloadFile.mockResolvedValue({ bytes: new Uint8Array([1]), path: 'files/archive.zip' })
     await processUpdate({

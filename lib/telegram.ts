@@ -92,6 +92,7 @@ const EXT_TYPES: Record<string, string> = {
   jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
   webp: 'image/webp', heic: 'image/heic', pdf: 'application/pdf',
   oga: 'audio/ogg', ogg: 'audio/ogg', mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav',
+  ics: 'text/calendar', txt: 'text/plain', csv: 'text/csv', md: 'text/markdown',
 }
 
 /** Best-effort media type, preferring what Telegram told us over the extension. */

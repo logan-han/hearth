@@ -1,14 +1,21 @@
 import { describe, it, expect } from 'vitest'
-import { TOOL_GROUPS, CORE_TOOLS, routeGroups, groupsAfter, activeToolsFor, buildTools } from '@/lib/tools'
+import { TOOL_GROUPS, CORE_TOOLS, SITUATIONAL_TOOLS, routeGroups, groupsAfter, activeToolsFor, buildTools } from '@/lib/tools'
 
 const ctx = { chatId: '-100', member: null, memberName: 'Logan', now: new Date(), notices: [] }
 
 describe('tool groups', () => {
   it('cover every tool exactly once, with the core always in reach', () => {
     const all = Object.keys(buildTools(ctx)).sort()
-    const listed = [...CORE_TOOLS, ...Object.values(TOOL_GROUPS).flat()].sort()
+    const listed = [...CORE_TOOLS, ...Object.values(TOOL_GROUPS).flat(), ...SITUATIONAL_TOOLS].sort()
     expect(listed).toEqual(all)
     expect(new Set(listed).size).toBe(listed.length)
+  })
+
+  it('keeps situational tools out of reach until the message brings what they act on', () => {
+    for (const t of SITUATIONAL_TOOLS) {
+      expect(activeToolsFor([])).not.toContain(t)
+      expect(activeToolsFor(Object.keys(TOOL_GROUPS) as (keyof typeof TOOL_GROUPS)[])).not.toContain(t)
+    }
   })
 
   it('keeps a plain chat turn to the core set', () => {

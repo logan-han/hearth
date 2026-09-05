@@ -15,11 +15,12 @@ const send = vi.fn<(chatId: string, text: string) => Promise<void>>()
 const verify = vi.fn<() => Promise<boolean>>()
 const insertValues = vi.fn()
 
-const { recordMessage, messagesSince, getSetting, setSetting } = vi.hoisted(() => ({
+const { recordMessage, messagesSince, getSetting, setSetting, retireStaleProposals } = vi.hoisted(() => ({
   recordMessage: vi.fn(async () => 1),
   messagesSince: vi.fn(async () => [] as unknown[]),
   getSetting: vi.fn<(key: string) => Promise<string | null>>(async () => null),
   setSetting: vi.fn<(key: string, value: string) => Promise<void>>(async () => {}),
+  retireStaleProposals: vi.fn(async (_now: Date) => ({ expired: 0, superseded: 0 })),
 }))
 vi.mock('@/lib/db/queries', () => ({
   dueAutomations,
@@ -28,6 +29,7 @@ vi.mock('@/lib/db/queries', () => ({
   messagesSince,
   getSetting,
   setSetting,
+  retireStaleProposals,
   allowedMembers: vi.fn(async () => [
     { id: 9, telegramUserId: '900', name: 'Boss', isAdmin: true, allowed: true },
   ]),

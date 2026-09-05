@@ -60,6 +60,46 @@ describe('the family API', () => {
     expect((await post({ action: 'cancel_event', id: 999 })).status).toBe(404)
   })
 
+  it('adds a proposal to the calendar on a yes, once, and drops it on a no', async () => {
+    await asMember()
+    const yes = await q.addProposal({
+      chatId: '-100', title: 'Aths carnival', location: 'School oval',
+      startsAt: new Date('2030-09-03T03:30:00Z'), endsAt: new Date('2030-09-03T05:00:00Z'), allDay: false,
+    })
+    const no = await q.addProposal({
+      chatId: '-100', title: 'Pharmacist call',
+      startsAt: new Date('2030-09-01T00:00:00Z'), endsAt: new Date('2030-09-02T00:00:00Z'), allDay: true,
+    })
+    expect(await q.pendingProposals('-100')).toHaveLength(2)
+
+    const res = await post({ action: 'accept_proposal', id: yes.id })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ ok: true, added: true })
+    const [event] = await q.listFamilyEvents(new Date('2030-09-01'), new Date('2030-09-30'))
+    expect(event).toMatchObject({ title: 'Aths carnival', location: 'School oval' })
+    // A second click finds nothing left to accept and adds nothing.
+    expect((await post({ action: 'accept_proposal', id: yes.id })).status).toBe(404)
+    expect(await q.listFamilyEvents(new Date('2030-09-01'), new Date('2030-09-30'))).toHaveLength(1)
+
+    expect((await post({ action: 'reject_proposal', id: no.id })).status).toBe(200)
+    expect(await q.pendingProposals('-100')).toHaveLength(0)
+    expect((await post({ action: 'reject_proposal', id: no.id })).status).toBe(404)
+  })
+
+  it('settles a proposal whose event already got there another way without doubling it', async () => {
+    await asMember()
+    const p = await q.addProposal({
+      chatId: '-100', title: 'Sports day',
+      startsAt: new Date('2030-09-09T23:00:00Z'), endsAt: new Date('2030-09-10T02:00:00Z'), allDay: false,
+    })
+    await q.addFamilyEvent({ title: 'sports day', startsAt: new Date('2030-09-09T23:00:00Z'), endsAt: new Date('2030-09-10T02:00:00Z') })
+    // Already off the list, and a late click still cannot double the event.
+    expect(await q.pendingProposals('-100')).toHaveLength(0)
+    const res = await post({ action: 'accept_proposal', id: p.id })
+    expect(await res.json()).toMatchObject({ ok: true, added: false, already: 'sports day' })
+    expect(await q.listFamilyEvents(new Date('2030-09-01'), new Date('2030-09-30'))).toHaveLength(1)
+  })
+
   it('pauses and resumes a reminder, recomputing its next run', async () => {
     await asMember()
     const a = await q.addAutomation({

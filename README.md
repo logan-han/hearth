@@ -84,6 +84,7 @@ times an hour, with an admin told the first time the cap holds something back.
 | `lib/model.ts` | Tiered model chain: local, Gemini, OpenRouter |
 | `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations |
 | `lib/tools/router.ts` | Which tool groups a chat turn sees, and the `more_tools` escape hatch |
+| `lib/ics-parse.ts` | Reading a calendar file someone sends, for the listing and `import_calendar_file` |
 | `lib/summary.ts` | The rolling summary each chat keeps of what fell out of the raw history window |
 | `lib/rate-cap.ts` | The ceiling on scheduled posts per chat per hour |
 | `lib/providers/` | Gmail and Microsoft Graph behind one interface |
@@ -269,10 +270,32 @@ the bot shows what it found and waits for someone to say yes. Nothing the bot
 merely *found* reaches the shared calendar on its own, which is the same rule
 that governs outbound email.
 
-Only some models can read images. Gemini and `minimax-m3:free` can; the paid
-`minimax-m2.7` at the tail of the chain cannot, and fails with a clear error the
-fallback simply steps past. Attachments that cannot be fetched or are of a type
-no model reads are dropped, and the bot answers on the text alone.
+Only some models can read images. Gemini and MiniMax M3 (free or paid) can;
+the older `minimax-m2.7` cannot, and fails with a clear error the fallback
+simply steps past, which is one reason the paid tail in `.env.example` is
+`minimax/minimax-m3` rather than m2.7: same price, newer, and it reads what the
+free head reads. Attachments that cannot be fetched or are of a type no model
+reads are dropped, and the bot answers on the text alone.
+
+Text files are read in code and handed to the model as text, because the
+model endpoints accept no file type beyond images, PDFs and audio. A calendar
+file (`.ics`, recognised by its content as well as its name) gets one thing
+more: its events are parsed here, with time zones, all-day dates and repeats
+worked out deterministically, and listed for the model; asked to add them, it
+calls `import_calendar_file` once and the whole file lands on the family
+calendar, duplicates skipped and repeating events reported rather than
+guessed at. A file is readable only in the message it arrives with, so send
+the request as the file's caption.
+
+**Saying a thing is done is not doing it.** A chat reply that reports a change
+(added, replaced, cancelled, sent) while no tool that changes anything ran is
+judged by a typed model call, the same shape as the ambient gate, and one
+that reports a change is sent back to the model with the note that nothing
+happened: act now, or say so. Should it insist a second time, the reply goes
+out with a line saying nothing was changed. Events are also changed in place
+with `update_family_event`, so "replace" is one call and every subscribed
+calendar updates the same entry instead of showing a cancellation beside a new
+one.
 
 ## Keeping watch
 
@@ -406,12 +429,16 @@ message cannot rewrite the query or reach another project.
 
 ## The web dashboard
 
-The site root is a sign-in screen, then **Home**: the month calendar with
-what's next, the reminders that are running and the shared lists beneath it,
-plus a nudge when proposals await a yes. Home is not read-only: any recognised
-member can cancel an event, pause, resume or delete a reminder, and tick off,
-add or remove list items — the same things they could ask the bot to do, one
-click closer. Admins also get **System** and
+The site root is a sign-in screen, then **Home**: anything the bot has
+proposed and is waiting on a yes for, listed with when it is, which chat it
+was proposed in and what was found, then the month calendar with what's next,
+the reminders that are running and the shared lists beneath it. Home is not
+read-only: any recognised member can add or decline a proposal, cancel an
+event, pause, resume or delete a reminder, and tick off, add or remove list
+items — the same things they could ask the bot to do, one click closer. The
+list only ever holds live questions: a proposal whose occasion has passed, or
+whose event has since reached the calendar another way, drops out at once,
+and the next tick records it as expired or superseded. Admins also get **System** and
 **Settings**; for everyone else Home is the only destination, so no tabs are
 shown at all. An admin landing on a deployment with no bot token is redirected
 to **/setup**, the first-run guide.
@@ -425,7 +452,10 @@ each day they cover.
 Sign-in reuses the Google and Microsoft clients already configured for member
 linking. Both flows come back through the same provider callback and are told
 apart by a `purpose` claim in the signed state, so **no extra redirect URI has
-to be registered** in either console. For a recognised member, signing in also
+to be registered** in either console. Linking forces Google's consent screen,
+because that is the only way to be handed a refresh token; signing in does
+not, so a returning admin picks an account and is through, and only a first
+sign-in still consents (and, as below, links). For a recognised member, signing in also
 completes the mailbox link whenever the provider hands back a refresh token —
 to the family, the web button and /connect are the same ceremony — though it
 only fills a gap or refreshes the same address, never repointing an existing

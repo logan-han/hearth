@@ -17,7 +17,7 @@ export async function startAuth(req: Request, provider: Provider): Promise<Respo
 
   if (url.searchParams.get('signin') === '1') {
     const state = await signState({ tg: '', name: '', chat: '', purpose: 'signin' }, '10m')
-    return NextResponse.redirect(authorizeUrl(provider, state))
+    return NextResponse.redirect(authorizeUrl(provider, state, 'signin'))
   }
 
   const token = url.searchParams.get('t')

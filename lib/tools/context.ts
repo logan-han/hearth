@@ -1,4 +1,5 @@
 import type { Member } from '../db/schema'
+import type { ParsedIcs } from '../ics-parse'
 
 /** Ambient facts every tool needs: who is asking, and where. */
 export type ToolContext = {
@@ -8,6 +9,8 @@ export type ToolContext = {
   now: Date
   /** Side-channel for things the caller should announce after the run. */
   notices: string[]
+  /** Calendar files (.ics) attached to the message being answered, already parsed. */
+  calendarFiles?: { filename: string; parsed: ParsedIcs }[]
 }
 
 export function requireMember(ctx: ToolContext): Member {

@@ -170,7 +170,7 @@ describe('runAgent', () => {
   it('carries pending proposals in context, so a bare yes can settle one', async () => {
     await q.addProposal({
       chatId: '-100', memberId: null, title: 'Sports day',
-      startsAt: new Date('2026-09-09T23:00:00Z'), endsAt: new Date('2026-09-10T00:00:00Z'),
+      startsAt: new Date('2030-09-09T23:00:00Z'), endsAt: new Date('2030-09-10T00:00:00Z'),
       allDay: false, source: null,
     })
     generateText.mockResolvedValue(reply('ok'))
@@ -241,6 +241,52 @@ describe('runAgent', () => {
     expect(generateText.mock.calls[0][0].messages.at(-1).content[0].text).toContain('sent a photo')
   })
 
+  it('reads a calendar file into a listing, keeps its events for the import tool, and offers that tool', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    const ics = [
+      'BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'SUMMARY:Scouts Cuboree', 'DTSTART;VALUE=DATE:20260930', 'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n')
+    await runAgent({
+      ...input,
+      text: 'Add uploaded .ics file into family calendar',
+      attachments: [{ bytes: new TextEncoder().encode(ics), mediaType: 'text/calendar', filename: 'cuboree.ics', kind: 'document' }],
+    })
+    const call = generateText.mock.calls[0][0]
+    const content = call.messages.at(-1).content
+    // Text and a listing; no file part, which the endpoints would reject.
+    expect(content).toHaveLength(2)
+    expect(content[1].type).toBe('text')
+    expect(content[1].text).toContain('Calendar file "cuboree.ics": 1 event')
+    expect(content[1].text).toContain('Scouts Cuboree: Wed, 30 Sept 2026 (all day)')
+    const active: string[] = call.prepareStep({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools
+    expect(active).toContain('import_calendar_file')
+    // The import tool reaches the parsed events through the shared context.
+    const out = await call.tools.import_calendar_file.execute({}, {})
+    expect(out.added).toHaveLength(1)
+    const [e] = await q.listFamilyEvents(new Date('2026-09-01'), new Date('2026-10-30'))
+    expect(e).toMatchObject({ title: 'Scouts Cuboree', allDay: true })
+  })
+
+  it('recognises a calendar by its content when the type and name say nothing', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    const ics = 'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:Camp\r\nDTSTART;VALUE=DATE:20261003\r\nEND:VEVENT\r\nEND:VCALENDAR'
+    await runAgent({ ...input, attachments: [{ bytes: new TextEncoder().encode(ics), mediaType: 'text/plain', filename: 'attachment', kind: 'document' }] })
+    const call = generateText.mock.calls[0][0]
+    expect(call.messages.at(-1).content[1].text).toContain('Calendar file "attachment": 1 event')
+    expect(call.prepareStep({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools).toContain('import_calendar_file')
+  })
+
+  it('hands any other text file over as text, and does not offer the import tool', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    await runAgent({
+      ...input,
+      attachments: [{ bytes: new TextEncoder().encode('milk\neggs'), mediaType: 'text/plain', filename: 'list.txt', kind: 'document' }],
+    })
+    const call = generateText.mock.calls[0][0]
+    expect(call.messages.at(-1).content[1]).toEqual({ type: 'text', text: 'Attached file "list.txt" (text/plain):\nmilk\neggs' })
+    expect(call.prepareStep({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools).not.toContain('import_calendar_file')
+  })
+
   it('names a voice note and a PDF for what they are', async () => {
     generateText.mockResolvedValue(reply('ok'))
     await runAgent({
@@ -307,6 +353,69 @@ describe('runAgent', () => {
     generateText.mockResolvedValue(reply('ok'))
     await runAgent(input)
     expect(generateText.mock.calls[0][0].system).toContain('bin night is Monday')
+  })
+})
+
+describe('a reply that reports a change no tool made', () => {
+  const input = { chatId: '-100', chatType: 'private', member: null, memberName: 'Logan', text: 'replace the 30 Sep vacation care with Scouts Cuboree' }
+  const judged = (choice: string) => ({ text: '', output: choice, steps: [], usage: {} })
+  const wrote = (text: string, toolName: string) => ({ text, steps: [{ toolCalls: [{ toolName, input: {} }] }], usage: {} })
+
+  it('asks the model to act or take it back, in the same conversation', async () => {
+    generateText
+      .mockResolvedValueOnce(reply('Done. Replaced it.'))
+      .mockResolvedValueOnce(judged('claims_change'))
+      .mockResolvedValueOnce(reply('Which one? That day has two events on the calendar.'))
+      .mockResolvedValueOnce(judged('no_change_claimed'))
+    const r = await runAgent(input)
+    expect(r.text).toBe('Which one? That day has two events on the calendar.')
+    expect(generateText).toHaveBeenCalledTimes(4)
+    expect(generateText.mock.calls[1][0].telemetry.functionId).toBe('hearth.claim')
+    const retry = generateText.mock.calls[2][0].messages
+    expect(retry.at(-2)).toEqual({ role: 'assistant', content: 'Done. Replaced it.' })
+    expect(String(retry.at(-1).content)).toContain('no tool was called this turn')
+  })
+
+  it('is satisfied by a write tool call on the second try', async () => {
+    generateText
+      .mockResolvedValueOnce(reply('Replaced it.'))
+      .mockResolvedValueOnce(judged('claims_change'))
+      .mockResolvedValueOnce(wrote('Replaced: Scouts Cuboree now sits on 30 Sep.', 'update_family_event'))
+    const r = await runAgent(input)
+    expect(r.text).toBe('Replaced: Scouts Cuboree now sits on 30 Sep.')
+    expect(generateText).toHaveBeenCalledTimes(3)
+  })
+
+  it('says plainly that nothing changed when the model insists', async () => {
+    generateText
+      .mockResolvedValueOnce(reply('Replaced it.'))
+      .mockResolvedValueOnce(judged('claims_change'))
+      .mockResolvedValueOnce(reply('Yes, replaced.'))
+      .mockResolvedValueOnce(judged('claims_change'))
+    const r = await runAgent(input)
+    expect(r.text).toBe('Yes, replaced.\n\nI did not change anything this turn. If that is not what you expected, tell me exactly what to change.')
+  })
+
+  it('trusts a report backed by a write tool call, without asking', async () => {
+    generateText.mockResolvedValueOnce(wrote('Replaced it.', 'update_family_event'))
+    expect((await runAgent(input)).text).toBe('Replaced it.')
+    expect(generateText).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves an ordinary answer alone once judged, and fails open when the judgement errors', async () => {
+    generateText.mockResolvedValueOnce(reply('Bins go out Monday.')).mockResolvedValueOnce(judged('no_change_claimed'))
+    expect((await runAgent(input)).text).toBe('Bins go out Monday.')
+    expect(generateText).toHaveBeenCalledTimes(2)
+
+    generateText.mockReset()
+    generateText.mockResolvedValueOnce(reply('Replaced it.')).mockRejectedValueOnce(new Error('429 quota'))
+    expect((await runAgent(input)).text).toBe('Replaced it.')
+  })
+
+  it('judges chat turns only, never a watcher or the sweep', async () => {
+    generateText.mockResolvedValue(reply('Replaced it.'))
+    await runAgent({ ...input, mode: 'watcher', history: false })
+    expect(generateText).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -463,17 +572,20 @@ describe('tool scoping by mode', () => {
   })
 
   it('names every call for the tracer, by mode', async () => {
+    const named = () => generateText.mock.calls.map((c) => (c[0] as { telemetry: { functionId: string } }).telemetry.functionId)
     generateText.mockResolvedValue(reply('ok'))
     await runAgent({ ...input, mode: 'chat' })
-    await runAgent({ ...input, mode: 'watcher' })
+    // A chat turn with no write behind it is judged for an unmade change, in a named call of its own.
+    expect(named()).toEqual(['hearth.chat', 'hearth.claim'])
     expect(generateText.mock.calls[0][0].telemetry).toMatchObject({ functionId: 'hearth.chat', recordInputs: true })
-    expect(generateText.mock.calls[1][0].telemetry).toMatchObject({ functionId: 'hearth.watcher' })
+    await runAgent({ ...input, mode: 'watcher' })
+    expect(named().at(-1)).toBe('hearth.watcher')
     generateText.mockResolvedValue({ ...reply(''), output: 'stay_silent' })
     await shouldChimeIn({ chatId: '-100', text: 'hi', memberName: 'Ada' })
-    expect(generateText.mock.calls[2][0].telemetry).toMatchObject({ functionId: 'hearth.gate' })
+    expect(named().at(-1)).toBe('hearth.gate')
     generateText.mockResolvedValue({ ...reply(''), output: { decision: 'skip', confidence: 1 } })
     await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
-    expect(generateText.mock.calls[3][0].telemetry).toMatchObject({ functionId: 'hearth.decision' })
+    expect(named().at(-1)).toBe('hearth.decision')
   })
 
   it('honours an explicit tool list', async () => {

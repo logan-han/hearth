@@ -39,6 +39,49 @@ function useFamilyActions() {
   return { act, busy, error }
 }
 
+/**
+ * Events the bot found in an email or a photo and will not add on its own.
+ * Saying yes here is the same yes as in the chat, one click closer, and it
+ * says where each one came from so nobody has to go and find the message.
+ */
+export function Proposals({
+  proposals,
+}: {
+  proposals: { id: number; title: string; when: string; chat: string; detail: string }[]
+}) {
+  const { act, busy, error } = useFamilyActions()
+
+  return (
+    <div className="panel">
+      <p className="group-note">
+        The bot spotted these in mail or a photo. Nothing here reaches the family calendar until someone says yes.
+      </p>
+      <ul className="listing doable">
+        {proposals.map((p) => (
+          <li key={p.id}>
+            <span className="grow">
+              <span className="title">{p.title}</span>
+              <span className="meta">
+                {p.when} · proposed in {p.chat}
+              </span>
+              {p.detail ? <span className="meta">{p.detail}</span> : null}
+            </span>
+            <span className="row-acts">
+              <button className="primary" disabled={busy} title="Add to the family calendar" onClick={() => act({ action: 'accept_proposal', id: p.id })}>
+                Add
+              </button>
+              <button disabled={busy} title="Not this one" onClick={() => act({ action: 'reject_proposal', id: p.id })}>
+                No
+              </button>
+            </span>
+          </li>
+        ))}
+      </ul>
+      {error ? <p className="flash bad">{error}</p> : null}
+    </div>
+  )
+}
+
 export function NextUp({ events }: { events: { id: number; title: string; when: string }[] }) {
   const { act, busy, error } = useFamilyActions()
 

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { Receiver } from '@upstash/qstash'
 import {
   dueAutomations, claimAutomation, allowedMembers, recordMessage,
-  messagesSince, getSetting, setSetting,
+  messagesSince, getSetting, setSetting, retireStaleProposals,
 } from '@/lib/db/queries'
 import { localDateKey, tzOffsetMs, nextRun } from '@/lib/cron'
 import { timezone } from '@/lib/env'
@@ -397,6 +397,15 @@ export async function POST(req: Request) {
   }
   const result = await runDue()
   await maybeConsolidateMemory(new Date())
+  // A proposal whose occasion has passed, or whose event got to the calendar
+  // another way, is no longer a question for anyone. The lists already hide
+  // these; this writes down why.
+  try {
+    const { expired, superseded } = await retireStaleProposals(new Date())
+    if (expired || superseded) console.info(`[tick] proposals retired: ${expired} expired, ${superseded} already on the calendar`)
+  } catch (err) {
+    console.error('[tick] could not retire stale proposals:', err)
+  }
   await flushTelemetry()
   return NextResponse.json({ ok: true, ...result })
 }

@@ -195,6 +195,24 @@ describe('family events and the ICS feed', () => {
   it('reports nothing for a cancel of an unknown id', async () => {
     expect(await q.cancelFamilyEvent(999)).toBeUndefined()
   })
+
+  it('updates an event in place, keeping its uid and moving updated_at so the feed bumps SEQUENCE', async () => {
+    const e = await q.addFamilyEvent({ title: 'Vacation care', startsAt: at('2026-09-29T14:00:00Z'), endsAt: at('2026-09-30T14:00:00Z'), allDay: true })
+    await new Promise((r) => setTimeout(r, 5))
+    const row = (await q.updateFamilyEvent(e.id, { title: 'Scouts Cuboree' }))!
+    expect(row.uid).toBe(e.uid)
+    expect(row.title).toBe('Scouts Cuboree')
+    expect(row.startsAt.getTime()).toBe(e.startsAt.getTime())
+    expect(row.updatedAt.getTime()).toBeGreaterThan(e.updatedAt.getTime())
+    expect((await q.getFamilyEvent(e.id))!.title).toBe('Scouts Cuboree')
+  })
+
+  it('will not update a cancelled event, which subscribers no longer see', async () => {
+    const e = await q.addFamilyEvent({ title: 'Gone', startsAt: at('2026-09-01T00:00:00Z'), endsAt: at('2026-09-01T01:00:00Z') })
+    await q.cancelFamilyEvent(e.id)
+    expect(await q.updateFamilyEvent(e.id, { title: 'Back?' })).toBeUndefined()
+    expect(await q.getFamilyEvent(999)).toBeUndefined()
+  })
 })
 
 describe('memories', () => {
@@ -379,10 +397,11 @@ describe('shared lists', () => {
 })
 
 describe('event proposals', () => {
+  // Far enough ahead that these stay in the future for the life of the test.
   const make = (source?: string) =>
     q.addProposal({
       chatId: 'c', title: 'Photo day',
-      startsAt: new Date('2026-09-09T23:00:00Z'), endsAt: new Date('2026-09-10T00:00:00Z'),
+      startsAt: new Date('2030-09-09T23:00:00Z'), endsAt: new Date('2030-09-10T00:00:00Z'),
       source: source ?? null,
     })
 
@@ -413,6 +432,57 @@ describe('event proposals', () => {
     const p = await make('s1')
     await q.settleProposal(p.id, 'rejected')
     expect(await q.pendingProposals('c')).toHaveLength(0)
+  })
+
+  it('hides a proposal whose occasion has passed, before anything has retired it', async () => {
+    const past = await q.addProposal({
+      chatId: 'c', title: 'Pharmacist call',
+      startsAt: new Date('2030-08-31T14:00:00Z'), endsAt: new Date('2030-09-01T14:00:00Z'), allDay: true,
+    })
+    const future = await make('later')
+    expect((await q.pendingProposals('c', new Date('2030-08-01T00:00:00Z'))).map((p) => p.id)).toEqual([past.id, future.id])
+    expect((await q.pendingProposals('c', new Date('2030-09-05T00:00:00Z'))).map((p) => p.id)).toEqual([future.id])
+    // The row itself is still pending until the tick retires it.
+    expect((await q.proposalForSource('later'))!.status).toBe('pending')
+  })
+
+  it('hides a proposal once the same occasion is on the calendar by another route', async () => {
+    const p = await make('s1')
+    expect(await q.pendingProposals('c', new Date('2030-01-01T00:00:00Z'))).toHaveLength(1)
+    const e = await q.addFamilyEvent({ title: ' photo DAY ', startsAt: p.startsAt, endsAt: p.endsAt })
+    expect(await q.pendingProposals('c', new Date('2030-01-01T00:00:00Z'))).toHaveLength(0)
+    // A cancelled event does not count as already there.
+    await q.cancelFamilyEvent(e.id)
+    expect(await q.pendingProposals('c', new Date('2030-01-01T00:00:00Z'))).toHaveLength(1)
+    // A different occasion on the same day is not the same one.
+    await q.addFamilyEvent({ title: 'Photo day', startsAt: new Date(p.startsAt.getTime() + 3_600_000), endsAt: p.endsAt })
+    expect(await q.pendingProposals('c', new Date('2030-01-01T00:00:00Z'))).toHaveLength(1)
+  })
+
+  it('retires stale proposals with a status that says why, and leaves the live ones', async () => {
+    const past = await q.addProposal({
+      chatId: 'c', title: 'Pharmacist call',
+      startsAt: new Date('2030-08-31T14:00:00Z'), endsAt: new Date('2030-09-01T14:00:00Z'), allDay: true,
+    })
+    const covered = await make('covered')
+    await q.addFamilyEvent({ title: 'Photo day', startsAt: covered.startsAt, endsAt: covered.endsAt })
+    const live = await q.addProposal({
+      chatId: 'c', title: 'Concert',
+      startsAt: new Date('2030-10-01T09:00:00Z'), endsAt: new Date('2030-10-01T10:00:00Z'),
+    })
+    const answered = await q.addProposal({
+      chatId: 'c', title: 'Old but answered',
+      startsAt: new Date('2030-08-01T00:00:00Z'), endsAt: new Date('2030-08-01T01:00:00Z'),
+    })
+    await q.settleProposal(answered.id, 'accepted')
+
+    expect(await q.retireStaleProposals(new Date('2030-09-05T00:00:00Z'))).toEqual({ expired: 1, superseded: 1 })
+    expect((await q.pendingProposals('c', new Date('2030-09-05T00:00:00Z'))).map((p) => p.id)).toEqual([live.id])
+    expect((await q.proposalForSource('covered'))!.status).toBe('superseded')
+    // Retired is settled: a late yes finds nothing to accept.
+    expect(await q.settleProposal(past.id, 'accepted')).toBeUndefined()
+    // Nothing left to do on a second pass.
+    expect(await q.retireStaleProposals(new Date('2030-09-05T00:00:00Z'))).toEqual({ expired: 0, superseded: 0 })
   })
 })
 

@@ -140,7 +140,10 @@ export function ModelPicker({
         <button disabled={busy} onClick={onCancel}>
           Cancel
         </button>
-        <span className="empty">Tried top to bottom. Every model must support tool calling.</span>
+        <span className="empty">
+          Tried top to bottom: a model that errors, is rate-limited, takes over 60 seconds or returns nothing is
+          skipped and the next one tried. Every model must support tool calling.
+        </span>
       </div>
     </div>
   )

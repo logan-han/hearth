@@ -16,6 +16,16 @@ const rows = (r: unknown): Row[] => ((r as { rows?: Row[] }).rows ?? []) as Row[
 const one = (r: unknown): Row => rows(r)[0] ?? {}
 const n = (v: unknown): number => Number(v ?? 0)
 
+/**
+ * A proposal still worth an answer, for a query aliasing event_proposals as
+ * `p`: the same rule as pendingProposals in the query layer. Past occasions
+ * and events already on the calendar by another route are not questions.
+ */
+const LIVE_PROPOSAL = sql`p.status = 'pending' and p.ends_at > now() and not exists (
+  select 1 from family_events e
+  where not e.cancelled and e.starts_at = p.starts_at and lower(trim(e.title)) = lower(trim(p.title))
+)`
+
 export async function gatherStats(month?: string) {
   const view = monthView(month, ctxNow())
   const [counts, byDay, models, chats, upcoming, automations, listRows, monthEvents] = await Promise.all([
@@ -27,7 +37,7 @@ export async function gatherStats(month?: string) {
         (select count(*) from messages) as messages,
         (select count(*) from family_events where not cancelled) as events,
         (select count(*) from memories where invalidated_at is null) as memories,
-        (select count(*) from event_proposals where status = 'pending') as proposals,
+        (select count(*) from event_proposals p where ${LIVE_PROPOSAL}) as proposals,
         (select count(*) from email_drafts where status = 'pending') as drafts,
         (select count(*) from email_drafts where status = 'sent') as sent
     `),
@@ -179,12 +189,12 @@ function safeStrangers(raw: unknown): number {
  */
 export async function gatherFamilyStats(month?: string) {
   const view = monthView(month, ctxNow())
-  const [counts, upcoming, automations, listRows, monthEvents] = await Promise.all([
+  const [counts, upcoming, automations, listRows, monthEvents, proposalRows] = await Promise.all([
     db().execute(sql`
       select
         (select count(*) from family_events where not cancelled) as events,
         (select count(*) from memories where invalidated_at is null) as memories,
-        (select count(*) from event_proposals where status = 'pending') as proposals
+        (select count(*) from event_proposals p where ${LIVE_PROPOSAL}) as proposals
     `),
     db().execute(sql`
       select id, title, starts_at, all_day from family_events
@@ -203,6 +213,14 @@ export async function gatherFamilyStats(month?: string) {
       select title, starts_at, ends_at, all_day from family_events
       where not cancelled and ends_at >= ${view.from} and starts_at <= ${view.to}
       order by starts_at
+    `),
+    // What the bot found and is waiting for a yes on, with the chat it was
+    // proposed in: a group's title, or the person whose DM it is.
+    db().execute(sql`
+      select p.id, p.title, p.starts_at, p.all_day, p.location, p.description,
+             coalesce(c.title, (select name from members where telegram_user_id = p.chat_id), p.chat_id) as chat
+      from event_proposals p left join chats c on c.chat_id = p.chat_id
+      where ${LIVE_PROPOSAL} order by p.starts_at
     `),
   ])
 
@@ -239,6 +257,16 @@ export async function gatherFamilyStats(month?: string) {
       open: l.items.filter((i) => !i.done).length,
       total: l.items.length,
       items: l.items,
+    })),
+    proposals: rows(proposalRows).map((r) => ({
+      id: n(r.id),
+      title: String(r.title),
+      when: whenText(r),
+      chat: String(r.chat),
+      // The first line of what the bot found, so the family can judge without opening the chat.
+      detail: [r.location ? String(r.location) : null, r.description ? String(r.description).split('\n')[0].slice(0, 140) : null]
+        .filter(Boolean)
+        .join(' · '),
     })),
   }
 }

@@ -63,7 +63,16 @@ type TelegramContext = {
   replyToUserName?: string
 }
 
-const SUPPORTED_DOC_TYPES = /^(image\/|application\/pdf$|audio\/)/
+/**
+ * What the model can be shown. Images, PDFs and audio go to it as files; text
+ * files, a calendar export (.ics) above all, are read in code and handed over
+ * as text, since the model endpoints accept no other file types.
+ */
+const SUPPORTED_DOC_TYPES = /^(image\/|application\/pdf$|audio\/|text\/)/
+
+function isCalendarBytes(bytes: Uint8Array): boolean {
+  return /^\s*BEGIN:VCALENDAR/i.test(new TextDecoder().decode(bytes.slice(0, 64)))
+}
 
 /**
  * Pull down anything the model can look at. Failures are swallowed on purpose:
@@ -75,7 +84,10 @@ async function collectAttachments(msg: Message): Promise<Attachment[]> {
   const grab = async (fileId: string, kind: Attachment['kind'], declared?: string, name?: string) => {
     try {
       const { bytes, path } = await downloadFile(fileId)
-      const mediaType = mediaTypeFor(name ?? path, declared)
+      let mediaType = mediaTypeFor(name ?? path, declared)
+      // A calendar export forwarded from a mail app often arrives with no
+      // useful type or extension; the file itself says what it is.
+      if (!SUPPORTED_DOC_TYPES.test(mediaType) && isCalendarBytes(bytes)) mediaType = 'text/calendar'
       if (!SUPPORTED_DOC_TYPES.test(mediaType)) return
       out.push({ bytes, mediaType, filename: name, kind })
     } catch (err) {
@@ -508,9 +520,10 @@ export async function processUpdate(update: Update): Promise<void> {
   await clearStranger(c.chatId, c.userId)
   const text = await cleanText(c.text)
   // History is text-only, so note that something was attached rather than
-  // leaving a bare caption with no explanation of what it described.
+  // leaving a bare caption with no explanation of what it described. A file's
+  // name goes in too, so a later "the .ics I sent" can at least be recognised.
   const forHistory = c.attachments.length
-    ? `${text} [sent ${c.attachments.map((a) => a.kind).join(', ')}]`.trim()
+    ? `${text} [sent ${c.attachments.map((a) => (a.filename ? `${a.kind} ${a.filename}` : a.kind)).join(', ')}]`.trim()
     : text
 
   // Every group message becomes context, whether or not we reply to it.

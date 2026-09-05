@@ -360,6 +360,92 @@ describe('family calendar tools', () => {
     const r = await call(familyCalendarTools(ctx), 'family_calendar_link', {})
     expect(String(r.url)).toMatch(/^https:\/\/hearth\.han\.life\/api\/calendar\/.+\/family\.ics$/)
   })
+
+  it('replaces an event in place: a new title keeps the id, the uid and the day', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Vacation care', start: '2026-09-30', all_day: true })
+    const r = await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, title: 'Scouts Cuboree' })
+    expect(r).toMatchObject({ id: a.id, title: 'Scouts Cuboree', all_day: true, changed: ['title'] })
+    const [e] = await q.listFamilyEvents(new Date('2026-09-29'), new Date('2026-10-02'))
+    expect(e).toMatchObject({ id: a.id, title: 'Scouts Cuboree', allDay: true, cancelled: false })
+    expect(ctx.notices.at(-1)).toContain('Updated on the family calendar: **Scouts Cuboree**')
+    expect(ctx.notices.at(-1)).toContain('(was "Vacation care")')
+  })
+
+  it('moves a timed event keeping its length, unless given a new end', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', {
+      title: 'Swim', start: '2026-09-01T09:00', end: '2026-09-01T10:30', all_day: false,
+    })
+    await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, start: '2026-09-02T14:00' })
+    let [e] = await q.listFamilyEvents(new Date('2026-08-30'), new Date('2026-09-05'))
+    // 2pm on 2 Sep in Melbourne (AEST, UTC+10) is 04:00 UTC.
+    expect(e.startsAt.toISOString()).toBe('2026-09-02T04:00:00.000Z')
+    expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(90 * 60_000)
+    await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, end: '2026-09-02T16:00' })
+    ;[e] = await q.listFamilyEvents(new Date('2026-08-30'), new Date('2026-09-05'))
+    expect(e.endsAt.toISOString()).toBe('2026-09-02T06:00:00.000Z')
+  })
+
+  it('makes a timed event all-day from a bare date, and will not double another event', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Camp', start: '2026-09-10T09:00', all_day: false })
+    const r = await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, start: '2026-09-11' })
+    expect(r.all_day).toBe(true)
+    const b = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Other', start: '2026-09-11', all_day: true })
+    const clash = await call(familyCalendarTools(ctx), 'update_family_event', { id: b.id, title: 'camp' })
+    expect(String(clash.error)).toContain('already at that time')
+  })
+
+  it('refuses to update a cancelled or unknown event, or to change nothing', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Gone', start: '2026-09-10T09:00', all_day: false })
+    expect(String((await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id })).error)).toContain('Nothing to change')
+    await call(familyCalendarTools(ctx), 'cancel_family_event', { id: a.id })
+    expect(String((await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, title: 'Back' })).error)).toContain('No live family event')
+    expect((await call(familyCalendarTools(ctx), 'update_family_event', { id: 999, title: 'x' })).error).toBeDefined()
+  })
+})
+
+describe('import_calendar_file', () => {
+  const ics = (...events: string[]) => ['BEGIN:VCALENDAR', ...events, 'END:VCALENDAR'].join('\r\n')
+  const ev = (...lines: string[]) => ['BEGIN:VEVENT', ...lines, 'END:VEVENT'].join('\r\n')
+  const withFile = async (text: string): Promise<ToolContext> => {
+    const { parseIcs } = await import('@/lib/ics-parse')
+    return { ...ctx, calendarFiles: [{ filename: 'school.ics', parsed: parseIcs(text) }] }
+  }
+
+  it('explains what to do when no file came with the message', async () => {
+    const r = await call(familyCalendarTools(ctx), 'import_calendar_file', {})
+    expect(String(r.error)).toContain('sent again')
+  })
+
+  it('adds every one-off event in one call, reports the repeating ones, and announces the lot', async () => {
+    const c = await withFile(ics(
+      ev('SUMMARY:Sports day', 'DTSTART;VALUE=DATE:20260910'),
+      ev('SUMMARY:Assembly', 'DTSTART:20260911T090000', 'DTEND:20260911T093000', 'LOCATION:Hall'),
+      ev('SUMMARY:Weekly swim', 'DTSTART:20260912T080000', 'RRULE:FREQ=WEEKLY'),
+    ))
+    const r = await call(familyCalendarTools(c), 'import_calendar_file', {})
+    expect((r.added as { title: string }[]).map((a) => a.title)).toEqual(['Sports day', 'Assembly'])
+    expect(r.repeating_not_added).toEqual(['Weekly swim'])
+    const rows = await q.listFamilyEvents(new Date('2026-09-01'), new Date('2026-09-30'))
+    expect(rows.map((e) => e.title)).toEqual(['Sports day', 'Assembly'])
+    expect(rows[0].allDay).toBe(true)
+    // 9am on 11 Sep in Melbourne is 23:00 UTC the evening before.
+    expect(rows[1].startsAt.toISOString()).toBe('2026-09-10T23:00:00.000Z')
+    expect(rows[1].location).toBe('Hall')
+    expect(c.notices.at(-1)).toContain('Added to the family calendar from school.ics')
+    expect(c.notices.at(-1)).toContain('**Assembly**')
+  })
+
+  it('leaves alone what is already there, and honours a title filter', async () => {
+    const c = await withFile(ics(ev('SUMMARY:Sports day', 'DTSTART;VALUE=DATE:20260910'), ev('SUMMARY:Assembly', 'DTSTART;VALUE=DATE:20260911')))
+    await call(familyCalendarTools(c), 'add_family_event', { title: 'sports day', start: '2026-09-10', all_day: true })
+    const r = await call(familyCalendarTools(c), 'import_calendar_file', { only: ['sports'] })
+    expect(r.added).toEqual([])
+    expect(r.already_on_calendar).toEqual(['Sports day'])
+    expect(String(r.note)).toContain('Nothing was added')
+    const again = await call(familyCalendarTools(c), 'import_calendar_file', {})
+    expect((again.added as { title: string }[]).map((a) => a.title)).toEqual(['Assembly'])
+    expect(await q.listFamilyEvents(new Date('2026-09-01'), new Date('2026-09-30'))).toHaveLength(2)
+  })
 })
 
 describe('memory tools', () => {

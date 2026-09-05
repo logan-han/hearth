@@ -81,13 +81,28 @@ describe('oauth state', () => {
 })
 
 describe('authorize urls', () => {
-  it('asks Google for offline access and forced consent', () => {
+  it('asks Google for offline access and forced consent when linking a mailbox', () => {
     const url = new URL(authorizeUrl('google', 'st'))
     expect(url.origin + url.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth')
     expect(url.searchParams.get('access_type')).toBe('offline')
     expect(url.searchParams.get('prompt')).toBe('consent')
     expect(url.searchParams.get('state')).toBe('st')
     expect(url.searchParams.get('redirect_uri')).toBe('https://hearth.han.life/api/oauth/google/callback')
+  })
+
+  it('does not force the consent screen on every dashboard sign-in', () => {
+    // Forced consent is for minting a refresh token; a returning admin should
+    // just pick an account. Offline access stays so a first sign-in still links.
+    const url = new URL(authorizeUrl('google', 'st', 'signin'))
+    expect(url.searchParams.get('prompt')).toBeNull()
+    expect(url.searchParams.get('access_type')).toBe('offline')
+    expect(url.searchParams.get('scope')).toContain('gmail.modify')
+  })
+
+  it('uses the same params for Microsoft either way, which never re-asks', () => {
+    const link = new URL(authorizeUrl('microsoft', 's')).searchParams
+    const signin = new URL(authorizeUrl('microsoft', 's', 'signin')).searchParams
+    expect([...signin.entries()]).toEqual([...link.entries()])
   })
 
   it('asks Google for mail and calendar scopes', () => {

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, lte, ne, sql, isNull, gt } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, lte, ne, sql, isNull, gt, exists, notExists } from 'drizzle-orm'
 import { db } from './index'
 import {
   members, chats, connections, messages, familyEvents, memories, automations, settings, emailDrafts,
@@ -270,6 +270,11 @@ export async function addFamilyEvent(input: {
   return row
 }
 
+export async function getFamilyEvent(id: number) {
+  const [row] = await db().select().from(familyEvents).where(eq(familyEvents.id, id)).limit(1)
+  return row
+}
+
 export async function listFamilyEvents(from: Date, to: Date) {
   return db()
     .select()
@@ -295,6 +300,30 @@ export async function cancelFamilyEvent(id: number) {
     .update(familyEvents)
     .set({ cancelled: true, updatedAt: new Date() })
     .where(eq(familyEvents.id, id))
+    .returning()
+  return row
+}
+
+/**
+ * Change an event in place. The uid stays, and `updatedAt` moves, which is
+ * what bumps SEQUENCE in the feed: subscribed calendars then replace the entry
+ * rather than showing the old one until it happens to drop out.
+ */
+export async function updateFamilyEvent(
+  id: number,
+  patch: {
+    title?: string
+    description?: string | null
+    location?: string | null
+    startsAt?: Date
+    endsAt?: Date
+    allDay?: boolean
+  },
+) {
+  const [row] = await db()
+    .update(familyEvents)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(and(eq(familyEvents.id, id), eq(familyEvents.cancelled, false)))
     .returning()
   return row
 }
@@ -608,11 +637,51 @@ export async function addProposal(input: {
   return row
 }
 
-export async function pendingProposals(chatId?: string): Promise<EventProposal[]> {
-  const where = chatId
-    ? and(eq(eventProposals.status, 'pending'), eq(eventProposals.chatId, chatId))
-    : eq(eventProposals.status, 'pending')
+/** A live event with the proposal's title at the proposal's instant: the same occasion, already on the calendar. */
+function alreadyOnCalendar() {
+  return db()
+    .select({ one: sql`1` })
+    .from(familyEvents)
+    .where(
+      and(
+        eq(familyEvents.cancelled, false),
+        eq(familyEvents.startsAt, eventProposals.startsAt),
+        sql`lower(trim(${familyEvents.title})) = lower(trim(${eventProposals.title}))`,
+      ),
+    )
+}
+
+/**
+ * A proposal still worth an answer: pending, its occasion not yet over, and
+ * not on the calendar already by another route. Decided at read time, so
+ * nothing stale is ever shown, whether or not the tick has been round yet.
+ */
+function liveProposal(now: Date) {
+  return and(eq(eventProposals.status, 'pending'), gt(eventProposals.endsAt, now), notExists(alreadyOnCalendar()))
+}
+
+export async function pendingProposals(chatId?: string, now: Date = new Date()): Promise<EventProposal[]> {
+  const where = chatId ? and(liveProposal(now), eq(eventProposals.chatId, chatId)) : liveProposal(now)
   return db().select().from(eventProposals).where(where).orderBy(asc(eventProposals.startsAt))
+}
+
+/**
+ * Retire, durably, what the read-time filter already hides, so the row says
+ * why it stopped being a question: superseded when its event reached the
+ * calendar another way, expired when the occasion passed unanswered.
+ */
+export async function retireStaleProposals(now: Date = new Date()): Promise<{ expired: number; superseded: number }> {
+  const superseded = await db()
+    .update(eventProposals)
+    .set({ status: 'superseded' })
+    .where(and(eq(eventProposals.status, 'pending'), exists(alreadyOnCalendar())))
+    .returning({ id: eventProposals.id })
+  const expired = await db()
+    .update(eventProposals)
+    .set({ status: 'expired' })
+    .where(and(eq(eventProposals.status, 'pending'), lte(eventProposals.endsAt, now)))
+    .returning({ id: eventProposals.id })
+  return { expired: expired.length, superseded: superseded.length }
 }
 
 /** Claim a proposal so a repeated "yes" cannot add the same event twice. */

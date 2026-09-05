@@ -9,13 +9,14 @@ import {
 } from 'ai'
 import { z } from 'zod'
 import { withModelFallback, gateSlot, type ModelSlot } from './model'
-import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
+import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, WRITE_TOOLS, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
 import type { ToolContext } from './tools/context'
 import { recentMessages, listMemories, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals, chatSummary } from './db/queries'
 import type { Member } from './db/schema'
 import { timezone, language, units, reasoningLevel } from './env'
 import { traced, callTelemetry } from './telemetry'
 import { formatLocal, localDateKey } from './cron'
+import { parseIcs, describeIcs } from './ics-parse'
 
 const MAX_STEPS = 8
 const STEP_TIMEOUT_MS = 60_000
@@ -135,15 +136,69 @@ async function ambientContext(chatId: string, member: Member | null, mode: Agent
   return { text: lines.join('\n'), pendingDrafts: drafts.length > 0 }
 }
 
+type AgentAttachment = NonNullable<AgentInput['attachments']>[number]
+
 /** A caption-less photo still needs something for the model to act on. */
-function describeAttachments(
-  attachments: { mediaType: string; kind: string }[],
-): string {
+function describeAttachments(attachments: { mediaType: string; kind: string }[]): string {
   if (attachments.length === 0) return ''
   const kinds = attachments.map((a) =>
-    a.kind === 'voice' ? 'a voice note' : a.mediaType === 'application/pdf' ? 'a PDF' : 'a photo',
+    a.kind === 'voice'
+      ? 'a voice note'
+      : a.mediaType === 'application/pdf'
+        ? 'a PDF'
+        : a.mediaType === 'text/calendar'
+          ? 'a calendar file'
+          : a.mediaType.startsWith('text/')
+            ? 'a text file'
+            : 'a photo',
   )
   return `[sent ${kinds.join(' and ')} with no message]`
+}
+
+const TEXT_FILE_CHARS = 20_000
+
+/**
+ * Images, PDFs and audio go to the model as files. Text files cannot: the
+ * OpenAI-compatible endpoints accept no other file types and would reject the
+ * whole call. So text is handed over as text, whatever the file is.
+ *
+ * A calendar file gets one thing more. Its instants are worked out here rather
+ * than by the model, because DTSTART with a TZID or a trailing Z, date-only
+ * all-day entries with exclusive ends, RRULEs and folded lines are exactly
+ * what a small model misreads; and the parsed events are kept on the context
+ * so import_calendar_file can add forty of them in one call instead of forty.
+ * It is recognised by what it contains, not only by its name or declared type.
+ */
+export function looksLikeCalendar(a: { mediaType: string; filename?: string }, head: string): boolean {
+  return a.mediaType === 'text/calendar' || /\.ics$/i.test(a.filename ?? '') || /^\s*BEGIN:VCALENDAR/i.test(head)
+}
+
+function sortAttachments(attachments: AgentAttachment[]): {
+  files: AgentAttachment[]
+  texts: string[]
+  calendarFiles: NonNullable<ToolContext['calendarFiles']>
+} {
+  const files: AgentAttachment[] = []
+  const texts: string[] = []
+  const calendarFiles: NonNullable<ToolContext['calendarFiles']> = []
+  for (const a of attachments) {
+    if (!a.mediaType.startsWith('text/')) {
+      files.push(a)
+      continue
+    }
+    const raw = new TextDecoder().decode(a.bytes)
+    const isCalendar = looksLikeCalendar(a, raw.slice(0, 200))
+    const name = a.filename ?? (isCalendar ? 'calendar.ics' : 'file.txt')
+    if (isCalendar) {
+      const parsed = parseIcs(raw)
+      calendarFiles.push({ filename: name, parsed })
+      texts.push(describeIcs(parsed, name))
+    } else {
+      const clipped = raw.length > TEXT_FILE_CHARS ? `${raw.slice(0, TEXT_FILE_CHARS)}\n[cut off here]` : raw
+      texts.push(`Attached file "${name}" (${a.mediaType}):\n${clipped}`)
+    }
+  }
+  return { files, texts, calendarFiles }
 }
 
 /**
@@ -188,6 +243,8 @@ function chatPrompt(input: { chatType: string; memberName: string }, tz: string)
     'TOOLS: when a tool covers a request, call it rather than saying you cannot. If the tool you need is not in your list, call more_tools with its group (mail, personal_calendar, money, notion, jira, automations) and use it in the next step. Email and personal calendar tools act on the person who just spoke. Household-wide events go on the SHARED calendar with add_family_event. Running lists live in the list tools. Open links with read_url and read what is there. An email missing from the inbox may be archived: search with list_email and a query.',
     'FOUND EVENTS: a date you found in an email, photo or page goes through propose_family_event so a person confirms first. A date you were told directly can go straight on.',
     'PHOTOS, SCANS AND VOICE: read what is sent and report what you actually see. If it is unreadable or carries no date, say so.',
+    'FILES: a photo, PDF, voice note or file can be read only in the message it arrives with. A calendar file (.ics) arrives as a listing, and import_calendar_file puts its events on the family calendar in one call. If someone refers to a file from an earlier message, ask them to send it again with the request as its caption.',
+    'ACTIONS: something is done only when a tool has returned. Never say added, replaced, cancelled, updated or sent unless the tool result in this turn says so; "replace" or "move" an event means update_family_event with its id from list_family_events.',
     'MONEY: quote figures exactly as the tools give them; PocketSmith for categories, Up for the raw feed. A payee string is a trading name and a registered city, not where the household went. Where a booking goes, or what a payment was for, comes only from a confirmation email or a Known fact; otherwise say the feed does not say.',
     'MEMORY: Known household facts are already in your context, so use them without announcing them. Call remember when someone asks you to remember something, or corrects a Known fact (pass the old id as replaces). Do not file facts on your own initiative; a nightly pass does that.',
     'COMMANDS the app answers before you see them: /watch (money, inbox or morning watchers), /connect, /accounts, /unlink, /calendar, /whoami, /members, /help, and for admins /allow and /deny. Point people at them rather than improvising.',
@@ -268,6 +325,79 @@ export function cleanReply(raw: string): { text: string; stripped: boolean } {
   return { text, stripped: text !== trimmed }
 }
 
+/* ------------------------------------------------------- claimed actions */
+
+type StepLike = { toolCalls?: ReadonlyArray<{ toolName: string }> }
+
+/** Whether any step called a tool that changes something. */
+export function wroteSomething(steps: ReadonlyArray<StepLike>): boolean {
+  return steps.some((s) => (s.toolCalls ?? []).some((c) => WRITE_TOOLS.has(c.toolName as ToolName)))
+}
+
+const CLAIM_CHOICES = ['claims_change', 'no_change_claimed', 'unsure'] as const
+type ClaimChoice = (typeof CLAIM_CHOICES)[number]
+
+const CLAIM_RULES = [
+  'You read one reply from a household assistant and say whether it reports a change as already made.',
+  'Choose claims_change when the reply states that the assistant has added, changed, moved, cancelled, removed, sent, saved, scheduled or otherwise done something to a calendar, a list, an email, a reminder, its memory or a task board. The language does not matter.',
+  'Choose no_change_claimed for answers, offers, questions, and descriptions of what already exists or of what a lookup showed.',
+  'Choose unsure when you cannot tell.',
+].join(' ')
+
+/**
+ * A typed judgement, like the ambient gate, rather than a list of verbs: the
+ * household may have the bot speak any language, and a small model finds new
+ * ways to say "done" faster than a pattern could be extended.
+ */
+async function reportsChange(slot: ModelSlot, reply: string, chatId: string): Promise<boolean> {
+  const out = await traced(
+    { traceName: 'hearth.claim', sessionId: chatId, tags: ['claim'], metadata: { model: slot.name } },
+    () =>
+      generateText({
+        model: slot.model,
+        system: CLAIM_RULES,
+        prompt: `REPLY:\n${reply.slice(0, 2000)}\n\nDoes the reply report a change as already made?`,
+        output: Output.choice({ options: [...CLAIM_CHOICES], name: 'claim' }),
+        maxOutputTokens: 64,
+        temperature: 0,
+        timeout: { stepMs: 10_000 },
+        telemetry: callTelemetry('hearth.claim'),
+      }),
+  )
+  const picked: ClaimChoice = out.output ?? (/\bclaims_change\b/i.test(out.text ?? '') ? 'claims_change' : 'unsure')
+  return picked === 'claims_change'
+}
+
+/**
+ * A small model sometimes narrates a change it never made: it answers "done,
+ * replaced" with no tool called, and the calendar keeps the old entry. A
+ * tool's notice or a write call this turn means the report is real and
+ * nothing is asked; otherwise the reply is judged, and one that reports a
+ * change gets a second turn to make it or take it back. The judgement fails
+ * open: an unsure or failed check changes nothing.
+ */
+async function claimsUnmadeAction(
+  slot: ModelSlot,
+  text: string,
+  steps: ReadonlyArray<StepLike>,
+  ctx: ToolContext,
+): Promise<boolean> {
+  if (!text || ctx.notices.length > 0 || wroteSomething(steps)) return false
+  try {
+    return await reportsChange(slot, text, ctx.chatId)
+  } catch (err) {
+    console.warn(`[agent] ${slot.name} could not judge the reply for an unmade change:`, err instanceof Error ? err.message : err)
+    return false
+  }
+}
+
+const unmadeActionNote = (who: string) =>
+  `[Hearth] Nothing has changed: that reply says something was done, but no tool was called this turn. ` +
+  `If ${who} asked for it, do it now with the right tool (list first if an id is needed) and report what the tool returned. ` +
+  `If ${who} was only telling you something, reply without saying you did it.`
+
+const NOTHING_CHANGED = 'I did not change anything this turn. If that is not what you expected, tell me exactly what to change.'
+
 async function historyMessages(chatId: string, excludeId?: number): Promise<ModelMessage[]> {
   const rows = await recentMessages(chatId, undefined, excludeId).catch(() => [])
   return rows.map((r) =>
@@ -320,11 +450,14 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   ])
 
   const attachments = input.attachments ?? []
+  const { files, texts, calendarFiles } = sortAttachments(attachments)
+  if (calendarFiles.length) ctx.calendarFiles = calendarFiles
   const said = input.text || describeAttachments(attachments)
   const content: UserContent = attachments.length
     ? [
         { type: 'text', text: `${input.memberName}: ${said}` },
-        ...attachments.map((a) => ({
+        ...texts.map((text) => ({ type: 'text' as const, text })),
+        ...files.map((a) => ({
           type: 'file' as const,
           data: a.bytes,
           mediaType: a.mediaType,
@@ -337,14 +470,16 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const context = ambient.text
   const activeTools = input.tools ?? defaultTools(mode)
   // A chat turn routes: the core set plus the groups its wording calls for,
-  // widened by any more_tools call the model makes along the way.
+  // widened by any more_tools call the model makes along the way. The import
+  // tool is offered only while there is a calendar file to import.
   const routing = mode === 'chat' && !input.tools
   const initialGroups = routing ? routeGroups(input.text, { pendingDrafts: ambient.pendingDrafts }) : []
+  const withFiles: ToolName[] = calendarFiles.length ? ['import_calendar_file'] : []
   const settings = MODE_SETTINGS[mode]
   const reasoning = reasoningLevel()
 
-  const result = await withModelFallback(async (slot: ModelSlot) => {
-    const r = await traced(
+  const result = await withModelFallback(async (slot: ModelSlot) =>
+    traced(
       {
         traceName: `hearth.${mode}`,
         sessionId: input.chatId,
@@ -352,35 +487,64 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         tags: [mode, input.chatType],
         metadata: { model: slot.name, ...(routing ? { tool_groups: initialGroups.join(',') || 'core' } : {}) },
       },
-      () =>
-        generateText({
-          model: slot.model,
-          system: systemPrompt({ mode, chatType: input.chatType, memberName: input.memberName, now, context }),
-          messages,
-          tools: buildTools(ctx),
-          ...(activeTools ? { activeTools } : {}),
-          ...(routing
-            ? { prepareStep: ({ steps }) => ({ activeTools: activeToolsFor(groupsAfter(initialGroups, steps)) }) }
-            : {}),
-          stopWhen: isStepCount(MAX_STEPS),
-          timeout: { stepMs: STEP_TIMEOUT_MS },
-          maxOutputTokens: settings.maxOutputTokens,
-          ...(settings.temperature !== undefined ? { temperature: settings.temperature } : {}),
-          ...(reasoning ? { reasoning } : {}),
-          telemetry: callTelemetry(`hearth.${mode}`),
-        }),
-    )
-    const cleaned = cleanReply(r.text)
-    if (cleaned.stripped) console.warn(`[agent] ${slot.name} leaked its working into the reply; stripped`)
-    // An empty completion usually means the model ended on a tool call it never
-    // summarised; treat it as a failure so the fallback model gets a turn.
-    if (!cleaned.text && ctx.notices.length === 0) throw new Error(`${slot.name} returned no text`)
-    return {
-      text: cleaned.text,
-      model: slot.name,
-      evidence: mode === 'watcher' ? collectEvidence(r.steps ?? []) : undefined,
-    }
-  })
+      async () => {
+        const call = (msgs: ModelMessage[]) =>
+          generateText({
+            model: slot.model,
+            system: systemPrompt({ mode, chatType: input.chatType, memberName: input.memberName, now, context }),
+            messages: msgs,
+            tools: buildTools(ctx),
+            ...(activeTools ? { activeTools } : {}),
+            ...(routing
+              ? {
+                  prepareStep: ({ steps }) => ({
+                    activeTools: [...activeToolsFor(groupsAfter(initialGroups, steps)), ...withFiles],
+                  }),
+                }
+              : {}),
+            stopWhen: isStepCount(MAX_STEPS),
+            timeout: { stepMs: STEP_TIMEOUT_MS },
+            maxOutputTokens: settings.maxOutputTokens,
+            ...(settings.temperature !== undefined ? { temperature: settings.temperature } : {}),
+            ...(reasoning ? { reasoning } : {}),
+            telemetry: callTelemetry(`hearth.${mode}`),
+          })
+
+        const r = await call(messages)
+        let cleaned = cleanReply(r.text)
+        if (cleaned.stripped) console.warn(`[agent] ${slot.name} leaked its working into the reply; stripped`)
+
+        if (mode === 'chat' && (await claimsUnmadeAction(slot, cleaned.text, r.steps ?? [], ctx))) {
+          console.warn(`[agent] ${slot.name} reported an action it never took; asking it to act or retract`)
+          try {
+            const again = await call([
+              ...messages,
+              { role: 'assistant', content: cleaned.text },
+              { role: 'user', content: unmadeActionNote(input.memberName) },
+            ])
+            const retried = cleanReply(again.text)
+            if (retried.text || ctx.notices.length) cleaned = retried
+            if (await claimsUnmadeAction(slot, cleaned.text, again.steps ?? [], ctx)) {
+              console.warn(`[agent] ${slot.name} still reported an untaken action; saying so`)
+              cleaned = { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
+            }
+          } catch (err) {
+            console.error(`[agent] ${slot.name} retry after an untaken action failed:`, err instanceof Error ? err.message : err)
+            cleaned = { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
+          }
+        }
+
+        // An empty completion usually means the model ended on a tool call it never
+        // summarised; treat it as a failure so the fallback model gets a turn.
+        if (!cleaned.text && ctx.notices.length === 0) throw new Error(`${slot.name} returned no text`)
+        return {
+          text: cleaned.text,
+          model: slot.name,
+          evidence: mode === 'watcher' ? collectEvidence(r.steps ?? []) : undefined,
+        }
+      },
+    ),
+  )
 
   return {
     text: result.text || ctx.notices.join('\n'),

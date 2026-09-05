@@ -34,11 +34,18 @@ const GROUP_HELP: Record<ToolGroup, string> = {
 export const CORE_TOOLS = [
   'web_search', 'read_url', 'weather',
   'recall', 'remember', 'forget',
-  'list_family_events', 'add_family_event', 'cancel_family_event', 'family_calendar_link',
+  'list_family_events', 'add_family_event', 'update_family_event', 'cancel_family_event', 'family_calendar_link',
   'propose_family_event', 'list_event_proposals', 'accept_event_proposal', 'reject_event_proposal',
   'add_to_list', 'show_list', 'check_off_list', 'remove_from_list', 'clear_list', 'show_lists',
   'more_tools',
 ] as const
+
+/**
+ * Offered only when the message carries what they act on: a calendar file
+ * attached to this very message, for instance. Listed so every tool is
+ * accounted for, even though no cue or group ever switches these on.
+ */
+export const SITUATIONAL_TOOLS = ['import_calendar_file'] as const
 
 /**
  * Words that make a group likely. Over-matching costs a few extra tool

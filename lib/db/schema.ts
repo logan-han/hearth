@@ -212,7 +212,7 @@ export const eventProposals = pgTable(
     endsAt: timestamp('ends_at', { withTimezone: true }).notNull(),
     allDay: boolean('all_day').notNull().default(false),
     source: text('source'),
-    status: text('status').notNull().default('pending'), // pending | accepted | rejected
+    status: text('status').notNull().default('pending'), // pending | accepted | rejected | expired | superseded
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

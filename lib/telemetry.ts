@@ -8,7 +8,18 @@ import type { PropagateAttributesParams } from '@langfuse/tracing'
  * without keys, and the test suite, never load them.
  */
 
-let processor: LangfuseSpanProcessor | null = null
+/**
+ * The processor lives on globalThis, not in this module. Next bundles
+ * instrumentation.ts separately from the route handlers, so a module-level
+ * variable set at register() is null inside every route: spans still arrived
+ * (the OpenTelemetry provider is process-wide) but `traced()` saw no processor
+ * and skipped the trace name, session and user, and the flush was a no-op.
+ */
+const slot = globalThis as unknown as { __hearthLangfuse?: LangfuseSpanProcessor | null }
+
+function processor(): LangfuseSpanProcessor | null {
+  return slot.__hearthLangfuse ?? null
+}
 
 export function telemetryConfigured(): boolean {
   return Boolean(process.env.LANGFUSE_PUBLIC_KEY && process.env.LANGFUSE_SECRET_KEY)
@@ -24,23 +35,24 @@ export function recordContent(): boolean {
 }
 
 export async function setupTelemetry(): Promise<boolean> {
-  if (processor) return true
+  if (processor()) return true
   if (!telemetryConfigured()) return false
   const [{ registerOTel }, { LangfuseSpanProcessor }, { LangfuseVercelAiSdkIntegration }, { registerTelemetry }] =
     await Promise.all([import('@vercel/otel'), import('@langfuse/otel'), import('@langfuse/vercel-ai-sdk'), import('ai')])
-  processor = new LangfuseSpanProcessor({
+  const created = new LangfuseSpanProcessor({
     environment: process.env.LANGFUSE_TRACING_ENVIRONMENT ?? process.env.VERCEL_ENV ?? 'development',
     release: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7),
   })
-  registerOTel({ serviceName: 'hearth', spanProcessors: [processor] })
+  registerOTel({ serviceName: 'hearth', spanProcessors: [created] })
   registerTelemetry(new LangfuseVercelAiSdkIntegration())
+  slot.__hearthLangfuse = created
   console.info('[telemetry] Langfuse tracing on')
   return true
 }
 
 /** Run `fn` with trace attributes attached, or plainly when tracing is off. */
 export async function traced<T>(attrs: PropagateAttributesParams, fn: () => Promise<T>): Promise<T> {
-  if (!processor) return fn()
+  if (!processor()) return fn()
   const { propagateAttributes } = await import('@langfuse/tracing')
   return propagateAttributes(attrs, fn)
 }
@@ -56,9 +68,10 @@ export function callTelemetry(functionId: string) {
  * the batch would go with it. Called at the end of every background run.
  */
 export async function flushTelemetry(): Promise<void> {
-  if (!processor) return
+  const active = processor()
+  if (!active) return
   try {
-    await processor.forceFlush()
+    await active.forceFlush()
   } catch (err) {
     console.warn('[telemetry] flush failed:', err instanceof Error ? err.message : err)
   }

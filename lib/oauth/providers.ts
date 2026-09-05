@@ -10,9 +10,17 @@ export type ProviderConfig = {
   scopes: string[]
   clientId: () => string
   clientSecret: () => string
-  /** Extra params on the authorisation request. */
+  /** Extra params on the authorisation request when linking a mailbox. */
   authExtras: Record<string, string>
+  /**
+   * Extra params when signing in to the dashboard. Left out, the link params
+   * are used for both.
+   */
+  signinExtras?: Record<string, string>
 }
+
+/** Why the round trip is happening: it decides what to ask the provider for. */
+export type AuthPurpose = 'link' | 'signin'
 
 export const GOOGLE: ProviderConfig = {
   id: 'google',
@@ -31,6 +39,11 @@ export const GOOGLE: ProviderConfig = {
   clientSecret: () => required('GOOGLE_CLIENT_SECRET'),
   // access_type=offline + prompt=consent is what actually yields a refresh_token.
   authExtras: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
+  // Signing in must not force the consent screen every time. Without `prompt`
+  // Google asks only when something is new: the first sign-in still consents
+  // (and, with access_type=offline, still hands back the refresh token that
+  // doubles as the mailbox link); after that it just picks the account.
+  signinExtras: { access_type: 'offline', include_granted_scopes: 'true' },
 }
 
 export const MICROSOFT: ProviderConfig = {
@@ -61,7 +74,7 @@ export function redirectUri(p: Provider): string {
   return `${appUrl()}/api/oauth/${p}/callback`
 }
 
-export function authorizeUrl(p: Provider, state: string): string {
+export function authorizeUrl(p: Provider, state: string, purpose: AuthPurpose = 'link'): string {
   const c = providerConfig(p)
   const url = new URL(c.authUrl)
   url.searchParams.set('client_id', c.clientId())
@@ -69,7 +82,8 @@ export function authorizeUrl(p: Provider, state: string): string {
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('scope', c.scopes.join(' '))
   url.searchParams.set('state', state)
-  for (const [k, v] of Object.entries(c.authExtras)) url.searchParams.set(k, v)
+  const extras = purpose === 'signin' ? (c.signinExtras ?? c.authExtras) : c.authExtras
+  for (const [k, v] of Object.entries(extras)) url.searchParams.set(k, v)
   return url.toString()
 }
 

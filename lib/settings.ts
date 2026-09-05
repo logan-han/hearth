@@ -173,7 +173,7 @@ export const SETTING_META: Record<
   },
   OPENROUTER_MODEL: {
     group: 'OpenRouter', label: 'Models',
-    help: 'Put :free models before paid ones, so the paid slot only answers when everything free has failed.',
+    help: 'Put :free models first. A paid slot answers only once every model above it has been skipped: an error, a rate limit (free models get 50 requests a day until you buy any credit), a reply that takes over 60 seconds, or no reply at all. System shows who actually answered.',
   },
   LLM_BASE_URL: {
     group: 'Self-hosted LLM', label: 'Endpoint',

@@ -4,7 +4,7 @@ import { hydrateSecrets } from '@/lib/settings'
 import { gatherFamilyStats } from '@/lib/stats'
 import { Shell } from './shell'
 import { Calendar } from './calendar'
-import { NextUp, Reminders, FamilyLists } from './family-panels'
+import { NextUp, Reminders, FamilyLists, Proposals } from './family-panels'
 import { SignIn } from './sign-in'
 
 export const dynamic = 'force-dynamic'
@@ -24,7 +24,6 @@ export default async function HomePage({
 
   const { month } = await searchParams
   const stats = await gatherFamilyStats(month)
-  const pending = stats.totals.proposals
 
   return (
     <Shell
@@ -32,10 +31,11 @@ export default async function HomePage({
       here="/"
       footnote={`Times are the household's, ${stats.timezone}, wherever you are reading this.`}
     >
-      {pending > 0 ? (
-        <p className="flash">
-          {pending} {pending === 1 ? 'proposal' : 'proposals'} waiting on a yes. Reply in the chat.
-        </p>
+      {stats.proposals.length > 0 ? (
+        <section>
+          <h2>Waiting on a yes</h2>
+          <Proposals proposals={stats.proposals} />
+        </section>
       ) : null}
 
       <Calendar month={stats.calendar} />
