@@ -1,10 +1,11 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import type { LanguageModel } from 'ai'
+import { recordModelEvent } from './model-events'
 
 export type ModelSlot = { name: string; model: LanguageModel }
 
-const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai'
-const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
+export const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai'
+export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 
 /** Every model env var accepts a comma-separated list, tried left to right. */
 function modelList(value: string | undefined, fallback = ''): string[] {
@@ -129,10 +130,13 @@ export function gateSlot(): ModelSlot | null {
  * Run `fn` against each model in turn, returning the first success. Every
  * failure mode collapses to the same behaviour: rate limit, timeout, provider
  * outage, or a model that cannot drive tools all just move to the next slot.
+ * Each attempt is recorded, so the System page can say which slots fail, why,
+ * and how often the chain fell through to a later one.
  */
 export async function withModelFallback<T>(
   fn: (slot: ModelSlot) => Promise<T>,
   chain: ModelSlot[] = modelChain(),
+  purpose = 'model',
 ): Promise<T> {
   if (chain.length === 0) {
     throw new Error(
@@ -141,11 +145,16 @@ export async function withModelFallback<T>(
   }
   let lastError: unknown
   for (const slot of chain) {
+    const started = Date.now()
     try {
-      return await fn(slot)
+      const out = await fn(slot)
+      await recordModelEvent({ slot: slot.name, purpose, outcome: 'answered', ms: Date.now() - started })
+      return out
     } catch (err) {
       lastError = err
-      console.error(`[model] ${slot.name} failed:`, err instanceof Error ? err.message : err)
+      const message = err instanceof Error ? err.message : String(err)
+      console.error(`[model] ${slot.name} failed:`, message)
+      await recordModelEvent({ slot: slot.name, purpose, outcome: 'failed', ms: Date.now() - started, error: message })
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError))

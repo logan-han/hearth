@@ -168,6 +168,10 @@ h2 {
   word-break: break-word;
 }
 .chain li.idle .tier-name, .chain li.idle .rank { color: var(--muted); }
+.chain .tier-model { white-space: nowrap; }
+.chain .tier-model .sep { color: var(--off); }
+/* How many replies this model carried: the slot-level truth behind the tier's bar. */
+.chain .tier-model em { font-style: normal; color: var(--ember); font-weight: 600; }
 .chain .move { display: flex; gap: 0.3rem; }
 .chain .move button { padding: 0.2rem 0.5rem; line-height: 1; }
 
@@ -337,6 +341,51 @@ input:focus { border-color: var(--ember); outline: none; }
   white-space: nowrap;
 }
 .setting .val.unset { font-style: italic; }
+/* An ordered list of models, one per line, in full. */
+.setting .val.stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.15rem;
+  max-width: none;
+  white-space: normal;
+  overflow: visible;
+  text-align: right;
+}
+.setting .val.stack .rank { color: var(--off); }
+
+/* Settings groups fold to a line each: name, live dots, what is set. */
+.fold-section { margin-bottom: 0.6rem; }
+.fold > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 0.2rem;
+  cursor: pointer;
+  border-radius: 8px;
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary:hover { background: var(--panel); }
+.fold > summary:focus-visible { outline: 2px solid var(--ember); outline-offset: 2px; }
+.fold > summary h2 { margin: 0; flex: none; }
+.fold-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.fold-meta .dot { flex: none; width: 0.45rem; height: 0.45rem; border-radius: 999px; }
+.fold-meta .dot.on { background: var(--live); }
+.fold-meta .dot.off { background: var(--off); }
+.fold-meta .dot.bad { background: var(--amber); }
+.fold-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fold-chevron { flex: none; color: var(--muted); font-size: 1.1rem; line-height: 1; transition: transform 0.12s; }
+.fold[open] .fold-chevron { transform: rotate(90deg); }
+.fold[open] > summary { margin-bottom: 0.5rem; }
 
 /* On/off switch, for settings that are really a yes or a no. */
 .switch {
@@ -404,6 +453,7 @@ footer { color: var(--muted); font-size: 0.8rem; margin-top: 2.5rem; }
 @media (max-width: 34rem) {
   .setting, .person { grid-template-columns: 1fr; }
   .setting .right, .person .acts { justify-content: flex-start; }
+  .setting .val.stack { align-items: flex-start; text-align: left; }
   .strip { gap: 0 1.25rem; }
 }
 

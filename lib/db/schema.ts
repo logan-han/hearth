@@ -239,6 +239,27 @@ export const settings = pgTable('settings', {
   value: text('value').notNull(),
 })
 
+/**
+ * One row per model call: which slot, for what, whether it answered and how
+ * long it took, or why it failed and the chain moved on. The System page's
+ * chain health reads from here; rows older than a month are pruned.
+ */
+export const modelEvents = pgTable(
+  'model_events',
+  {
+    id: serial('id').primaryKey(),
+    slot: text('slot').notNull(),
+    /** hearth.chat, hearth.watcher, hearth.gate, hearth.decision, hearth.verify, hearth.claim */
+    purpose: text('purpose').notNull(),
+    /** answered | failed | claim_retry */
+    outcome: text('outcome').notNull(),
+    ms: integer('ms').notNull().default(0),
+    error: text('error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('model_events_created_idx').on(t.createdAt)],
+)
+
 export type Member = typeof members.$inferSelect
 export type Connection = typeof connections.$inferSelect
 export type FamilyEvent = typeof familyEvents.$inferSelect

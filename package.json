@@ -15,6 +15,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "set-webhook": "tsx scripts/set-webhook.ts",
+    "probe": "tsx scripts/probe-model.ts",
     "test:coverage": "vitest run --coverage",
     "evals": "vitest run --config vitest.evals.config.ts"
   },

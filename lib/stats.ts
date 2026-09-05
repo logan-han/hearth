@@ -7,6 +7,8 @@ import * as notion from './providers/notion'
 import * as jira from './providers/jira'
 import * as weather from './providers/weather'
 import { describeChain } from './model'
+import { chainHealth, type ChainHealth } from './model-events'
+import { getSetting } from './db/queries'
 
 export type Stats = Awaited<ReturnType<typeof gatherStats>>
 export type FamilyStats = Awaited<ReturnType<typeof gatherFamilyStats>>
@@ -28,7 +30,7 @@ const LIVE_PROPOSAL = sql`p.status = 'pending' and p.ends_at > now() and not exi
 
 export async function gatherStats(month?: string) {
   const view = monthView(month, ctxNow())
-  const [counts, byDay, models, chats, upcoming, automations, listRows, monthEvents] = await Promise.all([
+  const [counts, byDay, models, chats, upcoming, automations, listRows, monthEvents, health, lastTickAt] = await Promise.all([
     db().execute(sql`
       select
         (select count(*) from members where allowed) as members,
@@ -83,12 +85,17 @@ export async function gatherStats(month?: string) {
       where not cancelled and ends_at >= ${view.from} and starts_at <= ${view.to}
       order by starts_at
     `),
+    // Both are diagnostics; a hiccup reading them must not take the page down.
+    chainHealth(7).catch((): ChainHealth | null => null),
+    getSetting('last_tick_at').catch((): string | null => null),
   ])
 
   const c = one(counts)
   return {
     timezone: timezone(),
     calendar: buildMonth(view, rows(monthEvents)),
+    chainHealth: health,
+    scheduler: schedulerPulse(lastTickAt, ctxNow()),
     totals: {
       members: n(c.members),
       admins: n(c.admins),
@@ -159,6 +166,18 @@ export async function gatherStats(month?: string) {
     ],
     chain: describeChain(),
   }
+}
+
+/** QStash is due every five minutes; three missed ticks is a scheduler that has stopped. */
+const TICK_STALE_MINUTES = 15
+
+export type SchedulerPulse = { lastTick: string | null; minutesAgo: number | null; stale: boolean }
+
+function schedulerPulse(lastTickAt: string | null, now: Date): SchedulerPulse {
+  if (!lastTickAt) return { lastTick: null, minutesAgo: null, stale: true }
+  const at = new Date(lastTickAt)
+  const minutesAgo = Math.max(0, Math.round((now.getTime() - at.getTime()) / 60_000))
+  return { lastTick: formatLocal(at), minutesAgo, stale: minutesAgo > TICK_STALE_MINUTES }
 }
 
 /** Fourteen days, oldest first, with quiet days present as zeroes. */

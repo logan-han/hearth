@@ -120,6 +120,21 @@ describe('POST /api/tick authorisation', () => {
     expect(dueAutomations).toHaveBeenCalled()
   })
 
+  it('records every tick it accepts, so a quiet scheduler shows on the System page', async () => {
+    process.env.QSTASH_CURRENT_SIGNING_KEY = 'sig_current'
+    verify.mockResolvedValue(true)
+    await tick({ 'upstash-signature': 'v1=abc' })
+    const [key, value] = setSetting.mock.calls.find(([k]) => k === 'last_tick_at') ?? []
+    expect(key).toBe('last_tick_at')
+    expect(new Date(String(value)).getTime()).toBeGreaterThan(Date.now() - 60_000)
+    expect(retireStaleProposals).toHaveBeenCalled()
+  })
+
+  it('records nothing for a tick it refuses', async () => {
+    expect((await tick()).status).toBe(401)
+    expect(setSetting).not.toHaveBeenCalledWith('last_tick_at', expect.anything())
+  })
+
   it('rejects an invalid QStash signature', async () => {
     process.env.QSTASH_CURRENT_SIGNING_KEY = 'sig_current'
     verify.mockResolvedValue(false)
@@ -299,7 +314,8 @@ describe('running due automations', () => {
       getSetting.mockImplementation(async () => null)
       await authed()
       expect(runAgent).not.toHaveBeenCalled()
-      expect(setSetting).not.toHaveBeenCalled()
+      // The tick still records its pulse; it is the day's claim that must not happen yet.
+      expect(setSetting).not.toHaveBeenCalledWith('memory_sweep_day', expect.anything())
     } finally {
       vi.useRealTimers()
     }

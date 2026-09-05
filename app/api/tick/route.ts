@@ -15,6 +15,7 @@ import { WATCHERS, isWatcherKind, type WatcherKind } from '@/lib/watchers'
 import { send } from '@/lib/telegram'
 import { hydrateSecrets } from '@/lib/settings'
 import { flushTelemetry } from '@/lib/telemetry'
+import { pruneModelEvents } from '@/lib/model-events'
 import { parseLog, prune, underCap, recordPost, shouldWarn, markWarned, PROACTIVE_POSTS_PER_HOUR } from '@/lib/rate-cap'
 import type { Automation, Member } from '@/lib/db/schema'
 
@@ -395,8 +396,16 @@ export async function POST(req: Request) {
   if (!(await authorised(req, body))) {
     return NextResponse.json({ ok: false }, { status: 401 })
   }
+  // The pulse the System page shows: a scheduler that has gone quiet is the
+  // failure mode that otherwise presents as reminders silently not firing.
+  try {
+    await setSetting('last_tick_at', new Date().toISOString())
+  } catch (err) {
+    console.error('[tick] could not record the tick:', err)
+  }
   const result = await runDue()
   await maybeConsolidateMemory(new Date())
+  await pruneModelEvents(30)
   // A proposal whose occasion has passed, or whose event got to the calendar
   // another way, is no longer a question for anyone. The lists already hide
   // these; this writes down why.

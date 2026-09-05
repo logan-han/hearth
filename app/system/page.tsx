@@ -15,6 +15,16 @@ export default async function SystemPage() {
   const stats = await gatherStats()
   const t = stats.totals
   const muted = stats.chats.filter((c) => c.strangers > 0)
+  const pulse = stats.scheduler
+  const health = stats.chainHealth
+  // Every configured slot, in chain order, whether or not it has been used this week.
+  const slotOrder = stats.chain.flatMap((tier) =>
+    tier.models.map((m) => `${tier.name === 'self-hosted' ? 'local' : tier.name}:${m}`),
+  )
+  const healthRows = [
+    ...slotOrder.map((slot) => health?.slots.find((s) => s.slot === slot) ?? { slot, answered: 0, failed: 0, reasons: [], medianMs: null }),
+    ...(health?.slots.filter((s) => !slotOrder.includes(s.slot)) ?? []),
+  ]
 
   return (
     <Shell session={session} here="/system" footnote={`Times are the household's, ${stats.timezone}.`}>
@@ -25,7 +35,49 @@ export default async function SystemPage() {
         <Stat value={t.events} label="On the calendar" />
         <Stat value={t.memories} label="Remembered" />
         <Stat value={t.sent} label="Emails sent" note={t.drafts ? `${t.drafts} awaiting yes` : undefined} />
+        <Stat
+          value={pulse.minutesAgo === null ? 'never' : pulse.minutesAgo === 0 ? 'just now' : `${pulse.minutesAgo} min ago`}
+          label="Last tick"
+          note={pulse.stale ? (pulse.lastTick ? 'scheduler has gone quiet' : 'no tick recorded yet') : undefined}
+        />
       </div>
+
+      <section>
+        <h2>Chain health, last 7 days</h2>
+        <div className="panel">
+          {!health || health.calls === 0 ? (
+            <Empty>No model calls recorded yet. Each call lands here from now on: who answered, who was skipped and why.</Empty>
+          ) : (
+            <>
+              <ul className="listing chain-health">
+                {healthRows.map((s) => (
+                  <li key={s.slot}>
+                    <span className="title mono">{s.slot}</span>
+                    <span className="meta">
+                      {s.answered} answered
+                      {s.medianMs !== null ? `, typically ${(s.medianMs / 1000).toFixed(1)} s` : ''}
+                      {s.failed > 0 ? (
+                        <span className="warn">
+                          {' '}· skipped {s.failed} {s.failed === 1 ? 'time' : 'times'}: {s.reasons.map((r) => `${r.kind} ×${r.count}`).join(', ')}
+                        </span>
+                      ) : (
+                        ' · never skipped'
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="empty" style={{ marginTop: '0.8rem' }}>
+                {health.calls} model calls in all, counting the gate, the checks behind each watcher post and the
+                reply judgement, not just chat replies. A skip is what sends a call to the next slot down.
+                {health.claimRetries > 0
+                  ? ` ${health.claimRetries} ${health.claimRetries === 1 ? 'reply was' : 'replies were'} sent back for reporting a change no tool had made.`
+                  : ' No reply has had to be sent back for reporting a change no tool had made.'}
+              </p>
+            </>
+          )}
+        </div>
+      </section>
 
       <section>
         <h2>Traffic, last fortnight</h2>

@@ -2,6 +2,8 @@ import { eq } from 'drizzle-orm'
 import { db } from './db'
 import { secrets } from './db/schema'
 import { encrypt, decrypt } from './crypto'
+import { formatLocal } from './cron'
+import { timezone } from './env'
 
 /**
  * Settings an admin may change from the dashboard. Anything not on this list
@@ -291,6 +293,9 @@ export type SettingView = {
   source: 'dashboard' | 'environment' | 'unset'
   updatedAt: string | null
   updatedBy: string | null
+  /** When the dashboard value was saved, in household time: "28 Aug" and the full form. */
+  savedOn: string | null
+  savedAt: string | null
 }
 
 export async function listSettings(): Promise<SettingView[]> {
@@ -310,6 +315,10 @@ export async function listSettings(): Promise<SettingView[]> {
       source: row ? 'dashboard' : current ? 'environment' : 'unset',
       updatedAt: row?.updatedAt.toISOString() ?? null,
       updatedBy: row?.updatedBy ?? null,
+      // Formatted here, in the household's zone, so the server-rendered page
+      // and the browser agree on the day.
+      savedOn: row ? new Intl.DateTimeFormat('en-AU', { timeZone: timezone(), day: 'numeric', month: 'short' }).format(row.updatedAt) : null,
+      savedAt: row ? formatLocal(row.updatedAt) : null,
     }
   })
 }

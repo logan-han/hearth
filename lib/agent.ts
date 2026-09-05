@@ -17,6 +17,7 @@ import { timezone, language, units, reasoningLevel } from './env'
 import { traced, callTelemetry } from './telemetry'
 import { formatLocal, localDateKey } from './cron'
 import { parseIcs, describeIcs } from './ics-parse'
+import { recordModelEvent } from './model-events'
 
 const MAX_STEPS = 8
 const STEP_TIMEOUT_MS = 60_000
@@ -516,6 +517,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
 
         if (mode === 'chat' && (await claimsUnmadeAction(slot, cleaned.text, r.steps ?? [], ctx))) {
           console.warn(`[agent] ${slot.name} reported an action it never took; asking it to act or retract`)
+          await recordModelEvent({ slot: slot.name, purpose: `hearth.${mode}`, outcome: 'claim_retry' })
           try {
             const again = await call([
               ...messages,
@@ -544,6 +546,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         }
       },
     ),
+  undefined,
+  `hearth.${mode}`,
   )
 
   return {
@@ -601,7 +605,7 @@ export async function decideWatcherPost(input: {
       }),
     )
     return { ...r.output, model: slot.name }
-  })
+  }, undefined, 'hearth.decision')
 }
 
 /* -------------------------------------------------------------- draft review */
@@ -666,6 +670,8 @@ export async function reviewDraft(input: { label: string; draft: string; evidenc
           telemetry: callTelemetry('hearth.verify'),
         }),
       ).then((r) => r.output.claims),
+      undefined,
+      'hearth.verify',
     )
   ).slice(0, MAX_CLAIMS)
   if (claims.length === 0) return { claims, unsupported: [], message: input.draft }
@@ -685,6 +691,8 @@ export async function reviewDraft(input: { label: string; draft: string; evidenc
             telemetry: callTelemetry('hearth.verify'),
           }),
         ).then((r) => r.output),
+        undefined,
+        'hearth.verify',
       ),
     ),
   )
@@ -706,6 +714,8 @@ export async function reviewDraft(input: { label: string; draft: string; evidenc
         telemetry: callTelemetry('hearth.verify'),
       }),
     ).then((r) => r.output.message.trim()),
+    undefined,
+    'hearth.verify',
   )
   return { claims, unsupported, message: rewritten || null }
 }
@@ -789,6 +799,7 @@ export async function shouldChimeIn(input: {
       // Gate on the cheapest model only; falling through the whole chain would
       // spend the day's quota on a coin flip.
       [gateModel()],
+      'hearth.gate',
     )
   } catch {
     return false

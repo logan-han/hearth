@@ -85,6 +85,8 @@ times an hour, with an admin told the first time the cap holds something back.
 | `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations |
 | `lib/tools/router.ts` | Which tool groups a chat turn sees, and the `more_tools` escape hatch |
 | `lib/ics-parse.ts` | Reading a calendar file someone sends, for the listing and `import_calendar_file` |
+| `lib/model-events.ts` | One row per model call, folded into the chain health on System |
+| `scripts/probe-model.ts` | `npm run probe`: a real tool call against a candidate model before it joins the chain |
 | `lib/summary.ts` | The rolling summary each chat keeps of what fell out of the raw history window |
 | `lib/rate-cap.ts` | The ceiling on scheduled posts per chat per hour |
 | `lib/providers/` | Gmail and Microsoft Graph behind one interface |
@@ -184,7 +186,13 @@ only tier where nothing leaves the house.
 
 Models are picked from what each provider actually serves rather than typed by
 hand, and only tool-capable ones are offered, because a model that cannot drive
-tools fails at the worst moment instead of at configuration time.
+tools fails at the worst moment instead of at configuration time. Before
+promoting a candidate, probe it with a real tool call and a typed choice, the
+two things every slot has to do:
+
+```bash
+npm run probe -- openrouter minimax/minimax-m3
+```
 
 **On training:** whether a provider may train on your prompts is an account
 setting at `openrouter.ai/settings/privacy`, not a property of a model, and the
@@ -477,10 +485,20 @@ removed at all**, only succeeded, so the house cannot lock itself out.
 System shows message volume over a fortnight, which model in the chain
 actually answered (the head answering nearly everything is the healthy shape),
 every reminder with its schedule, and any chat currently muted by an
-unrecognised person. Integration status lives in Settings instead, as a live
-dot beside the keys that drive each service.
+unrecognised person. Two diagnostics sit beside those. **Last tick** is when
+QStash last called the scheduler, flagged once it is more than fifteen
+minutes ago, because a scheduler that has gone quiet otherwise shows up only
+as reminders not arriving. **Chain health** is every model call of the last
+seven days, per slot: how many it answered and how quickly, how many times it
+was skipped for the next slot and why (rate limited, timed out, no reply,
+provider error), and how many chat replies were sent back for reporting a
+change no tool had made. Integration status lives in Settings instead, as a
+live dot beside the keys that drive each service.
 
-Editable settings are a **fixed allowlist**. `DATABASE_URL`, `TOKEN_ENC_KEY`
+Settings groups fold to a line each, showing the live dots, how many keys are
+set and the values that are safe to show; a group opens on a click, or on its
+own when an integration in it is failing. Editable settings are a **fixed
+allowlist**. `DATABASE_URL`, `TOKEN_ENC_KEY`
 and `ADMIN_EMAILS` are deliberately not on it, so a stolen session cannot
 repoint the deployment at another database or lock the owner out. The Telegram
 token, webhook secret and founding members *are* editable — an admin session

@@ -26,6 +26,10 @@ export function ChainForm({ initial, shares }: { initial: Tier[]; shares: Share[
   const answered = attributed.reduce((s, m) => s + m.count, 0)
   const shareOf = (tier: Tier) =>
     attributed.filter((s) => s.model.startsWith(`${tierPrefix(tier.name)}:`)).reduce((s, m) => s + m.count, 0)
+  // Within a tier the slots are tried in order too, so each model shows its own count:
+  // a tail that has never answered reads 0, and one that answers often is a head that keeps failing.
+  const countOf = (tier: Tier, model: string) =>
+    attributed.find((s) => s.model === `${tierPrefix(tier.name)}:${model}`)?.count ?? 0
 
   async function move(from: number, to: number) {
     if (to < 0 || to >= tiers.length) return
@@ -68,7 +72,20 @@ export function ChainForm({ initial, shares }: { initial: Tier[]; shares: Share[
                 <div>
                   <span className="tier-name">{tier.label}</span>
                   <span className="tier-models">
-                    {tier.configured ? tier.models.join('  ·  ') : (UNCONFIGURED[tier.name] ?? 'not set up')}
+                    {!tier.configured
+                      ? (UNCONFIGURED[tier.name] ?? 'not set up')
+                      : tier.models.map((m, j) => (
+                          <span key={m} className="tier-model">
+                            {j > 0 ? <span className="sep"> · </span> : null}
+                            {m}
+                            {answered > 0 ? (
+                              <em title={`${countOf(tier, m)} of ${answered} replies in the last 30 days`}>
+                                {' '}
+                                {countOf(tier, m)}
+                              </em>
+                            ) : null}
+                          </span>
+                        ))}
                   </span>
                   {tier.configured && answered > 0 ? (
                     <div className="share">
@@ -98,7 +115,7 @@ export function ChainForm({ initial, shares }: { initial: Tier[]; shares: Share[
         <p className="empty" style={{ marginTop: '0.9rem' }}>
           The first one that works answers.{' '}
           {answered > 0
-            ? 'Percentages are the last 30 days, so the top of the list carrying almost everything is the healthy shape.'
+            ? `Percentages and the count beside each model are the last 30 days (${answered} replies), so the top of the list carrying almost everything is the healthy shape.`
             : 'Once replies start being recorded, each row will show the share it carried.'}
         </p>
       </div>
