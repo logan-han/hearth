@@ -3,7 +3,7 @@ import type { PGlite } from '@electric-sql/pglite'
 import { sql } from 'drizzle-orm'
 import { freshDb, closeDb } from './helpers/db'
 import { db, __setDb } from '@/lib/db'
-import { recordModelEvent, chainHealth, failureKind, pruneModelEvents } from '@/lib/model-events'
+import { recordModelEvent, chainHealth, failureKind, pruneModelEvents, structuredRecord } from '@/lib/model-events'
 import { withModelFallback, type ModelSlot } from '@/lib/model'
 
 const slot = (name: string): ModelSlot => ({ name, model: {} as ModelSlot['model'] })
@@ -81,5 +81,27 @@ describe('model events', () => {
     await expect(recordModelEvent({ slot: 's', purpose: 'p', outcome: 'answered' })).resolves.toBeUndefined()
     await expect(pruneModelEvents()).resolves.toBeUndefined()
     await expect(withModelFallback(async () => 'still answers', [slot('a')])).resolves.toBe('still answers')
+  })
+})
+
+describe('structured record', () => {
+  it('names a structured call that came back as prose', () => {
+    expect(failureKind('No object generated: could not parse the response.')).toBe('no object')
+  })
+
+  it('counts only structured calls, and only that kind of failure', async () => {
+    await recordModelEvent({ slot: 'a', purpose: 'hearth.verify', outcome: 'answered', ms: 10 })
+    await recordModelEvent({ slot: 'a', purpose: 'hearth.verify', outcome: 'failed', error: 'No object generated: could not parse the response.' })
+    await recordModelEvent({ slot: 'a', purpose: 'hearth.decision', outcome: 'failed', error: '429 Too Many Requests' })
+    await recordModelEvent({ slot: 'a', purpose: 'hearth.chat', outcome: 'failed', error: 'No object generated' })
+    await recordModelEvent({ slot: 'b', purpose: 'hearth.gate', outcome: 'answered', ms: 5 })
+    const record = await structuredRecord(1)
+    expect(record.get('a')).toEqual({ attempts: 2, noObject: 1 })
+    expect(record.get('b')).toEqual({ attempts: 1, noObject: 0 })
+  })
+
+  it('is empty when it cannot be read, so the chain runs as configured', async () => {
+    await db().execute(sql`drop table model_events`)
+    expect((await structuredRecord(1)).size).toBe(0)
   })
 })

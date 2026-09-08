@@ -1,4 +1,4 @@
-import { and, desc, gte, lt, sql } from 'drizzle-orm'
+import { and, desc, gte, inArray, lt, sql } from 'drizzle-orm'
 import { db } from './db'
 import { modelEvents } from './db/schema'
 
@@ -28,11 +28,15 @@ export async function recordModelEvent(event: {
   }
 }
 
+/** A structured call answered with prose, markdown or reasoning instead of the object asked for. */
+const NO_OBJECT = /no object generated|no output generated|could not parse/i
+
 /** Why a slot was skipped, in the few words the System page can show. */
 export function failureKind(error: string | null | undefined): string {
   const e = error ?? ''
   if (/429|rate.?limit|quota|too many requests/i.test(e)) return 'rate limited'
   if (/timed? ?out|timeout|aborted/i.test(e)) return 'timed out'
+  if (NO_OBJECT.test(e)) return 'no object'
   if (/returned no text/i.test(e)) return 'no reply'
   if (/5\d\d|unavailable|overloaded|internal/i.test(e)) return 'provider error'
   if (/401|403|api key|unauthori[sz]ed/i.test(e)) return 'refused'
@@ -106,4 +110,38 @@ export async function pruneModelEvents(days = 30, now: Date = new Date()): Promi
   } catch (err) {
     console.warn('[model] could not prune events:', err instanceof Error ? err.message : err)
   }
+}
+
+/** The calls that ask for an object or a choice back rather than prose. */
+export const STRUCTURED_PURPOSES = ['hearth.verify', 'hearth.decision', 'hearth.gate', 'hearth.claim'] as const
+
+export type StructuredRecord = Map<string, { attempts: number; noObject: number }>
+
+/**
+ * How each slot has fared when asked for an object over the last `days`:
+ * answers, and failures to produce one. Other failures (a rate limit, a
+ * timeout) say nothing about structured output and are left out. Best effort:
+ * a record that cannot be read is an empty one, and the chain runs as configured.
+ */
+export async function structuredRecord(days = 3, now: Date = new Date()): Promise<StructuredRecord> {
+  const record: StructuredRecord = new Map()
+  try {
+    const since = new Date(now.getTime() - days * 86_400_000)
+    const rows = await db()
+      .select({ slot: modelEvents.slot, outcome: modelEvents.outcome, error: modelEvents.error })
+      .from(modelEvents)
+      .where(and(gte(modelEvents.createdAt, since), inArray(modelEvents.purpose, [...STRUCTURED_PURPOSES])))
+      .limit(20_000)
+    for (const r of rows) {
+      const noObject = r.outcome === 'failed' && NO_OBJECT.test(r.error ?? '')
+      if (r.outcome !== 'answered' && !noObject) continue
+      const s = record.get(r.slot) ?? { attempts: 0, noObject: 0 }
+      s.attempts++
+      if (noObject) s.noObject++
+      record.set(r.slot, s)
+    }
+  } catch (err) {
+    console.warn('[model] could not read the structured-output record:', err instanceof Error ? err.message : err)
+  }
+  return record
 }

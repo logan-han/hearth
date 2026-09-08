@@ -1,6 +1,6 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import type { LanguageModel } from 'ai'
-import { recordModelEvent } from './model-events'
+import { recordModelEvent, structuredRecord, type StructuredRecord } from './model-events'
 
 export type ModelSlot = { name: string; model: LanguageModel }
 
@@ -124,6 +124,32 @@ export function describeChain(): { name: TierName; label: string; models: string
 /** The single cheapest model, used for the yes/no ambient gate. */
 export function gateSlot(): ModelSlot | null {
   return modelChain()[0] ?? null
+}
+
+/** Five structured calls is enough to judge a slot by; one failure in five demotes it. */
+const STRUCTURED_MIN_SAMPLE = 5
+const STRUCTURED_FLAKY_SHARE = 0.2
+
+/**
+ * The chain for calls that want an object or a choice back, not prose. The
+ * configured order stands, except that a slot which has lately failed to
+ * return an object in a fifth or more of such calls moves behind those that
+ * did, worst last. A free tier that answers a JSON schema with markdown
+ * otherwise costs every decision a wasted call and a fall-through; a slot with
+ * no record yet is trusted where it is configured.
+ */
+export function orderForStructured(chain: ModelSlot[], record: StructuredRecord): ModelSlot[] {
+  const share = (s: ModelSlot) => {
+    const r = record.get(s.name)
+    return r && r.attempts >= STRUCTURED_MIN_SAMPLE ? r.noObject / r.attempts : 0
+  }
+  const flaky = (s: ModelSlot) => share(s) >= STRUCTURED_FLAKY_SHARE
+  return [...chain.filter((s) => !flaky(s)), ...chain.filter(flaky).sort((a, b) => share(a) - share(b))]
+}
+
+export async function structuredChain(chain: ModelSlot[] = modelChain()): Promise<ModelSlot[]> {
+  if (chain.length < 2) return chain
+  return orderForStructured(chain, await structuredRecord())
 }
 
 /**

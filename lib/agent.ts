@@ -8,7 +8,7 @@ import {
   type UserContent,
 } from 'ai'
 import { z } from 'zod'
-import { withModelFallback, gateSlot, type ModelSlot } from './model'
+import { withModelFallback, structuredChain, type ModelSlot } from './model'
 import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, WRITE_TOOLS, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
 import type { ToolContext } from './tools/context'
 import { recentMessages, listMemories, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals, chatSummary } from './db/queries'
@@ -319,10 +319,35 @@ export function stripReasoning(text: string): string {
   return text.replace(THINK_BLOCK, '').replace(THINK_OPEN, '').trim()
 }
 
+/**
+ * Working that arrives with no handover line: an opening paragraph of the
+ * model talking to itself ("I have what I need", "Let me check", "No web
+ * lookup needed") ahead of the post proper. A watcher post speaks for the
+ * household and never in the first person about its tools, so such an opening
+ * is cut when a post follows it. Chat replies keep theirs: "I'll add it now"
+ * is an answer, not working.
+ */
+const WORKING =
+  /\b(?:I(?:'ll| will| have| need|'ve| checked| fetched| looked| confirmed| can see)|let me|let's|no (?:web )?(?:lookup|search) needed|known facts confirm|the tools? (?:returned|show|say)|(?:per|from) the tool|tool results?)\b/i
+const MAX_WORKING_PARAGRAPHS = 3
+
+export function stripWorking(text: string): string {
+  let rest = text.trim()
+  for (let i = 0; i < MAX_WORKING_PARAGRAPHS; i++) {
+    const cut = rest.search(/\n[ \t]*\n/)
+    if (cut < 0 || !WORKING.test(rest.slice(0, cut))) return rest
+    const after = rest.slice(cut).trim()
+    if (!after) return rest
+    rest = after
+  }
+  return rest
+}
+
 /** Everything that keeps a model's working out of the family chat. */
-export function cleanReply(raw: string): { text: string; stripped: boolean } {
+export function cleanReply(raw: string, opts: { working?: boolean } = {}): { text: string; stripped: boolean } {
   const trimmed = raw.trim()
-  const text = stripPreamble(stripReasoning(trimmed))
+  const spoken = stripPreamble(stripReasoning(trimmed))
+  const text = opts.working ? stripWorking(spoken) : spoken
   return { text, stripped: text !== trimmed }
 }
 
@@ -512,7 +537,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           })
 
         const r = await call(messages)
-        let cleaned = cleanReply(r.text)
+        let cleaned = cleanReply(r.text, { working: mode === 'watcher' })
         if (cleaned.stripped) console.warn(`[agent] ${slot.name} leaked its working into the reply; stripped`)
 
         if (mode === 'chat' && (await claimsUnmadeAction(slot, cleaned.text, r.steps ?? [], ctx))) {
@@ -605,20 +630,22 @@ export async function decideWatcherPost(input: {
       }),
     )
     return { ...r.output, model: slot.name }
-  }, undefined, 'hearth.decision')
+  }, await structuredChain(), 'hearth.decision')
 }
 
 /* -------------------------------------------------------------- draft review */
 
 const MAX_CLAIMS = 6
 const claimsSchema = z.object({
-  claims: z.array(z.string()).max(MAX_CLAIMS).describe('Checkable statements, one short sentence each, self-contained'),
+  claims: z.array(z.string()).describe('Checkable statements, one short sentence each, self-contained'),
 })
 const checkSchema = z.object({
   supported: z.boolean(),
   excerpt: z.string().optional().describe('The words in the evidence that establish it, when supported'),
 })
-const rewriteSchema = z.object({ message: z.string().describe('The post rebuilt from the supported statements only; empty if they amount to nothing worth posting') })
+const rewriteSchema = z.object({
+  message: z.string().describe('The post with the unsupported statements removed and nothing else changed; empty if what remains is not worth posting'),
+})
 
 const EXTRACT_PROMPT = [
   'You list the checkable statements in a short post from a family assistant.',
@@ -627,6 +654,14 @@ const EXTRACT_PROMPT = [
   'Leave out hedges, offers, questions and statements of what is not known, such as "purpose not recorded".',
   'Return an empty list when there is nothing checkable.',
 ].join(' ')
+
+/**
+ * The list is capped to bound the checks, so a long post is spot-checked. The
+ * extractor is told which statements to spend the places on: the ones a model
+ * invents, not the ones it copies.
+ */
+const EXTRACT_CAP =
+  `List at most ${MAX_CLAIMS} statements. When the post makes more, choose the ones most likely to be wrong: stated purposes, descriptions of payees or senders, flags and anything the post infers, before figures and dates copied from a list.`
 
 const CHECK_PROMPT = [
   'You check one statement against evidence and nothing else.',
@@ -637,10 +672,10 @@ const CHECK_PROMPT = [
 ].join(' ')
 
 const REWRITE_PROMPT = [
-  'You rebuild a short post for a family chat from a list of supported statements.',
-  'Use only the supported statements, in the original post\'s style and order, and reuse its wording where the wording is about those statements.',
-  'Nothing from the original that is not in the supported list may appear, however it is phrased: not as a hedge, a question, or a hint.',
-  'Return an empty message when the supported statements amount to nothing worth posting.',
+  'You edit a short post for a family chat so that it no longer makes the statements listed as not supported.',
+  'Remove each of them wherever it appears and in whatever form: a fact, a hedge, a question, a hint, an aside in brackets. A sentence that only introduced or explained one goes with it.',
+  'Everything else stays exactly as written: every other figure, name, date and line, in the original order and formatting. Add nothing.',
+  'Return an empty message when what remains says nothing worth posting.',
 ].join(' ')
 
 export type DraftReview = { claims: string[]; unsupported: string[]; message: string | null }
@@ -648,13 +683,16 @@ export type DraftReview = { claims: string[]; unsupported: string[]; message: st
 /**
  * Chain-of-Verification, factored: pull the checkable claims out of the draft,
  * ask about each one in a fresh context that sees only the evidence (never the
- * draft, so the checker cannot be talked into agreeing with it), then strip
- * what failed. Statements of what is not known are not claims, so a draft
- * that says "purpose not recorded" passes untouched.
+ * draft, so the checker cannot be talked into agreeing with it), then remove
+ * what failed from the draft and leave the rest as written. The claims list is
+ * capped, so a long post is spot-checked rather than rebuilt: rebuilding it
+ * from the list dropped every fact the list had no room for. Statements of
+ * what is not known are not claims, so "purpose not recorded" passes untouched.
  */
 export async function reviewDraft(input: { label: string; draft: string; evidence: string }): Promise<DraftReview> {
   const evidence = input.evidence || '(no tool results)'
   const meta = (step: string, model: string) => ({ traceName: 'hearth.verify', tags: ['verify', step], metadata: { label: input.label, model } })
+  const chain = await structuredChain()
 
   const claims = (
     await withModelFallback((slot) =>
@@ -662,7 +700,7 @@ export async function reviewDraft(input: { label: string; draft: string; evidenc
         generateText({
           model: slot.model,
           system: EXTRACT_PROMPT,
-          prompt: `POST:\n${input.draft}`,
+          prompt: `${EXTRACT_CAP}\n\nPOST:\n${input.draft}`,
           output: Output.object({ schema: claimsSchema, name: 'claims' }),
           temperature: 0,
           maxOutputTokens: 500,
@@ -670,7 +708,7 @@ export async function reviewDraft(input: { label: string; draft: string; evidenc
           telemetry: callTelemetry('hearth.verify'),
         }),
       ).then((r) => r.output.claims),
-      undefined,
+      chain,
       'hearth.verify',
     )
   ).slice(0, MAX_CLAIMS)
@@ -691,30 +729,33 @@ export async function reviewDraft(input: { label: string; draft: string; evidenc
             telemetry: callTelemetry('hearth.verify'),
           }),
         ).then((r) => r.output),
-        undefined,
+        chain,
         'hearth.verify',
       ),
     ),
   )
   const unsupported = claims.filter((_, i) => !checks[i].supported)
   if (unsupported.length === 0) return { claims, unsupported, message: input.draft }
-  if (unsupported.length === claims.length) return { claims, unsupported, message: null }
 
+  // Even when every listed claim fails the post is edited, not dropped: the
+  // list may be the capped few, and what it left out is still the post.
   const supported = claims.filter((_, i) => checks[i].supported)
   const rewritten = await withModelFallback((slot) =>
     traced(meta('rewrite', slot.name), () =>
       generateText({
         model: slot.model,
         system: REWRITE_PROMPT,
-        prompt: `ORIGINAL POST (for style only):\n${input.draft}\n\nSUPPORTED STATEMENTS:\n${supported.map((c) => `- ${c}`).join('\n')}\n\nNOT SUPPORTED, must not appear in any form:\n${unsupported.map((u) => `- ${u}`).join('\n')}`,
+        prompt:
+          `POST:\n${input.draft}\n\nNOT SUPPORTED, remove wherever they appear:\n${unsupported.map((u) => `- ${u}`).join('\n')}` +
+          (supported.length ? `\n\nSUPPORTED, keep as written:\n${supported.map((c) => `- ${c}`).join('\n')}` : ''),
         output: Output.object({ schema: rewriteSchema, name: 'rewrite' }),
         temperature: 0,
-        maxOutputTokens: 600,
+        maxOutputTokens: 800,
         timeout: { stepMs: 30_000 },
         telemetry: callTelemetry('hearth.verify'),
       }),
     ).then((r) => r.output.message.trim()),
-    undefined,
+    chain,
     'hearth.verify',
   )
   return { claims, unsupported, message: rewritten || null }
@@ -776,7 +817,7 @@ async function askGate(
 
 /**
  * Cheap gate for ambient group chatter: should the bot chime in at all?
- * Runs on the primary model only, fails closed (stay quiet) on any error, and
+ * Runs on one model only, fails closed (stay quiet) on any error, and
  * replies only when the question answered from both sides agrees. Most
  * chatter is settled by the first call; the second is only spent on a
  * message the first call wanted to answer.
@@ -796,9 +837,10 @@ export async function shouldChimeIn(input: {
         const second = await askGate(slot, history, input, 'silence')
         return second === 'reply'
       },
-      // Gate on the cheapest model only; falling through the whole chain would
-      // spend the day's quota on a coin flip.
-      [gateModel()],
+      // Gate on one model only; falling through the whole chain would spend
+      // the day's quota on a coin flip. It is the first slot that has been
+      // returning choices, not merely the first configured.
+      [await gateModel()],
       'hearth.gate',
     )
   } catch {
@@ -806,8 +848,8 @@ export async function shouldChimeIn(input: {
   }
 }
 
-function gateModel(): ModelSlot {
-  const slot = gateSlot()
+async function gateModel(): Promise<ModelSlot> {
+  const [slot] = await structuredChain()
   if (!slot) throw new Error('No LLM configured')
   return slot
 }

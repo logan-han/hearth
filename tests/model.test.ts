@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
-  withModelFallback, modelChain, localSlots, geminiSlots, openrouterSlots, gateSlot,
+  withModelFallback, modelChain, localSlots, geminiSlots, openrouterSlots, gateSlot, orderForStructured,
   type ModelSlot,
 } from '@/lib/model'
 
@@ -139,5 +139,25 @@ describe('withModelFallback', () => {
     await expect(withModelFallback(fn, [slot('gemini'), slot('openrouter')])).resolves.toBe(
       'a real answer',
     )
+  })
+})
+
+describe('orderForStructured', () => {
+  const chain = [slot('openrouter:free'), slot('openrouter:paid'), slot('gemini:lite')]
+  const record = (rows: [string, number, number][]) =>
+    new Map(rows.map(([name, attempts, noObject]) => [name, { attempts, noObject }]))
+
+  it('keeps the configured order when every slot returns objects, or has no record yet', () => {
+    expect(orderForStructured(chain, record([])).map((s) => s.name)).toEqual(['openrouter:free', 'openrouter:paid', 'gemini:lite'])
+    expect(orderForStructured(chain, record([['openrouter:free', 20, 2]]))[0].name).toBe('openrouter:free')
+  })
+
+  it('moves a slot that keeps answering a schema with prose behind those that do not, worst last', () => {
+    const out = orderForStructured(chain, record([['openrouter:free', 10, 10], ['openrouter:paid', 9, 2], ['gemini:lite', 3, 0]]))
+    expect(out.map((s) => s.name)).toEqual(['gemini:lite', 'openrouter:paid', 'openrouter:free'])
+  })
+
+  it('waits for five calls before judging a slot', () => {
+    expect(orderForStructured(chain, record([['openrouter:free', 4, 4]]))[0].name).toBe('openrouter:free')
   })
 })

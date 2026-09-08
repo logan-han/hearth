@@ -59,9 +59,14 @@ chatter, so a fact from last week is still in reach without the transcript.
 
 Before anything a watcher wrote reaches the chat it passes two checks in fresh
 contexts: each checkable claim is tested against the evidence by a call that
-never sees the draft, and what fails is cut; then a payoff-framed decision says
-post or skip with a confidence. A chat also hears from its watchers at most six
-times an hour, with an admin told the first time the cap holds something back.
+never sees the draft, and what fails is removed from the draft with the rest
+left as written; then a payoff-framed decision says post or skip with a
+confidence. A draft held back at either step goes to an admin by DM with the
+reason and the draft, so a snapshot that should have posted is never merely
+quiet. Calls that want an object back rather than prose try first the models
+that have lately been returning one, whatever the chain order for chat. A chat
+also hears from its watchers at most six times an hour, with an admin told the
+first time the cap holds something back.
 
 ## Layout
 
@@ -328,9 +333,10 @@ all. When there is something, the model only phrases it, with a handful of
 context tools: a transaction arrives as payee, amount and date, with a purpose
 only when a household fact, calendar entry or email names one, and "purpose not
 recorded" otherwise. A second, tool-free call then decides post or skip against
-the evidence and gives a confidence; anything under 0.7 is held back and
-logged. The commands are registered with Telegram, so the `/` menu lists them;
-nothing to remember. Anything the templates don't cover is a sentence away:
+the evidence and gives a confidence; anything under 0.7 is held back, logged,
+and sent to an admin with the reason. The commands are registered with
+Telegram, so the `/` menu lists them; nothing to remember. Anything the
+templates don't cover is a sentence away:
 describe a schedule in plain words and it becomes a custom automation with
 read-only tools, the same right to stay silent, and the same post decision.
 

@@ -2,15 +2,23 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
+import { recordModelEvent } from '@/lib/model-events'
 
 const generateText = vi.hoisted(() => vi.fn())
 vi.mock('ai', async (orig) => ({ ...(await orig<typeof import('ai')>()), generateText }))
 
-const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, isStructuredOutputError } = await import('@/lib/agent')
+const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, isStructuredOutputError } = await import('@/lib/agent')
 
 let client: PGlite
 
 const reply = (text: string) => ({ text, steps: [], usage: {} })
+
+/** Five structured calls answered with prose: enough for the chain to stop asking that slot first. */
+async function keepsAnsweringInProse(slot: string) {
+  for (let i = 0; i < 5; i++) {
+    await recordModelEvent({ slot, purpose: 'hearth.verify', outcome: 'failed', error: 'No object generated: could not parse the response.' })
+  }
+}
 
 beforeEach(async () => {
   vi.clearAllMocks()
@@ -131,6 +139,39 @@ describe('stripPreamble', () => {
   })
 })
 
+describe('stripWorking', () => {
+  const working = [
+    'I have what I need. Known facts confirm the tax line is deliberate, and the tuition payee is familiar. No web lookup needed.',
+    '',
+    'Weekly snapshot: in **$8,898.07**, out **$7,973.28**, net **+$924.79**.',
+    '',
+    'Top spend: Kids $5,273.24 (66% of spend).',
+  ].join('\n')
+  const post = 'Weekly snapshot: in **$8,898.07**, out **$7,973.28**, net **+$924.79**.\n\nTop spend: Kids $5,273.24 (66% of spend).'
+
+  it('cuts an opening paragraph of working with no handover line when a post follows it', () => {
+    expect(stripWorking(working)).toBe(post)
+  })
+
+  it('cuts several such paragraphs in a row', () => {
+    expect(stripWorking("Let me check the feed first.\n\nI'll fetch the budget too.\n\nBins out tonight.")).toBe('Bins out tonight.')
+  })
+
+  it('never eats a reply that is only working', () => {
+    const text = 'I have what I need. No web lookup needed.'
+    expect(stripWorking(text)).toBe(text)
+  })
+
+  it('leaves a post alone that never talks about itself', () => {
+    expect(stripWorking(post)).toBe(post)
+  })
+
+  it('is applied to watcher replies only', () => {
+    expect(cleanReply(working, { working: true })).toEqual({ text: post, stripped: true })
+    expect(cleanReply(working).text.startsWith('I have what I need')).toBe(true)
+  })
+})
+
 describe('runAgent', () => {
   const input = { chatId: '-100', chatType: 'private', member: null, memberName: 'Logan', text: 'hi' }
 
@@ -139,6 +180,13 @@ describe('runAgent', () => {
     const r = await runAgent(input)
     expect(r.text).toBe('Hello.')
     expect(r.model).toBe('gemini:gemini-3.5-flash-lite')
+  })
+
+  it('strips leaked working from a watcher reply, and keeps a chat reply whole', async () => {
+    const leaked = 'I have what I need. No web lookup needed.\n\nBins out tonight.'
+    generateText.mockResolvedValue(reply(leaked))
+    expect((await runAgent({ ...input, mode: 'watcher' })).text).toBe('Bins out tonight.')
+    expect((await runAgent({ ...input, mode: 'chat' })).text).toBe(leaked)
   })
 
   it("lists every member's linked accounts in context, not just the speaker's", async () => {
@@ -681,6 +729,15 @@ describe('decideWatcherPost', () => {
     expect(d.model).toContain('openrouter')
   })
 
+  it('asks first the model that has been returning objects, whatever the chain order', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    await keepsAnsweringInProse('gemini:gemini-3.5-flash-lite')
+    generateText.mockResolvedValue({ ...reply(''), output: { decision: 'post', confidence: 0.9 } })
+    const d = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
+    expect(d.model).toContain('openrouter')
+    expect(generateText).toHaveBeenCalledTimes(1)
+  })
+
   it('tells a plain error apart from a structured-output failure', () => {
     expect(isStructuredOutputError(new Error('boom'))).toBe(false)
   })
@@ -713,18 +770,40 @@ describe('reviewDraft', () => {
     const r = await reviewDraft({ label: 'x', draft: '2Up: $412.30 CHEAPTICKETS SEATTLE. Looks like a trip to Seattle!', evidence: 'DATA ...' })
     expect(r.unsupported).toEqual(['a trip to Seattle was booked'])
     expect(r.message).toBe('2Up: $412.30 CHEAPTICKETS SEATTLE.')
+    // The rewrite edits the draft itself rather than rebuilding it from the list,
+    // so whatever the capped list left out survives.
     const rewrite = String(generateText.mock.calls[3][0].prompt)
-    expect(rewrite).toContain('SUPPORTED STATEMENTS:\n- $412.30 to CHEAPTICKETS')
-    expect(rewrite).toContain('NOT SUPPORTED')
+    expect(rewrite).toContain('POST:\n2Up: $412.30 CHEAPTICKETS SEATTLE. Looks like a trip to Seattle!')
+    expect(rewrite).toContain('NOT SUPPORTED, remove wherever they appear:\n- a trip to Seattle was booked')
+    expect(rewrite).toContain('SUPPORTED, keep as written:\n- $412.30 to CHEAPTICKETS')
   })
 
-  it('returns silence when nothing survives', async () => {
+  it('still edits when every listed claim fails, and is silent only when nothing is left', async () => {
     generateText
       .mockResolvedValueOnce(out({ claims: ['a trip to Seattle was booked'] }))
       .mockResolvedValueOnce(out({ supported: false }))
+      .mockResolvedValueOnce(out({ message: '' }))
     const r = await reviewDraft({ label: 'x', draft: 'Looks like a trip to Seattle!', evidence: 'DATA ...' })
     expect(r.message).toBeNull()
-    expect(generateText).toHaveBeenCalledTimes(2)
+    expect(generateText).toHaveBeenCalledTimes(3)
+  })
+
+  it('asks for at most six claims, checks no more than that, and keeps the draft when they hold', async () => {
+    generateText.mockResolvedValueOnce(out({ claims: Array.from({ length: 8 }, (_, i) => `claim ${i}`) }))
+    for (let i = 0; i < 6; i++) generateText.mockResolvedValueOnce(out({ supported: true }))
+    const r = await reviewDraft({ label: 'x', draft: 'A long post.', evidence: 'DATA ...' })
+    expect(String(generateText.mock.calls[0][0].prompt)).toContain('at most 6 statements')
+    expect(generateText).toHaveBeenCalledTimes(7)
+    expect(r.claims).toHaveLength(6)
+    expect(r.message).toBe('A long post.')
+  })
+
+  it('runs the checks first on the model that has been returning objects, whatever the chain order', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    await keepsAnsweringInProse('gemini:gemini-3.5-flash-lite')
+    generateText.mockResolvedValueOnce(out({ claims: [] }))
+    await reviewDraft({ label: 'x', draft: 'Nothing new.', evidence: '' })
+    expect(String((generateText.mock.calls[0][0].model as { provider: string }).provider)).toContain('openrouter')
   })
 
   it('leaves a draft with nothing checkable alone', async () => {

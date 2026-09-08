@@ -79,6 +79,11 @@ const isSkipLine = (line: string) => /^skip[.!]*$/i.test(line.trim())
 /** A marked failure, and nothing else, is what earns an admin a DM. */
 const isProblemLine = (line: string) => /^\**\s*problem\s*\**\s*:/i.test(line.trim())
 
+/** Enough of a held-back draft for an admin to judge the call by, not the whole post. */
+const HELD_DRAFT_CHARS = 600
+const heldBack = (a: Automation, why: string, draft: string) =>
+  `Watcher **${a.label}** was held back: ${why}\n\nDraft:\n${draft.length > HELD_DRAFT_CHARS ? `${draft.slice(0, HELD_DRAFT_CHARS)}…` : draft}`
+
 /** Telegram gives groups negative ids; a private chat's id is the person's own. */
 const isGroupChat = (chatId: string) => chatId.startsWith('-')
 
@@ -245,7 +250,9 @@ async function runCustom(a: Automation, member: Member | undefined): Promise<voi
  * announced payoffs and a confidence, rather than left to the model that
  * wrote the draft. If the decision itself cannot be made (a provider that
  * will not return the structured object) the draft goes out as it always
- * did, and an admin hears that the safety net was down.
+ * did, and an admin hears that the safety net was down. A draft held back at
+ * either step is reported to an admin with the reason: a run that wrote
+ * something and posted nothing is not the quiet kind of quiet.
  */
 async function approve(a: Automation, member: Member | undefined, draft: string, evidence: string): Promise<string | null> {
   // First the factored check: each claim against the evidence, in a context
@@ -254,7 +261,9 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
   try {
     const review = await reviewDraft({ label: a.label, draft, evidence })
     if (review.message === null) {
-      console.warn(`[tick] ${a.label}: held back, no claim survived the check: ${review.unsupported.join(' | ')}`)
+      const why = `no claim survived the check: ${review.unsupported.join(' | ')}`
+      console.warn(`[tick] ${a.label}: held back, ${why}`)
+      await tellAdminQuietly(member, heldBack(a, why, draft))
       return null
     }
     if (review.unsupported.length) {
@@ -271,7 +280,9 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
       JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, model: d.model, reason: d.reason ?? null }),
     )
     if (d.decision === 'post' && d.confidence >= POST_CONFIDENCE) return d.message?.trim() || reviewed
-    console.warn(`[tick] ${a.label}: held back (${d.decision} at ${d.confidence.toFixed(2)})${d.reason ? `: ${d.reason}` : ''}`)
+    const why = `the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}`
+    console.warn(`[tick] ${a.label}: held back, ${why}`)
+    await tellAdminQuietly(member, heldBack(a, why, reviewed))
     return null
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)

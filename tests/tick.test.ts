@@ -375,17 +375,24 @@ describe('the post decision', () => {
     expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
   })
 
-  it('holds a draft back when the decision is skip', async () => {
+  it('holds a draft back when the decision is skip, and tells an admin why, with the draft', async () => {
     decideWatcherPost.mockResolvedValue({ decision: 'skip', confidence: 0.8, model: 'primary:test', reason: 'nothing the household needs' })
     await authed()
-    expect(send).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
     expect(insertValues).not.toHaveBeenCalled()
+    expect(send).toHaveBeenCalledTimes(1)
+    const [to, text] = send.mock.calls[0]
+    expect(to).toBe('900')
+    expect(text).toContain('held back')
+    expect(text).toContain('skip at 0.80: nothing the household needs')
+    expect(text).toContain('Draft:\nBins out tonight.')
   })
 
   it('holds a draft back when the decision is not confident enough', async () => {
     decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.4, model: 'primary:test' })
     await authed()
-    expect(send).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('post at 0.40'))
   })
 
   it('posts the rewritten message when the decision offers one', async () => {
@@ -410,11 +417,12 @@ describe('the post decision', () => {
     expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
   })
 
-  it('stays silent when no claim survives the check', async () => {
+  it('posts nothing when no claim survives the check, and tells an admin which failed', async () => {
     reviewDraft.mockResolvedValue({ claims: ['a trip to Seattle'], unsupported: ['a trip to Seattle'], message: null })
     await authed()
     expect(decideWatcherPost).not.toHaveBeenCalled()
-    expect(send).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('no claim survived the check: a trip to Seattle'))
   })
 
   it('falls back to deciding on the raw draft when the check itself fails', async () => {
