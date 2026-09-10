@@ -67,6 +67,14 @@ const MODE_SETTINGS: Record<AgentMode, { temperature?: number; maxOutputTokens: 
   sweep: { temperature: 0.2, maxOutputTokens: 1200 },
 }
 
+/**
+ * A reply the output cap cut off with fewer characters than this said is a
+ * model that thought its budget away, not an answer that ran long: the cap
+ * counts reasoning tokens, and a thinking model can reach it having written
+ * one letter of the post.
+ */
+const TRUNCATED_REPLY_CHARS = 200
+
 function defaultTools(mode: AgentMode): ToolName[] | undefined {
   if (mode === 'sweep') return SWEEP_TOOLS
   if (mode === 'watcher') return CUSTOM_AUTOMATION_TOOLS
@@ -540,6 +548,15 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         let cleaned = cleanReply(r.text, { working: mode === 'watcher' })
         if (cleaned.stripped) console.warn(`[agent] ${slot.name} leaked its working into the reply; stripped`)
 
+        // A fragment is worse than nothing: it would go to the review as the
+        // post. It is dropped here, and unless a tool already did something
+        // worth reporting, the failure below hands the turn to the next slot.
+        const truncated = r.finishReason === 'length' && cleaned.text.length < TRUNCATED_REPLY_CHARS
+        if (truncated) {
+          console.warn(`[agent] ${slot.name} ran out of output tokens after ${cleaned.text.length} characters of reply; dropped`)
+          cleaned = { text: '', stripped: true }
+        }
+
         if (mode === 'chat' && (await claimsUnmadeAction(slot, cleaned.text, r.steps ?? [], ctx))) {
           console.warn(`[agent] ${slot.name} reported an action it never took; asking it to act or retract`)
           await recordModelEvent({ slot: slot.name, purpose: `hearth.${mode}`, outcome: 'claim_retry' })
@@ -563,7 +580,9 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
 
         // An empty completion usually means the model ended on a tool call it never
         // summarised; treat it as a failure so the fallback model gets a turn.
-        if (!cleaned.text && ctx.notices.length === 0) throw new Error(`${slot.name} returned no text`)
+        if (!cleaned.text && ctx.notices.length === 0) {
+          throw new Error(truncated ? `${slot.name} ran out of output tokens before answering` : `${slot.name} returned no text`)
+        }
         return {
           text: cleaned.text,
           model: slot.name,

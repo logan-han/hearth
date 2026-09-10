@@ -376,6 +376,35 @@ describe('runAgent', () => {
     expect(r.text).toContain('Soccer')
   })
 
+  it('treats a reply the output cap cut short as a failure, so the next model gets a turn', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText
+      .mockResolvedValueOnce({ ...reply('Y'), finishReason: 'length' })
+      .mockResolvedValueOnce(reply('Proper answer.'))
+    const r = await runAgent(input)
+    expect(r.text).toBe('Proper answer.')
+    expect(r.model).toContain('openrouter')
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('failed'), expect.stringContaining('ran out of output tokens'))
+  })
+
+  it('keeps a reply that ran long before the cap cut it', async () => {
+    const long = 'The school newsletter says the concert is on Friday and the bus leaves at eight. '.repeat(4).trim()
+    generateText.mockResolvedValueOnce({ ...reply(long), finishReason: 'length' })
+    expect((await runAgent(input)).text).toBe(long)
+  })
+
+  it('drops a cut-short fragment but keeps the notice a tool already produced', async () => {
+    generateText.mockImplementation(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
+      await opts.tools.add_family_event.execute(
+        { title: 'Soccer', start: '2026-08-29T09:00', all_day: false }, {},
+      )
+      return { ...reply('Y'), finishReason: 'length' }
+    })
+    const r = await runAgent(input)
+    expect(r.notices.join(' ')).toContain('Soccer')
+    expect(r.text).toBe(r.notices.join('\n'))
+  })
+
   it('throws when nothing is configured at all', async () => {
     delete process.env.GEMINI_API_KEY
     await expect(runAgent(input)).rejects.toThrow(/No LLM configured/)
