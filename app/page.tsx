@@ -48,7 +48,7 @@ export default async function HomePage({
 
         <section>
           <h2>Reminders</h2>
-          <Reminders automations={stats.automations} />
+          <Reminders automations={stats.automations} scheduler={stats.scheduler} />
         </section>
 
         <section>

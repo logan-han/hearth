@@ -230,6 +230,7 @@ h2 {
 .listing .title.mono { font-size: 0.78rem; font-weight: 500; word-break: break-all; }
 .listing .meta { display: block; color: var(--muted); font-size: 0.8rem; }
 .listing .meta.mono { font-size: 0.76rem; }
+.panel > p.meta { margin: 0.7rem 0 0; color: var(--muted); font-size: 0.8rem; }
 .warn { color: var(--amber); }
 
 .empty { color: var(--muted); font-size: 0.88rem; margin: 0; }

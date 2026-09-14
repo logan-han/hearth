@@ -519,6 +519,28 @@ describe('automation tools', () => {
     const a = await call(automationTools(ctx), 'create_automation', { label: 'bins', cron: '0 19 * * 1', instruction: 'i' })
     expect((await call(automationTools(ctx), 'delete_automation', { id: a.id })).deleted).toBe(a.id)
   })
+
+  it('refuses a schedule the ticks cannot land on, and offers the nearest they can', async () => {
+    // QStash has been calling hourly, on the hour.
+    await q.recordTick(new Date('2026-08-26T22:00:00Z'))
+    await q.recordTick(new Date('2026-08-26T23:00:01Z'))
+    const r = await call(automationTools(ctx), 'create_automation', { label: 'sweep', cron: '45 7 * * *', instruction: 'i' })
+    expect(String(r.error)).toContain('hourly, on the hour')
+    expect(String(r.error)).toContain('7:45 am')
+    expect(String(r.error)).toContain('8:00 am')
+    expect(r.suggestion).toBe('0 8 * * *')
+    expect(await q.listAutomations('-100')).toHaveLength(0)
+
+    const ok = await call(automationTools(ctx), 'create_automation', { label: 'sweep', cron: '0 8 * * *', instruction: 'i' })
+    expect(ok.id).toBeDefined()
+    expect((await call(automationTools(ctx), 'list_automations', {})).scheduler).toBe('hourly, on the hour')
+  })
+
+  it('takes any schedule before the scheduler has shown its cadence', async () => {
+    const r = await call(automationTools(ctx), 'create_automation', { label: 'sweep', cron: '45 7 * * *', instruction: 'i' })
+    expect(r.id).toBeDefined()
+    expect((await call(automationTools(ctx), 'list_automations', {})).scheduler).toBeNull()
+  })
 })
 
 describe('web search', () => {

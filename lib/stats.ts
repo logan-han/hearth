@@ -9,6 +9,7 @@ import * as weather from './providers/weather'
 import { describeChain } from './model'
 import { chainHealth, type ChainHealth } from './model-events'
 import { getSetting } from './db/queries'
+import { schedulerPulse, tickCadence, onGrid, nextTickOnOrAfter, describeGrid, type TickGrid } from './scheduler'
 
 export type Stats = Awaited<ReturnType<typeof gatherStats>>
 export type FamilyStats = Awaited<ReturnType<typeof gatherFamilyStats>>
@@ -92,11 +93,12 @@ export async function gatherStats(month?: string) {
   ])
 
   const c = one(counts)
+  const grid = tickCadence(lastTickAt, prevTickAt)
   return {
     timezone: timezone(),
     calendar: buildMonth(view, rows(monthEvents)),
     chainHealth: health,
-    scheduler: schedulerPulse(lastTickAt, prevTickAt, ctxNow()),
+    scheduler: { ...schedulerPulse(lastTickAt, prevTickAt, ctxNow()), grid: grid ? describeGrid(grid) : null },
     totals: {
       members: n(c.members),
       admins: n(c.admins),
@@ -129,7 +131,7 @@ export async function gatherStats(month?: string) {
       label: String(r.label),
       cron: String(r.cron_expr),
       enabled: Boolean(r.enabled),
-      nextRun: r.enabled ? formatLocal(new Date(r.next_run_at as string)) : null,
+      ...timing(grid, r),
       lastRun: r.last_run_at ? formatLocal(new Date(r.last_run_at as string)) : null,
     })),
     lists: rows(listRows).map((r) => ({ name: String(r.name), open: n(r.open), total: n(r.total) })),
@@ -170,39 +172,18 @@ export async function gatherStats(month?: string) {
 }
 
 /**
- * Three missed ticks is a scheduler that has stopped. The cadence is not
- * assumed: it is read off the gap between the last two ticks, so the same
- * judgement holds for a schedule of every five minutes or every hour. Hourly
- * is the expected shape: on Neon's free plan every tick keeps the database
- * awake for five minutes afterwards, so a five-minute schedule never lets it
- * sleep and burns the month's compute in a fortnight. Until a second tick has
- * landed, five minutes is assumed.
+ * When an automation is due and, when that is not on a tick, when it will
+ * really run: an automation fires at the first tick on or after its time.
+ * Before the scheduler has shown its cadence nothing can be said, so nothing is.
  */
-const ASSUMED_TICK_MINUTES = 5
-const MISSED_TICKS = 3
-
-export type SchedulerPulse = {
-  lastTick: string | null
-  minutesAgo: number | null
-  /** The observed cadence, once two ticks have been seen. */
-  everyMinutes: number | null
-  stale: boolean
-}
-
-export function schedulerPulse(lastTickAt: string | null, prevTickAt: string | null, now: Date): SchedulerPulse {
-  if (!lastTickAt) return { lastTick: null, minutesAgo: null, everyMinutes: null, stale: true }
-  const at = new Date(lastTickAt)
-  const prev = prevTickAt ? new Date(prevTickAt) : null
-  const minutesAgo = Math.max(0, Math.round((now.getTime() - at.getTime()) / 60_000))
-  const gap = prev && prev.getTime() < at.getTime() ? Math.round((at.getTime() - prev.getTime()) / 60_000) : null
-  // Two ticks close together (a manual one beside the schedule) must not make
-  // the judgement hair-trigger, so the cadence is never taken as under five.
-  const everyMinutes = gap === null ? null : Math.max(ASSUMED_TICK_MINUTES, gap)
+function timing(grid: TickGrid | null, r: Row) {
+  if (!r.enabled) return { nextRun: null, offGrid: false, runsAt: null }
+  const due = new Date(r.next_run_at as string)
+  const offGrid = grid ? !onGrid(grid, due) : false
   return {
-    lastTick: formatLocal(at),
-    minutesAgo,
-    everyMinutes,
-    stale: minutesAgo > MISSED_TICKS * (everyMinutes ?? ASSUMED_TICK_MINUTES),
+    nextRun: formatLocal(due),
+    offGrid,
+    runsAt: offGrid && grid ? formatLocal(nextTickOnOrAfter(grid, due)) : null,
   }
 }
 
@@ -234,7 +215,7 @@ function safeStrangers(raw: unknown): number {
  */
 export async function gatherFamilyStats(month?: string) {
   const view = monthView(month, ctxNow())
-  const [counts, upcoming, automations, listRows, monthEvents, proposalRows] = await Promise.all([
+  const [counts, upcoming, automations, listRows, monthEvents, proposalRows, lastTickAt, prevTickAt] = await Promise.all([
     db().execute(sql`
       select
         (select count(*) from family_events where not cancelled) as events,
@@ -267,6 +248,8 @@ export async function gatherFamilyStats(month?: string) {
       from event_proposals p left join chats c on c.chat_id = p.chat_id
       where ${LIVE_PROPOSAL} order by p.starts_at
     `),
+    getSetting('last_tick_at').catch((): string | null => null),
+    getSetting('prev_tick_at').catch((): string | null => null),
   ])
 
   // One row per item, empty lists included; fold into per-list shapes the
@@ -280,8 +263,11 @@ export async function gatherFamilyStats(month?: string) {
   }
 
   const c = one(counts)
+  const grid = tickCadence(lastTickAt, prevTickAt)
   return {
     timezone: timezone(),
+    // When reminders can fire at all, in words, once the scheduler has shown it.
+    scheduler: grid ? describeGrid(grid) : null,
     calendar: buildMonth(view, rows(monthEvents)),
     totals: { events: n(c.events), memories: n(c.memories), proposals: n(c.proposals) },
     upcoming: rows(upcoming).map((r) => ({
@@ -295,7 +281,7 @@ export async function gatherFamilyStats(month?: string) {
       label: String(r.label),
       cron: String(r.cron_expr),
       enabled: Boolean(r.enabled),
-      nextRun: r.enabled ? formatLocal(new Date(r.next_run_at as string)) : null,
+      ...timing(grid, r),
     })),
     lists: [...lists.values()].map((l) => ({
       name: l.name,

@@ -41,7 +41,7 @@ export default async function SystemPage() {
           note={
             pulse.stale
               ? (pulse.lastTick ? 'scheduler has gone quiet' : 'no tick recorded yet')
-              : (pulse.everyMinutes ? `every ${pulse.everyMinutes} min` : undefined)
+              : (pulse.grid ?? (pulse.everyMinutes ? `every ${pulse.everyMinutes} min` : undefined))
           }
         />
       </div>

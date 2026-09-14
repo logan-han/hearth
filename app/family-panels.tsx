@@ -117,8 +117,11 @@ export function NextUp({ events }: { events: { id: number; title: string; when: 
 
 export function Reminders({
   automations,
+  scheduler,
 }: {
-  automations: { id: number; label: string; enabled: boolean; nextRun: string | null }[]
+  automations: { id: number; label: string; enabled: boolean; nextRun: string | null; offGrid: boolean; runsAt: string | null }[]
+  /** When the scheduler ticks, in words, once it has shown its cadence. */
+  scheduler: string | null
 }) {
   const { act, busy, error } = useFamilyActions()
 
@@ -133,8 +136,11 @@ export function Reminders({
               <span className="grow">
                 <span className="title">
                   {a.label} {a.enabled ? null : <span className="tag none">paused</span>}
+                  {a.offGrid ? <span className="tag none">off the tick</span> : null}
                 </span>
-                <span className="meta">{a.enabled ? `next ${a.nextRun}` : 'will not run'}</span>
+                <span className="meta">
+                  {!a.enabled ? 'will not run' : a.offGrid ? `due ${a.nextRun}, runs ${a.runsAt}` : `next ${a.nextRun}`}
+                </span>
               </span>
               <span className="row-acts">
                 <button disabled={busy} onClick={() => act({ action: 'pause_automation', id: a.id, enabled: !a.enabled })}>
@@ -152,6 +158,9 @@ export function Reminders({
           ))}
         </ul>
       )}
+      {scheduler ? (
+        <p className="meta">Reminders fire when the scheduler ticks, {scheduler}. One set for a time between ticks waits for the next.</p>
+      ) : null}
       {error ? <p className="flash bad">{error}</p> : null}
     </div>
   )

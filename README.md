@@ -172,9 +172,12 @@ Delegated permissions: `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`,
   clock, 180 CU-hours a month against the 100 the free plan allows, after
   which Neon suspends the database until the next month. Hourly ticks cost
   about 16 CU-hours a month, every 15 minutes about 60. A reminder due
-  between ticks runs at the next one, so keep schedules on the hour, as the
-  built-in watchers are. (Vercel Hobby cron is once-a-day minimum, which
-  cannot drive reminders.)
+  between ticks runs at the next one, so schedules belong on the hour, as the
+  built-in watchers are. The bot holds itself to this: it learns the tick
+  grid from QStash's own calls, `create_automation` refuses a cron that
+  would not land on a tick and offers the nearest that does, and Home marks
+  any reminder already off the grid with the tick it will really run at.
+  (Vercel Hobby cron is once-a-day minimum, which cannot drive reminders.)
 - **Tavily** — API key, 1k credits/month free.
 - **OpenWeatherMap** — optional; a free key from
   [home.openweathermap.org/api_keys](https://home.openweathermap.org/api_keys)

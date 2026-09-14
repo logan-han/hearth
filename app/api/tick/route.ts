@@ -27,8 +27,12 @@ export const dynamic = 'force-dynamic'
 /** A draft posts only when the decision is post and at least this sure. */
 const POST_CONFIDENCE = 0.7
 
-/** QStash signs every delivery; without keys we only accept a manual admin secret. */
-async function authorised(req: Request, body: string): Promise<boolean> {
+/**
+ * QStash signs every delivery; without keys we only accept a manual admin
+ * secret. Which one let the call in matters: only the scheduler's own calls
+ * are its pulse.
+ */
+async function authorised(req: Request, body: string): Promise<'scheduler' | 'manual' | null> {
   const current = process.env.QSTASH_CURRENT_SIGNING_KEY
   const next = process.env.QSTASH_NEXT_SIGNING_KEY
   const signature = req.headers.get('upstash-signature')
@@ -36,15 +40,15 @@ async function authorised(req: Request, body: string): Promise<boolean> {
   if (current && signature) {
     try {
       const receiver = new Receiver({ currentSigningKey: current, nextSigningKey: next ?? current })
-      return await receiver.verify({ signature, body, url: req.url })
+      return (await receiver.verify({ signature, body, url: req.url })) ? 'scheduler' : null
     } catch (err) {
       console.warn('[tick] signature verification failed:', err)
-      return false
+      return null
     }
   }
 
   const adminSecret = process.env.TICK_SECRET
-  return Boolean(adminSecret) && req.headers.get('x-tick-secret') === adminSecret
+  return Boolean(adminSecret) && req.headers.get('x-tick-secret') === adminSecret ? 'manual' : null
 }
 
 /**
@@ -410,15 +414,21 @@ export async function POST(req: Request) {
   // settings must be hydrated the same as on the webhook path.
   await hydrateSecrets()
   const body = await req.text()
-  if (!(await authorised(req, body))) {
+  const via = await authorised(req, body)
+  if (!via) {
     return NextResponse.json({ ok: false }, { status: 401 })
   }
   // The pulse the System page shows: a scheduler that has gone quiet is the
   // failure mode that otherwise presents as reminders silently not firing.
-  try {
-    await recordTick(new Date())
-  } catch (err) {
-    console.error('[tick] could not record the tick:', err)
+  // Only the scheduler's own calls count: the gap between its last two is the
+  // grid every automation's timing is judged against, and a manual poke
+  // would put a phantom tick on it.
+  if (via === 'scheduler') {
+    try {
+      await recordTick(new Date())
+    } catch (err) {
+      console.error('[tick] could not record the tick:', err)
+    }
   }
   const result = await runDue()
   await maybeConsolidateMemory(new Date())

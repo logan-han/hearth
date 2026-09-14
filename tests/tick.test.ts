@@ -154,6 +154,8 @@ describe('POST /api/tick authorisation', () => {
     process.env.TICK_SECRET = 'let-me-in'
     expect((await tick({ 'x-tick-secret': 'let-me-in' })).status).toBe(200)
     expect((await tick({ 'x-tick-secret': 'nope' })).status).toBe(401)
+    // A manual poke is not the scheduler's pulse.
+    expect(recordTick).not.toHaveBeenCalled()
   })
 })
 
