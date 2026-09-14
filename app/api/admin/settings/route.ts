@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { requireAdmin } from '@/lib/auth/session'
-import { isManaged, setSecret, clearSecret, importFromEnvironment, listSettings } from '@/lib/settings'
+import { isManaged, setSecret, clearSecret, listSettings } from '@/lib/settings'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -14,7 +14,7 @@ export async function POST(req: Request) {
   const session = await requireAdmin()
   if (!session) return NextResponse.json({ error: 'Not an administrator' }, { status: 401 })
 
-  let body: { key?: string; value?: string; import?: boolean }
+  let body: { key?: string; value?: string }
   try {
     body = await req.json()
   } catch {
@@ -29,12 +29,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    if (body.import) {
-      // The one way an env var changed after first sight gets in: on request.
-      if (!(await importFromEnvironment(key))) {
-        return NextResponse.json({ error: `The deployment's environment sets nothing for ${key}.` }, { status: 400 })
-      }
-    } else if (value === undefined || value === '') await clearSecret(key, session.email)
+    if (value === undefined || value === '') await clearSecret(key, session.email)
     else await setSecret(key, value, session.email)
     return NextResponse.json({ ok: true, key, settings: await listSettings() })
   } catch (err) {

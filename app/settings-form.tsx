@@ -69,19 +69,19 @@ export function SettingsForm({
       .catch(() => {})
   }, [status])
 
-  async function write(body: Record<string, unknown>, done: string) {
+  async function save(key: string, value: string) {
     setBusy(true)
     setFlash(null)
     try {
       const res = await fetch('/api/admin/settings', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ key, value }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Could not save')
       setSettings(data.settings)
-      setFlash({ text: done })
+      setFlash({ text: value === '' ? 'Removed.' : 'Saved.' })
       setEditing(null)
       setDraft('')
     } catch (err) {
@@ -90,9 +90,6 @@ export function SettingsForm({
       setBusy(false)
     }
   }
-  const save = (key: string, value: string) => write({ key, value }, value === '' ? 'Removed.' : 'Saved.')
-  // The one way an env var changed since first sight gets in: an admin asks for it.
-  const takeFromEnvironment = (key: string) => write({ key, import: true }, 'Now using the environment\u2019s value.')
 
   // LLM_ORDER is edited by the chain above, not as a row of text.
   const shown = settings.filter((s) => s.key !== 'LLM_ORDER')
@@ -157,13 +154,13 @@ export function SettingsForm({
                           saved here{s.savedOn ? ` · ${s.savedOn}` : ''}
                         </span>
                       ) : s.origin === 'environment' ? (
-                        // Seeded from the deployment's env var the first time it was
-                        // seen, or taken from it on request; the dashboard owns it now.
+                        // A past event, not a live source: the value was copied in from
+                        // the deployment's env var the first time the setting was seen.
                         <span
                           className="tag"
-                          title={`Taken from the deployment's environment variable ${s.key} ${s.savedAt ?? 'earlier'}. The environment is read once, when a setting is first seen; this page owns the value now.`}
+                          title={`Copied in from the deployment's environment variable ${s.key} ${s.savedAt ?? 'earlier'}, the first time this setting was seen. This page owns it now; the environment is not read again.`}
                         >
-                          from the environment{s.savedOn ? ` · ${s.savedOn}` : ''}
+                          seeded from env{s.savedOn ? ` · ${s.savedOn}` : ''}
                         </span>
                       ) : null}
                       <span className="env">{s.key}</span>
@@ -176,17 +173,6 @@ export function SettingsForm({
                               Get one at {s.link.text} →
                             </a>
                           ) : null}
-                        </span>
-                      ) : null}
-                      {s.envDiffers ? (
-                        // The env var moved on after it was read. Said here, never applied:
-                        // one home per setting, and this page is it.
-                        <span className="help drift">
-                          The deployment&rsquo;s environment {s.set ? 'now sets a different value' : `still sets ${s.key}`}
-                          {s.envValue ? `: ${s.envValue}` : ''}. It was read once, so that is not in use.{' '}
-                          <button className="link" disabled={busy} onClick={() => takeFromEnvironment(s.key)}>
-                            Use the environment&rsquo;s value
-                          </button>
                         </span>
                       ) : null}
                     </div>
@@ -328,8 +314,8 @@ export function SettingsForm({
       <p className="empty">
         Anything saved here is encrypted and takes effect straight away, without a redeploy. Keys are
         never shown back to this page. The deployment&rsquo;s environment is read once, the first time a
-        setting is seen, and this page owns every setting from then on: removing one leaves it unset,
-        whatever the environment says.
+        setting is seen, and never again: this page owns every setting from then on, and removing one
+        leaves it unset.
       </p>
     </>
   )

@@ -17,7 +17,7 @@ const jar = vi.hoisted(() => {
 vi.mock('next/headers', () => ({ cookies: jar.cookies }))
 
 const {
-  MANAGED_KEYS, isManaged, isSecretShaped, setSecret, clearSecret, importFromEnvironment, listSettings,
+  MANAGED_KEYS, isManaged, isSecretShaped, setSecret, clearSecret, listSettings,
   hydrateSecrets, resetHydration,
 } = await import('@/lib/settings')
 const { createSession, readSession, destroySession, resolveRole, requireAdmin } = await import('@/lib/auth/session')
@@ -98,32 +98,19 @@ describe('storing settings', () => {
     expect(process.env.GEMINI_MODEL).toBe('from-dashboard')
   })
 
-  it('seeds a key from the environment on first sight, then ignores the env var', async () => {
+  it('seeds a key from the environment on first sight, then never reads the env var again', async () => {
     process.env.GEMINI_MODEL = 'from-env'
     await hydrateSecrets()
     const seeded = (await listSettings()).find((s) => s.key === 'GEMINI_MODEL')!
     expect(seeded.value).toBe('from-env')
     expect(seeded.origin).toBe('environment')
-    expect(seeded.envDiffers).toBe(false)
 
-    // The operator changes the env var and redeploys: the store's value stays,
-    // and the dashboard shows the drift instead of applying it.
+    // The operator changes the env var and redeploys: the store's value stays.
     process.env.GEMINI_MODEL = 'changed-in-env'
     resetHydration()
     await hydrateSecrets()
     expect(process.env.GEMINI_MODEL).toBe('from-env')
-    const drifted = (await listSettings()).find((s) => s.key === 'GEMINI_MODEL')!
-    expect(drifted.envDiffers).toBe(true)
-    expect(drifted.envValue).toBe('changed-in-env')
-  })
-
-  it('takes the environment value on request, and only then', async () => {
-    process.env.GEMINI_MODEL = 'from-env'
-    await setSecret('GEMINI_MODEL', 'from-dashboard', 'logan@han.life')
-    expect(await importFromEnvironment('GEMINI_MODEL')).toBe(true)
-    expect(process.env.GEMINI_MODEL).toBe('from-env')
-    expect((await listSettings()).find((s) => s.key === 'GEMINI_MODEL')!.origin).toBe('environment')
-    expect(await importFromEnvironment('UP_API_TOKEN')).toBe(false)
+    expect(JSON.stringify(await listSettings())).not.toContain('changed-in-env')
   })
 
   it('removing a setting unsets it for good, even when the environment still has a value', async () => {
@@ -140,7 +127,6 @@ describe('storing settings', () => {
     const shown = (await listSettings()).find((s) => s.key === 'GEMINI_MODEL')!
     expect(shown.set).toBe(false)
     expect(shown.origin).toBeNull()
-    expect(shown.envDiffers).toBe(true)
   })
 
   it('updating twice keeps one row and the newer value', async () => {
@@ -165,15 +151,6 @@ describe('listSettings', () => {
     await setSecret('GEMINI_MODEL', 'gemini-3.5-flash-lite', 'logan@han.life')
     const shown = (await listSettings()).find((s) => s.key === 'GEMINI_MODEL')!
     expect(shown.value).toBe('gemini-3.5-flash-lite')
-  })
-
-  it('never shows a credential the environment sets, even as drift', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or-env'
-    await setSecret('OPENROUTER_API_KEY', 'sk-or-dash', 'logan@han.life')
-    const shown = (await listSettings()).find((s) => s.key === 'OPENROUTER_API_KEY')!
-    expect(shown.envDiffers).toBe(true)
-    expect(shown.envValue).toBeNull()
-    expect(JSON.stringify(await listSettings())).not.toContain('sk-or-env')
   })
 
   it('says where each value came from', async () => {

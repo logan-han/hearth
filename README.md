@@ -115,10 +115,9 @@ family, a model provider (any one of Gemini, OpenRouter or a self-hosted
 server is enough), timezone — with no redeploys. Everything below can also be
 seeded through the environment: an env var for a dashboard-managed setting is
 read **once**, the first time the deployment sees that setting, and copied into
-the dashboard's encrypted store, which owns it from then on. Change it in
-Settings after that; a later change to the env var shows beside the setting as
-drift, with a button to take it, rather than applying by itself. Either way
-BotFather is still where the bot itself comes from.
+the dashboard's encrypted store, which owns it from then on. The env var is
+never read again and can be deleted; change the setting in Settings. Either
+way BotFather is still where the bot itself comes from.
 
 ### 1. Telegram
 
@@ -517,10 +516,9 @@ and Settings shows what Telegram thinks of the bot, with one button to point
 the webhook back at this deployment after a change. Stored values are
 AES-256-GCM encrypted and are **never sent back to the browser** for
 credential-shaped keys. Every setting has exactly one home: the deployment's
-environment seeds a key the first time it is seen, the store owns it from then
-on, and an env var changed after that shows beside the setting as drift, with
-a button to take its value, rather than applying by itself. Removing a setting
-leaves it unset, whatever the environment still says.
+environment seeds a key the first time it is seen, and the store owns it from
+then on, with the env var never read again. Removing a setting leaves it
+unset, whatever the environment still says.
 
 ## Observability
 

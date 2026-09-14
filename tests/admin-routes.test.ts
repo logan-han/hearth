@@ -110,16 +110,6 @@ describe('the settings API respects the allowlist', () => {
     expect(process.env.GEMINI_MODEL).toBeUndefined()
   })
 
-  it('takes the environment value on request, and refuses when the environment sets nothing', async () => {
-    process.env.GEMINI_MODEL = 'env-model'
-    await post({ key: 'GEMINI_MODEL', value: 'dash-model' })
-    expect(process.env.GEMINI_MODEL).toBe('dash-model')
-    expect((await post({ key: 'GEMINI_MODEL', import: true })).status).toBe(200)
-    expect(process.env.GEMINI_MODEL).toBe('env-model')
-    expect((await listSettings()).find((s) => s.key === 'GEMINI_MODEL')!.origin).toBe('environment')
-    expect((await post({ key: 'UP_API_TOKEN', import: true })).status).toBe(400)
-  })
-
   it('returns the refreshed list, still without secret values', async () => {
     const res = await post({ key: 'NOTION_TOKEN', value: 'ntn_supersecret' })
     const body = await res.text()
