@@ -1,4 +1,3 @@
-import { eq } from 'drizzle-orm'
 import { db } from './db'
 import { secrets } from './db/schema'
 import { encrypt, decrypt } from './crypto'
@@ -72,16 +71,55 @@ export function isSecretShaped(key: string): boolean {
   return CREDENTIALS.has(key)
 }
 
+/**
+ * The `updated_by` a row carries when its value was taken from the
+ * deployment's environment rather than typed into the dashboard.
+ */
+export const FROM_ENVIRONMENT = 'environment'
+
 let hydrated: { at: number; done: Promise<void> } | null = null
 
 /** How long one instance may trust its copy before re-reading the store. */
 const HYDRATE_TTL_MS = 60_000
 
 /**
- * Copy stored overrides into process.env, so every existing `process.env.X`
- * read picks them up without threading an async accessor through the whole
- * codebase. Stored values win over the deployment's env: an admin changing a
- * key in the dashboard is the more recent intent.
+ * The deployment's own environment for the managed keys, captured the first
+ * time this module touches process.env and before the store writes over it.
+ * That is the only moment it is still visible, and it is what the dashboard
+ * compares against to show an env var that has drifted from the value in use.
+ */
+let deployment: Map<string, string> | null = null
+
+function deploymentEnv(): Map<string, string> {
+  if (!deployment) {
+    deployment = new Map()
+    for (const key of MANAGED_KEYS) {
+      const value = process.env[key]
+      if (value) deployment.set(key, value)
+    }
+  }
+  return deployment
+}
+
+/** What the deployment's environment sets `key` to, if anything. */
+export function deploymentValue(key: ManagedKey): string | undefined {
+  return deploymentEnv().get(key)
+}
+
+/** Put a value where the rest of the code reads it. An empty value is an unset key. */
+function apply(key: string, value: string): void {
+  if (value) process.env[key] = value
+  else delete process.env[key]
+}
+
+/**
+ * Every managed setting has one home. The store owns a key from the moment it
+ * holds a row for it; a key the store has never seen is seeded from the
+ * deployment's environment, once, and owned from then on. So what is copied
+ * over process.env here is the store's value, and an env var changed after
+ * that shows up in the dashboard as drift rather than taking effect. Copying
+ * into process.env spares threading an async accessor through every
+ * `process.env.X` read in the codebase.
  *
  * Memoised with a short TTL rather than per cold start: under Fluid compute a
  * warm instance can live for hours, and a memo-forever meant a key changed in
@@ -90,19 +128,24 @@ const HYDRATE_TTL_MS = 60_000
 export function hydrateSecrets(): Promise<void> {
   if (!hydrated || Date.now() - hydrated.at > HYDRATE_TTL_MS) {
     const done = (async () => {
+      const env = deploymentEnv()
       try {
-        const rows = await db().select().from(secrets)
-        for (const row of rows) {
-          if (!isManaged(row.key)) continue
-          try {
-            process.env[row.key] = await decrypt(row.value)
-          } catch (err) {
-            console.error(`[settings] could not decrypt ${row.key}:`, err)
+        const stored = new Map((await db().select().from(secrets)).map((r) => [r.key, r]))
+        for (const key of MANAGED_KEYS) {
+          const row = stored.get(key)
+          if (row) {
+            try {
+              apply(key, await decrypt(row.value))
+            } catch (err) {
+              console.error(`[settings] could not decrypt ${key}:`, err)
+            }
+          } else if (env.get(key)) {
+            await seed(key, env.get(key)!)
           }
         }
       } catch (err) {
         // A missing table or an unreachable database must not take the bot
-        // down; the deployment's own env vars still apply.
+        // down; whatever the deployment's env vars say still applies.
         console.error('[settings] hydrate failed, using env only:', err)
       }
     })()
@@ -111,25 +154,56 @@ export function hydrateSecrets(): Promise<void> {
   return hydrated.done
 }
 
-/** Test seam, and used after a write so the next read sees the new value. */
+/**
+ * First sight of a key the environment sets: it becomes a row, marked as the
+ * environment's, and the store owns it from here. Do-nothing on conflict, so
+ * two instances hydrating at once cannot fight over it and a value typed into
+ * the dashboard in the meantime wins.
+ */
+async function seed(key: ManagedKey, value: string): Promise<void> {
+  const inserted = await db()
+    .insert(secrets)
+    .values({ key, value: await encrypt(value), updatedBy: FROM_ENVIRONMENT })
+    .onConflictDoNothing()
+    .returning({ key: secrets.key })
+  if (inserted.length) console.info(`[settings] ${key} taken from the deployment environment; the dashboard owns it now`)
+}
+
+/** Test seam: forget the memo and the captured environment. */
 export function resetHydration(): void {
   hydrated = null
+  deployment = null
 }
 
 export async function setSecret(key: ManagedKey, value: string, updatedBy: string): Promise<void> {
+  deploymentEnv()
   const encrypted = await encrypt(value)
   await db()
     .insert(secrets)
     .values({ key, value: encrypted, updatedBy })
     .onConflictDoUpdate({ target: secrets.key, set: { value: encrypted, updatedAt: new Date(), updatedBy } })
-  process.env[key] = value
+  apply(key, value)
 }
 
-export async function clearSecret(key: ManagedKey): Promise<void> {
-  await db().delete(secrets).where(eq(secrets.key, key))
-  delete process.env[key]
-  // The deployment's own env var, if any, is only visible again next cold start.
-  resetHydration()
+/**
+ * Unset a key for good. The row stays, holding an empty value, so the key is
+ * not seeded from the environment again on the next cold start: removed means
+ * removed, whatever the deployment's env vars still say.
+ */
+export async function clearSecret(key: ManagedKey, updatedBy: string): Promise<void> {
+  await setSecret(key, '', updatedBy)
+}
+
+/**
+ * Take the deployment's current environment value for a key, on request. This
+ * is the one way an env var changed after first sight gets in. False when the
+ * environment sets nothing for it.
+ */
+export async function importFromEnvironment(key: ManagedKey): Promise<boolean> {
+  const value = deploymentValue(key)
+  if (!value) return false
+  await setSecret(key, value, FROM_ENVIRONMENT)
+  return true
 }
 
 /**
@@ -290,12 +364,25 @@ export type SettingView = {
   set: boolean
   /** Present only for non-secret settings; credentials are never sent back. */
   value: string | null
-  source: 'dashboard' | 'environment' | 'unset'
+  /**
+   * Where the value in use was written from: this dashboard, or the
+   * deployment's environment (seeded on first sight, or taken on request).
+   * Null while the key is unset.
+   */
+  origin: 'dashboard' | 'environment' | null
   updatedAt: string | null
   updatedBy: string | null
-  /** When the dashboard value was saved, in household time: "28 Aug" and the full form. */
+  /** When the value was written, in household time: "28 Aug" and the full form. */
   savedOn: string | null
   savedAt: string | null
+  /**
+   * The deployment's environment now sets this key to something other than
+   * the value in use. The environment is read once, so this is drift to look
+   * at, not a value that applies.
+   */
+  envDiffers: boolean
+  /** The environment's value when it differs, for non-secret settings only. */
+  envValue: string | null
 }
 
 export async function listSettings(): Promise<SettingView[]> {
@@ -305,20 +392,25 @@ export async function listSettings(): Promise<SettingView[]> {
   return MANAGED_KEYS.map((key) => {
     const row = stored.get(key)
     const current = process.env[key]
+    const fromEnv = deploymentValue(key)
     const secret = isSecretShaped(key)
+    const set = Boolean(current)
+    const envDiffers = Boolean(fromEnv) && fromEnv !== (current ?? '')
     return {
       key,
       ...SETTING_META[key],
       secret,
-      set: Boolean(current),
+      set,
       value: secret ? null : (current ?? null),
-      source: row ? 'dashboard' : current ? 'environment' : 'unset',
+      origin: row && set ? (row.updatedBy === FROM_ENVIRONMENT ? 'environment' : 'dashboard') : null,
       updatedAt: row?.updatedAt.toISOString() ?? null,
       updatedBy: row?.updatedBy ?? null,
       // Formatted here, in the household's zone, so the server-rendered page
       // and the browser agree on the day.
       savedOn: row ? new Intl.DateTimeFormat('en-AU', { timeZone: timezone(), day: 'numeric', month: 'short' }).format(row.updatedAt) : null,
       savedAt: row ? formatLocal(row.updatedAt) : null,
+      envDiffers,
+      envValue: envDiffers && !secret ? (fromEnv ?? null) : null,
     }
   })
 }

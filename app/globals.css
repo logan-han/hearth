@@ -428,6 +428,19 @@ input:focus { border-color: var(--ember); outline: none; }
 .tag.admin { border-color: var(--live); color: var(--live); background: var(--live-soft); }
 .tag.none { opacity: 0.7; }
 
+/* An env var that moved on after it was read: shown as drift, never applied. */
+.setting .help.drift { color: var(--amber); }
+button.link {
+  border: none;
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font: inherit;
+  color: var(--ember);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 /* ----------------------------------------------------------------- family */
 
 .person { display: grid; grid-template-columns: 1fr auto; gap: 0.5rem 1rem; padding: 0.7rem 0; border-bottom: 1px solid var(--line-soft); }

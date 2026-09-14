@@ -81,7 +81,7 @@ first time the cap holds something back.
 | `app/setup/` | Admin: first-run guide — bot, webhook, family, model, timezone |
 | `app/system/` | Admin: model chain, traffic, integrations, chats |
 | `app/settings/` | Admin: family, keys, model pickers, Telegram webhook |
-| `lib/settings.ts` | Encrypted, DB-backed overrides for a fixed set of keys |
+| `lib/settings.ts` | Encrypted, DB-backed settings for a fixed allowlist of keys, seeded once from the environment |
 | `lib/auth/session.ts` | Admin sign-in, and who counts as an admin |
 | `lib/agent.ts` | Per-mode prompts, agent loop, post decision, ambient gate |
 | `lib/handler.ts` | Update parsing, allowlist, commands, reply routing |
@@ -113,8 +113,12 @@ Only that bootstrap has to live in env vars: the database, `TOKEN_ENC_KEY`,
 and Hearth walks you through the rest at **/setup** — bot token, webhook,
 family, a model provider (any one of Gemini, OpenRouter or a self-hosted
 server is enough), timezone — with no redeploys. Everything below can also be
-done by hand through the environment, and either way BotFather is still where
-the bot itself comes from.
+seeded through the environment: an env var for a dashboard-managed setting is
+read **once**, the first time the deployment sees that setting, and copied into
+the dashboard's encrypted store, which owns it from then on. Change it in
+Settings after that; a later change to the env var shows beside the setting as
+drift, with a button to take it, rather than applying by itself. Either way
+BotFather is still where the bot itself comes from.
 
 ### 1. Telegram
 
@@ -511,9 +515,12 @@ token, webhook secret and founding members *are* editable — an admin session
 can already manage the family, so hiding the bot's own wiring bought nothing —
 and Settings shows what Telegram thinks of the bot, with one button to point
 the webhook back at this deployment after a change. Stored values are
-AES-256-GCM encrypted, override the environment, and are **never sent back to
-the browser** for credential-shaped keys. Resetting one deletes the override
-and falls back to the deployment's own environment.
+AES-256-GCM encrypted and are **never sent back to the browser** for
+credential-shaped keys. Every setting has exactly one home: the deployment's
+environment seeds a key the first time it is seen, the store owns it from then
+on, and an env var changed after that shows beside the setting as drift, with
+a button to take its value, rather than applying by itself. Removing a setting
+leaves it unset, whatever the environment still says.
 
 ## Observability
 

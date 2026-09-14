@@ -222,9 +222,12 @@ export const eventProposals = pgTable(
 )
 
 /**
- * Admin-editable configuration that overrides the environment, so a key can be
- * rotated from the dashboard without a redeploy. Values are AES-256-GCM
- * encrypted with TOKEN_ENC_KEY, which is why that one key can never live here.
+ * Admin-editable configuration for a fixed allowlist of keys, so a key can be
+ * rotated from the dashboard without a redeploy. The deployment's environment
+ * seeds a key the first time it is seen; from then on this table owns it, and
+ * a removed key keeps a row with an empty value so it is not seeded again.
+ * Values are AES-256-GCM encrypted with TOKEN_ENC_KEY, which is why that one
+ * key can never live here.
  */
 export const secrets = pgTable('secrets', {
   key: text('key').primaryKey(),

@@ -69,19 +69,19 @@ export function SettingsForm({
       .catch(() => {})
   }, [status])
 
-  async function save(key: string, value: string) {
+  async function write(body: Record<string, unknown>, done: string) {
     setBusy(true)
     setFlash(null)
     try {
       const res = await fetch('/api/admin/settings', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ key, value }),
+        body: JSON.stringify(body),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Could not save')
       setSettings(data.settings)
-      setFlash({ text: value === '' ? 'Cleared. Back to the deployment value.' : 'Saved.' })
+      setFlash({ text: done })
       setEditing(null)
       setDraft('')
     } catch (err) {
@@ -90,6 +90,9 @@ export function SettingsForm({
       setBusy(false)
     }
   }
+  const save = (key: string, value: string) => write({ key, value }, value === '' ? 'Removed.' : 'Saved.')
+  // The one way an env var changed since first sight gets in: an admin asks for it.
+  const takeFromEnvironment = (key: string) => write({ key, import: true }, 'Now using the environment\u2019s value.')
 
   // LLM_ORDER is edited by the chain above, not as a row of text.
   const shown = settings.filter((s) => s.key !== 'LLM_ORDER')
@@ -144,14 +147,23 @@ export function SettingsForm({
                   <div className="setting" key={s.key}>
                     <div>
                       <span className="name">{s.label}</span>
-                      {s.source === 'dashboard' ? (
-                        // A standing fact, not a confirmation: this key's value comes
-                        // from the dashboard store, and has since the date shown.
+                      {s.origin === 'dashboard' ? (
+                        // A standing fact, not a confirmation: this value was typed
+                        // into the dashboard, and has stood since the date shown.
                         <span
                           className="tag saved"
-                          title={`Saved from this dashboard ${s.savedAt ?? 'earlier'}${s.updatedBy ? ` by ${s.updatedBy}` : ''}. It overrides the deployment's own value for ${s.key}; Clear falls back to that.`}
+                          title={`Saved from this dashboard ${s.savedAt ?? 'earlier'}${s.updatedBy ? ` by ${s.updatedBy}` : ''}.`}
                         >
                           saved here{s.savedOn ? ` · ${s.savedOn}` : ''}
+                        </span>
+                      ) : s.origin === 'environment' ? (
+                        // Seeded from the deployment's env var the first time it was
+                        // seen, or taken from it on request; the dashboard owns it now.
+                        <span
+                          className="tag"
+                          title={`Taken from the deployment's environment variable ${s.key} ${s.savedAt ?? 'earlier'}. The environment is read once, when a setting is first seen; this page owns the value now.`}
+                        >
+                          from the environment{s.savedOn ? ` · ${s.savedOn}` : ''}
                         </span>
                       ) : null}
                       <span className="env">{s.key}</span>
@@ -164,6 +176,17 @@ export function SettingsForm({
                               Get one at {s.link.text} →
                             </a>
                           ) : null}
+                        </span>
+                      ) : null}
+                      {s.envDiffers ? (
+                        // The env var moved on after it was read. Said here, never applied:
+                        // one home per setting, and this page is it.
+                        <span className="help drift">
+                          The deployment&rsquo;s environment {s.set ? 'now sets a different value' : `still sets ${s.key}`}
+                          {s.envValue ? `: ${s.envValue}` : ''}. It was read once, so that is not in use.{' '}
+                          <button className="link" disabled={busy} onClick={() => takeFromEnvironment(s.key)}>
+                            Use the environment&rsquo;s value
+                          </button>
                         </span>
                       ) : null}
                     </div>
@@ -183,9 +206,9 @@ export function SettingsForm({
                               </option>
                             ))}
                           </select>
-                          {s.source === 'dashboard' ? (
+                          {s.set ? (
                             <button disabled={busy} onClick={() => save(s.key, '')}>
-                              Clear
+                              Remove
                             </button>
                           ) : null}
                         </>
@@ -204,9 +227,9 @@ export function SettingsForm({
                           >
                             <i />
                           </button>
-                          {s.source === 'dashboard' ? (
+                          {s.set ? (
                             <button disabled={busy} onClick={() => save(s.key, '')}>
-                              Clear
+                              Remove
                             </button>
                           ) : null}
                         </>
@@ -262,9 +285,9 @@ export function SettingsForm({
                           >
                             {s.set ? 'Change' : 'Set'}
                           </button>
-                          {s.source === 'dashboard' ? (
+                          {s.set ? (
                             <button disabled={busy} onClick={() => save(s.key, '')}>
-                              Clear
+                              Remove
                             </button>
                           ) : null}
                         </>
@@ -304,7 +327,9 @@ export function SettingsForm({
       {flash ? <p className={`flash${flash.bad ? ' bad' : ''}`}>{flash.text}</p> : null}
       <p className="empty">
         Anything saved here is encrypted and takes effect straight away, without a redeploy. Keys are
-        never shown back to this page. Clearing one falls back to the deployment&rsquo;s own value.
+        never shown back to this page. The deployment&rsquo;s environment is read once, the first time a
+        setting is seen, and this page owns every setting from then on: removing one leaves it unset,
+        whatever the environment says.
       </p>
     </>
   )

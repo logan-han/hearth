@@ -20,7 +20,7 @@ vi.mock('@/lib/telegram', () => ({ send, typing: vi.fn(), bot: vi.fn() }))
 const { GET, POST } = await import('@/app/api/admin/settings/route')
 const { POST: LOGOUT } = await import('@/app/api/admin/logout/route')
 const { createSession } = await import('@/lib/auth/session')
-const { resetHydration, listSettings } = await import('@/lib/settings')
+const { resetHydration, listSettings, MANAGED_KEYS } = await import('@/lib/settings')
 const { startAuth, completeAuth } = await import('@/lib/oauth/flow')
 const { signState } = await import('@/lib/oauth/state')
 
@@ -46,6 +46,9 @@ beforeEach(async () => {
   process.env.GOOGLE_CLIENT_SECRET = 'gsecret'
   const { resetKeyCache } = await import('@/lib/crypto')
   resetKeyCache()
+  // A managed key left in process.env by one test would read as the
+  // deployment's environment and be seeded into the next fresh store.
+  for (const key of MANAGED_KEYS) delete process.env[key]
   resetHydration()
   vi.stubGlobal('fetch', fetchMock)
   fetchMock.mockReset()
@@ -105,6 +108,16 @@ describe('the settings API respects the allowlist', () => {
     await post({ key: 'GEMINI_MODEL', value: 'temp' })
     expect((await post({ key: 'GEMINI_MODEL', value: '' })).status).toBe(200)
     expect(process.env.GEMINI_MODEL).toBeUndefined()
+  })
+
+  it('takes the environment value on request, and refuses when the environment sets nothing', async () => {
+    process.env.GEMINI_MODEL = 'env-model'
+    await post({ key: 'GEMINI_MODEL', value: 'dash-model' })
+    expect(process.env.GEMINI_MODEL).toBe('dash-model')
+    expect((await post({ key: 'GEMINI_MODEL', import: true })).status).toBe(200)
+    expect(process.env.GEMINI_MODEL).toBe('env-model')
+    expect((await listSettings()).find((s) => s.key === 'GEMINI_MODEL')!.origin).toBe('environment')
+    expect((await post({ key: 'UP_API_TOKEN', import: true })).status).toBe(400)
   })
 
   it('returns the refreshed list, still without secret values', async () => {
