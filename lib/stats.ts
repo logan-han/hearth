@@ -10,6 +10,7 @@ import { describeChain } from './model'
 import { chainHealth, type ChainHealth } from './model-events'
 import { getSetting } from './db/queries'
 import { schedulerPulse, tickCadence, onGrid, nextTickOnOrAfter, describeGrid, type TickGrid } from './scheduler'
+import { isBuiltinKind } from './watchers'
 
 export type Stats = Awaited<ReturnType<typeof gatherStats>>
 export type FamilyStats = Awaited<ReturnType<typeof gatherFamilyStats>>
@@ -215,7 +216,7 @@ function safeStrangers(raw: unknown): number {
  */
 export async function gatherFamilyStats(month?: string) {
   const view = monthView(month, ctxNow())
-  const [counts, upcoming, automations, listRows, monthEvents, proposalRows, lastTickAt, prevTickAt] = await Promise.all([
+  const [counts, upcoming, automations, listRows, monthEvents, proposalRows, memoryRows, lastTickAt, prevTickAt] = await Promise.all([
     db().execute(sql`
       select
         (select count(*) from family_events where not cancelled) as events,
@@ -227,7 +228,7 @@ export async function gatherFamilyStats(month?: string) {
       where not cancelled and ends_at > now() order by starts_at limit 6
     `),
     db().execute(sql`
-      select id, label, cron_expr, enabled, next_run_at from automations
+      select id, label, cron_expr, kind, enabled, next_run_at from automations
       order by enabled desc, next_run_at limit 10
     `),
     db().execute(sql`
@@ -247,6 +248,14 @@ export async function gatherFamilyStats(month?: string) {
              coalesce(c.title, (select name from members where telegram_user_id = p.chat_id), p.chat_id) as chat
       from event_proposals p left join chats c on c.chat_id = p.chat_id
       where ${LIVE_PROPOSAL} order by p.starts_at
+    `),
+    // What the bot keeps in mind between conversations, newest first, with
+    // who asked for it; the nightly pass files under nobody.
+    db().execute(sql`
+      select m.id, m.content, m.created_at, mb.name as who
+      from memories m left join members mb on mb.id = m.created_by
+      where m.invalidated_at is null
+      order by m.created_at desc, m.id desc limit 200
     `),
     getSetting('last_tick_at').catch((): string | null => null),
     getSetting('prev_tick_at').catch((): string | null => null),
@@ -281,6 +290,8 @@ export async function gatherFamilyStats(month?: string) {
       label: String(r.label),
       cron: String(r.cron_expr),
       enabled: Boolean(r.enabled),
+      // Part of the product rather than something a member set up: Home offers a pause, not a delete.
+      builtin: isBuiltinKind(r.kind == null ? null : String(r.kind)),
       ...timing(grid, r),
     })),
     lists: [...lists.values()].map((l) => ({
@@ -295,11 +306,34 @@ export async function gatherFamilyStats(month?: string) {
       when: whenText(r),
       chat: String(r.chat),
       // The first line of what the bot found, so the family can judge without opening the chat.
-      detail: [r.location ? String(r.location) : null, r.description ? String(r.description).split('\n')[0].slice(0, 140) : null]
-        .filter(Boolean)
-        .join(' · '),
+      detail: [r.location ? String(r.location) : null, readableLine(r.description)].filter(Boolean).join(' · '),
+    })),
+    memories: rows(memoryRows).map((r) => ({
+      id: n(r.id),
+      fact: String(r.content),
+      who: r.who ? String(r.who) : null,
+      since: formatLocalDate(new Date(r.created_at as string)),
     })),
   }
+}
+
+/**
+ * The first line of a description a person can read. A bare message id, a
+ * token or a lone link says where something came from, not what it is, and
+ * at a hundred characters with no space in it also breaks the layout, so a
+ * line that is only that is passed over for the next.
+ */
+export function readableLine(description: unknown): string | null {
+  // One unbroken token that is long, or shaped like scheme:rest (an id, a link).
+  const isReference = (s: string) => !/\s/.test(s) && (s.length > 32 || /^[a-z][a-z0-9+.-]*:\S+$/i.test(s))
+  for (const raw of String(description ?? '').split('\n')) {
+    const line = raw.trim()
+    if (!line) continue
+    // A "Source:" style label in front does not make the id behind it readable.
+    if (isReference(line) || isReference(line.replace(/^[a-z][a-z ]{0,20}:\s*/i, ''))) continue
+    return line.slice(0, 140)
+  }
+  return null
 }
 
 /* ------------------------------------------------------------- calendar -- */

@@ -19,11 +19,11 @@ import {
   calendarToken,
   addAutomation,
   listAutomations,
-  allMembersWithLinks,
+  setAutomationEnabled,
 } from './db/queries'
 import { nextRun, formatLocal } from './cron'
 import { connectLink } from './oauth/state'
-import { WATCHERS, isWatcherKind } from './watchers'
+import { WATCHERS, isWatcherKind, watcherInstruction } from './watchers'
 import { flushTelemetry } from './telemetry'
 import { maybeSummarise } from './summary'
 import type { Member } from './db/schema'
@@ -186,52 +186,34 @@ async function handleWatch(c: TelegramContext, member: Member): Promise<void> {
     return
   }
 
-  const watcher = isWatcherKind(which) ? WATCHERS[which] : undefined
+  // Mail used to be a watcher of its own; its job moved into the morning brief.
+  const asked = which === 'inbox' ? 'morning' : which
+  const watcher = isWatcherKind(asked) ? WATCHERS[asked] : undefined
   if (!watcher) {
+    const inGroup = c.chatType !== 'private'
     await send(
       c.chatId,
       [
         'I can keep watch and post here only when there is something worth saying:',
         '',
+        inGroup
+          ? "/watch morning — a brief each day at 7am: today's family calendar, everyone's new mail worth knowing about (dates proposed for the calendar), anything overdue on the board, and the weather"
+          : "/watch morning — a brief each day at 7am: today's family calendar, your new mail worth knowing about (dates proposed for the calendar), anything overdue on the board, and the weather",
+        "/watch snapshot — Sunday 6pm: the week's spending, the month so far, and how the budget is tracking",
         '/watch money — new 2Up transactions, checked hourly 9am–10pm',
-        c.chatType === 'private'
-          ? '/watch inbox — your inbox each morning: things worth knowing, dates proposed for the calendar'
-          : "/watch inbox — everyone's linked inboxes each morning: things worth knowing, dates proposed for the calendar",
-        "/watch morning — a weekday brief: today's family calendar and anything due on the board",
         '/watch list — what this chat is already watching',
         '',
+        ...(inGroup ? ['The brief and the snapshot are already on in a family group; pause either from Home if it is not wanted.', ''] : []),
         'Anything else, just describe it: "every Friday 5pm, remind us to book the market run".',
       ].join('\n'),
     )
     return
   }
 
-  // An inbox watcher in the family group sweeps everyone's linked mailboxes;
-  // in a DM it is personal, bound to whoever switched it on. The tick route
-  // fetches the mail itself; the instruction only says how to phrase it.
-  let label = watcher.label
-  let instruction = watcher.instruction
-  if (watcher.kind === 'inbox') {
-    if (c.chatType !== 'private') {
-      label = 'Family inbox sweep'
-      instruction = `${instruction} Say whose mailbox each item came from.`
-      const people = await allMembersWithLinks()
-      if (!people.some((m) => m.allowed && m.linked.length > 0)) {
-        await send(c.chatId, `That one needs ${WATCHERS.inbox.needs}.`)
-        return
-      }
-    } else {
-      label = `${c.userName}'s inbox`
-      if ((await connectionsFor(member.id)).length === 0) {
-        await send(c.chatId, `That one needs ${WATCHERS.inbox.needs}.`)
-        return
-      }
-    }
-  }
-
-  const dupe = existing.find((a) => a.enabled && a.label.toLowerCase() === label.toLowerCase())
-  if (dupe) {
-    await send(c.chatId, `Already watching — **${dupe.label}** runs next ${formatLocal(dupe.nextRunAt)}.`)
+  const note = which === 'inbox' ? 'Mail is part of the morning brief now. ' : ''
+  const have = existing.find((a) => a.kind === watcher.kind)
+  if (have?.enabled) {
+    await send(c.chatId, `${note}Already watching — **${have.label}** runs next ${formatLocal(have.nextRunAt)}.`)
     return
   }
 
@@ -240,18 +222,29 @@ async function handleWatch(c: TelegramContext, member: Member): Promise<void> {
     await send(c.chatId, 'That schedule will never fire; this is a bug worth reporting.')
     return
   }
+
+  // A paused one is switched back on rather than doubled.
+  if (have) {
+    await setAutomationEnabled(have.id, true, next)
+    await send(c.chatId, `${note}Resumed. **${have.label}** next runs ${formatLocal(next)}, and posts only when there is something to say.`)
+    return
+  }
+
+  // In a DM the brief is personal, bound to whoever switched it on, so it
+  // reads their own mailbox. The tick route fetches the data itself; the
+  // instruction only says how to phrase it.
   await addAutomation({
     chatId: c.chatId,
     memberId: member.id,
-    label,
+    label: watcher.label,
     cronExpr: watcher.cron,
-    instruction,
+    instruction: watcherInstruction(watcher.kind, c.chatId),
     kind: watcher.kind,
     nextRunAt: next,
   })
   await send(
     c.chatId,
-    `Watching. **${label}** first runs ${formatLocal(next)}, and posts only when there is something to say.`,
+    `${note}Watching. **${watcher.label}** first runs ${formatLocal(next)}, and posts only when there is something to say.`,
   )
 }
 
@@ -261,7 +254,7 @@ const HELP = [
   'Just talk to me. In the group, @mention me or reply to one of my messages.',
   '',
   '**Commands**',
-  '/watch — have me check money, inbox or the day ahead, and post only when it matters',
+  "/watch — have me keep an eye on the day ahead, the week's money or 2Up, and post only when it matters",
   '/connect — link your Google or Microsoft account',
   '/accounts — see and unlink your linked accounts',
   '/calendar — the shared family calendar subscription link',

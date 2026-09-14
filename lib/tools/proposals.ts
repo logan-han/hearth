@@ -30,19 +30,23 @@ export function proposalTools(ctx: ToolContext) {
     propose_family_event: tool({
       description:
         'Put forward an event you found in an email, a photographed notice, or a message, for someone to confirm before it reaches the shared calendar. Use this instead of add_family_event whenever the event came from a document rather than from a person asking you directly. ' +
-        'Put the source link in the description when there is one, so anyone can check the details later.',
+        'Say where it came from in the description, in words: the sender and subject, or a link the message carries, so anyone can check the details later. A message id is not that; it goes in source.',
       inputSchema: z.object({
         title: z.string(),
         start: LOCAL_DATETIME,
         end: LOCAL_DATETIME.optional().describe('Defaults to one hour after start'),
         all_day: z.boolean().default(false),
         location: z.string().optional(),
-        description: z.string().optional(),
+        description: z
+          .string()
+          .optional()
+          .describe('The details in words, opening with where this came from, e.g. "From <sender>, \\"<subject>\\": ...". Never an id or a token.'),
         source: z
           .string()
           .optional()
           .describe(
-            'Stable id of where this came from, e.g. "google:18f2ab" for an email. Stops the same thing being proposed twice.',
+            'Stable id of the message or page this came from, as <provider>:<id>, e.g. "google:<message id>" or "microsoft:<message id>". Stops the same thing being proposed twice. ' +
+              'When one message holds several events, add the event date after a slash, e.g. "microsoft:<message id>/2026-10-05", so each can be proposed.',
           ),
         confirmed_distinct: z
           .boolean()

@@ -119,7 +119,16 @@ export function Reminders({
   automations,
   scheduler,
 }: {
-  automations: { id: number; label: string; enabled: boolean; nextRun: string | null; offGrid: boolean; runsAt: string | null }[]
+  automations: {
+    id: number
+    label: string
+    enabled: boolean
+    /** Part of the product: it can be paused, but the tick would only put a deleted one back. */
+    builtin: boolean
+    nextRun: string | null
+    offGrid: boolean
+    runsAt: string | null
+  }[]
   /** When the scheduler ticks, in words, once it has shown its cadence. */
   scheduler: string | null
 }) {
@@ -135,7 +144,8 @@ export function Reminders({
             <li key={a.id}>
               <span className="grow">
                 <span className="title">
-                  {a.label} {a.enabled ? null : <span className="tag none">paused</span>}
+                  {a.label} {a.builtin ? <span className="tag none">built in</span> : null}
+                  {a.enabled ? null : <span className="tag none">paused</span>}
                   {a.offGrid ? <span className="tag none">off the tick</span> : null}
                 </span>
                 <span className="meta">
@@ -146,13 +156,15 @@ export function Reminders({
                 <button disabled={busy} onClick={() => act({ action: 'pause_automation', id: a.id, enabled: !a.enabled })}>
                   {a.enabled ? 'Pause' : 'Resume'}
                 </button>
-                <button
-                  disabled={busy}
-                  title="Delete this reminder"
-                  onClick={() => confirm(`Delete "${a.label}" for good?`) && act({ action: 'delete_automation', id: a.id })}
-                >
-                  ×
-                </button>
+                {a.builtin ? null : (
+                  <button
+                    disabled={busy}
+                    title="Delete this reminder"
+                    onClick={() => confirm(`Delete "${a.label}" for good?`) && act({ action: 'delete_automation', id: a.id })}
+                  >
+                    ×
+                  </button>
+                )}
               </span>
             </li>
           ))}
@@ -248,6 +260,55 @@ export function FamilyLists({
           Start
         </button>
       </div>
+      {error ? <p className="flash bad">{error}</p> : null}
+    </div>
+  )
+}
+
+/**
+ * What the bot keeps in mind between conversations, so the household can
+ * see what it has been told and take back what is wrong or out of date.
+ * Forgetting here is the same soft forget as in the chat: the row stays as
+ * history, it just stops being a Known fact.
+ */
+export function Remembered({
+  memories,
+}: {
+  memories: { id: number; fact: string; who: string | null; since: string }[]
+}) {
+  const { act, busy, error } = useFamilyActions()
+
+  return (
+    <div className="panel">
+      <p className="group-note">
+        What the bot keeps in mind between conversations, filed from the chat or by its nightly pass over the day&rsquo;s talk.
+        Forgetting one here is the same as telling it to forget in the chat.
+      </p>
+      {memories.length === 0 ? (
+        <Empty>Nothing remembered yet. Say &ldquo;remember that bin night is Monday&rdquo; in the chat and it lands here.</Empty>
+      ) : (
+        <ul className="listing doable">
+          {memories.map((m) => (
+            <li key={m.id}>
+              <span className="grow">
+                <span className="title">{m.fact}</span>
+                <span className="meta">
+                  {m.who ? `filed for ${m.who}` : 'filed by the bot'} · {m.since}
+                </span>
+              </span>
+              <span className="row-acts">
+                <button
+                  disabled={busy}
+                  title="Forget this"
+                  onClick={() => confirm(`Forget “${m.fact}”?`) && act({ action: 'forget_memory', id: m.id })}
+                >
+                  Forget
+                </button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
       {error ? <p className="flash bad">{error}</p> : null}
     </div>
   )

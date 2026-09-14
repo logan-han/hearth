@@ -110,16 +110,17 @@ describe.skipIf(!liveChainConfigured())('money watcher', () => {
   })
 })
 
-describe.skipIf(!liveChainConfigured())('inbox watcher', () => {
+describe.skipIf(!liveChainConfigured())('morning brief, the mail half', () => {
   it('proposes the date it read, and does not invent one', async () => {
     calls.length = 0
     const data = JSON.stringify({
+      events: { events: [] },
       mail: { accounts: [{ member: 'Logan', provider: 'google', first_check: false, messages: [
         { id: 'm1', from: 'office@northcoteps.vic.edu.au', subject: 'Sports Day', snippet: 'Dear families, Sports Day is on Wednesday 10 September...', date: '2026-09-01T08:10:00+10:00' },
         { id: 'm2', from: 'deals@bigretailer.example', subject: '48 hours only: 30% off everything', snippet: 'Shop the sale', date: '2026-09-01T07:00:00+10:00' },
       ] }] },
     }, null, 1)
-    const r = await runAgent({ ...base, tools: WATCHERS.inbox.tools, text: `Scheduled check "Inbox sweep".\n\n${WATCHERS.inbox.instruction}\n\nDATA (fetched just now):\n${data}` })
+    const r = await runAgent({ ...base, tools: WATCHERS.morning.tools, text: `Scheduled check "Morning brief".\n\n${WATCHERS.morning.instruction}\n\nDATA (fetched just now):\n${data}` })
     const proposals = called(calls, 'propose_family_event')
     const proposedRight = proposals.some((p) => {
       const input = p.input as { title?: string; start?: string }

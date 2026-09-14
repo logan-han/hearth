@@ -226,9 +226,10 @@ h2 {
 .listing { list-style: none; margin: 0; padding: 0; }
 .listing li { padding: 0.5rem 0; border-bottom: 1px solid var(--line-soft); }
 .listing li:last-child { border-bottom: none; }
-.listing .title { font-weight: 500; }
+/* A token with no space in it (an id, a link) wraps rather than pushing the card out. */
+.listing .title { font-weight: 500; overflow-wrap: anywhere; }
 .listing .title.mono { font-size: 0.78rem; font-weight: 500; word-break: break-all; }
-.listing .meta { display: block; color: var(--muted); font-size: 0.8rem; }
+.listing .meta { display: block; color: var(--muted); font-size: 0.8rem; overflow-wrap: anywhere; }
 .listing .meta.mono { font-size: 0.76rem; }
 .panel > p.meta { margin: 0.7rem 0 0; color: var(--muted); font-size: 0.8rem; }
 .warn { color: var(--amber); }

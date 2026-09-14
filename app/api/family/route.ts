@@ -12,8 +12,10 @@ import {
   settleProposal,
   addFamilyEvent,
   listFamilyEvents,
+  deleteMemory,
 } from '@/lib/db/queries'
 import { nextRun } from '@/lib/cron'
+import { isBuiltinKind } from '@/lib/watchers'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -84,8 +86,21 @@ export async function POST(req: Request) {
     }
 
     case 'delete_automation': {
+      const existing = await getAutomation(id)
+      if (!existing) return NextResponse.json({ error: `No reminder ${id}.` }, { status: 404 })
+      // Built in means the tick would only put it back; a pause is the off switch.
+      if (isBuiltinKind(existing.kind)) {
+        return NextResponse.json({ error: `${existing.label} is built in. Pause it instead.` }, { status: 400 })
+      }
       if (!(await deleteAutomation(id))) return NextResponse.json({ error: `No reminder ${id}.` }, { status: 404 })
       return NextResponse.json({ ok: true })
+    }
+
+    case 'forget_memory': {
+      // Soft, as in the chat: the fact stops being Known but stays as history.
+      const row = await deleteMemory(id)
+      if (!row) return NextResponse.json({ error: `Nothing remembered as ${id}.` }, { status: 404 })
+      return NextResponse.json({ ok: true, forgotten: row.content })
     }
 
     case 'toggle_item': {

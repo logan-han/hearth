@@ -4,7 +4,7 @@ import { hydrateSecrets } from '@/lib/settings'
 import { gatherFamilyStats } from '@/lib/stats'
 import { Shell } from './shell'
 import { Calendar } from './calendar'
-import { NextUp, Reminders, FamilyLists, Proposals } from './family-panels'
+import { NextUp, Reminders, FamilyLists, Proposals, Remembered } from './family-panels'
 import { SignIn } from './sign-in'
 
 export const dynamic = 'force-dynamic'
@@ -56,6 +56,11 @@ export default async function HomePage({
           <FamilyLists lists={stats.lists} />
         </section>
       </div>
+
+      <section>
+        <h2>Remembered</h2>
+        <Remembered memories={stats.memories} />
+      </section>
     </Shell>
   )
 }

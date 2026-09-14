@@ -11,6 +11,10 @@ const newMail = vi.fn()
 const listEvents = vi.fn()
 const boardSummary = vi.fn()
 const weatherTool = vi.fn()
+const spendingSummary = vi.fn()
+const budgetSummary = vi.fn()
+const strangersIn = vi.fn<(chatId: string) => Promise<{ id: string; name: string }[]>>()
+const installBuiltins = vi.fn(async (_now?: Date) => ({ installed: [] as string[], converted: 0, retired: 0, synced: 0 }))
 const send = vi.fn<(chatId: string, text: string) => Promise<void>>()
 const verify = vi.fn<() => Promise<boolean>>()
 const insertValues = vi.fn()
@@ -32,10 +36,12 @@ vi.mock('@/lib/db/queries', () => ({
   setSetting,
   recordTick,
   retireStaleProposals,
+  strangersIn,
   allowedMembers: vi.fn(async () => [
     { id: 9, telegramUserId: '900', name: 'Boss', isAdmin: true, allowed: true },
   ]),
 }))
+vi.mock('@/lib/builtins', () => ({ installBuiltins }))
 vi.mock('@/lib/agent', () => ({ runAgent, decideWatcherPost, reviewDraft }))
 vi.mock('@/lib/tools', () => ({
   buildTools: () => ({
@@ -44,6 +50,8 @@ vi.mock('@/lib/tools', () => ({
     list_family_events: { execute: listEvents },
     jira_board_summary: { execute: boardSummary },
     weather: { execute: weatherTool },
+    spending_summary: { execute: spendingSummary },
+    budget_summary: { execute: budgetSummary },
   }),
 }))
 vi.mock('@/lib/telegram', () => ({ send }))
@@ -98,6 +106,9 @@ beforeEach(() => {
   listEvents.mockResolvedValue({ events: [] })
   boardSummary.mockResolvedValue({ error: 'Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).' })
   weatherTool.mockResolvedValue({ error: 'Weather is not configured (OPENWEATHER_API_KEY missing).' })
+  spendingSummary.mockResolvedValue({ error: 'PocketSmith is not configured.' })
+  budgetSummary.mockResolvedValue({ error: 'PocketSmith is not configured.' })
+  strangersIn.mockResolvedValue([])
   // The nightly memory pass reports done-for-today by default, so ordinary
   // tests never depend on what the wall clock says.
   messagesSince.mockResolvedValue([])
@@ -186,6 +197,27 @@ describe('running due automations', () => {
     await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 0, skipped: 1 })
     expect(runAgent).not.toHaveBeenCalled()
     expect(send).not.toHaveBeenCalled()
+  })
+
+  it('installs the built-in watchers before looking at what is due', async () => {
+    await authed()
+    expect(installBuiltins).toHaveBeenCalledTimes(1)
+    expect(installBuiltins.mock.invocationCallOrder[0]).toBeLessThan(dueAutomations.mock.invocationCallOrder[0])
+  })
+
+  it('carries on when the built-in install fails', async () => {
+    installBuiltins.mockRejectedValueOnce(new Error('chats table on fire'))
+    dueAutomations.mockResolvedValue([automation()])
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
+  })
+
+  it('claims a group run but posts nothing while someone unrecognised is in the room', async () => {
+    dueAutomations.mockResolvedValue([automation(), automation({ id: 2, chatId: '111' })])
+    strangersIn.mockImplementation(async (chatId: string) => (chatId === '-100999' ? [{ id: '555', name: 'Someone' }] : []))
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 1 })
+    expect(claimAutomation).toHaveBeenCalledTimes(2)
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+    expect(send).toHaveBeenCalledWith('111', 'Bins out tonight.')
   })
 
   it('reports a failing automation to an admin DM, never the chat, and keeps going', async () => {
@@ -496,33 +528,33 @@ describe('ready-made watchers', () => {
     expect(runAgent).not.toHaveBeenCalled()
   })
 
-  it('sweeps every mailbox from a group and only the owner\'s from a DM', async () => {
-    dueAutomations.mockResolvedValue([
-      automation({ id: 1, kind: 'inbox', label: 'Family inbox sweep', chatId: '-100999' }),
-      automation({ id: 2, kind: 'inbox', label: "Logan's inbox", chatId: '111' }),
-    ])
+  const brief = (over: Partial<Automation> = {}) => automation({ kind: 'morning', label: 'Morning brief', ...over })
+  const snapshot = (over: Partial<Automation> = {}) => automation({ kind: 'snapshot', label: 'Money snapshot', ...over })
+
+  it('sweeps every mailbox into the brief from a group and only the owner\'s from a DM', async () => {
+    dueAutomations.mockResolvedValue([brief({ id: 1, chatId: '-100999' }), brief({ id: 2, chatId: '111' })])
     await authed()
     expect(newMail).toHaveBeenNthCalledWith(1, expect.objectContaining({ everyone: true }), expect.anything())
     expect(newMail).toHaveBeenNthCalledWith(2, expect.objectContaining({ everyone: false }), expect.anything())
     expect(runAgent).not.toHaveBeenCalled()
   })
 
-  it('phrases new mail with the mail tools and asks whose mailbox it came from in a group', async () => {
-    dueAutomations.mockResolvedValue([automation({ kind: 'inbox', label: 'Family inbox sweep' })])
+  it('briefs on new mail alone, with the mail tools, and asks whose mailbox it came from in a group', async () => {
+    dueAutomations.mockResolvedValue([brief()])
     newMail.mockResolvedValue({
       accounts: [{ member: 'Yuna', provider: 'microsoft', first_check: false, messages: [{ id: 'm1', from: 'school', subject: 'Sports day', snippet: 'Wed 10 Sep', date: '2026-09-01' }] }],
     })
     runAgent.mockResolvedValue({ text: 'Yuna: school says sports day is Wed 10 Sep.', notices: [], model: 'primary:test' })
     await authed()
     const call = runAgent.mock.calls[0][0] as { tools: string[]; text: string }
-    expect(call.tools).toEqual(['read_email', 'propose_family_event', 'list_family_events', 'recall'])
+    expect(call.tools).toEqual(['recall', 'read_email', 'propose_family_event', 'list_family_events'])
     expect(call.text).toContain('whose mailbox')
     expect(call.text).toContain('Sports day')
     expect(send).toHaveBeenCalledWith('-100999', 'Yuna: school says sports day is Wed 10 Sep.')
   })
 
   it('reports a broken mailbox to an admin but still phrases the rest', async () => {
-    dueAutomations.mockResolvedValue([automation({ kind: 'inbox', label: 'Family inbox sweep' })])
+    dueAutomations.mockResolvedValue([brief()])
     newMail.mockResolvedValue({
       accounts: [
         { member: 'Yuna', provider: 'microsoft', error: 'token revoked' },
@@ -534,8 +566,16 @@ describe('ready-made watchers', () => {
     expect(runAgent).toHaveBeenCalled()
   })
 
-  it('skips the morning brief when nothing is on and nothing is due, and treats missing integrations as settings', async () => {
-    dueAutomations.mockResolvedValue([automation({ kind: 'morning', label: 'Morning brief' })])
+  it('treats nobody having linked a mailbox yet as a setting, not a fault', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    newMail.mockResolvedValue({ error: 'Nobody has linked a mailbox yet. Send /connect to link one.' })
+    await authed()
+    expect(send).not.toHaveBeenCalled()
+    expect(runAgent).not.toHaveBeenCalled()
+  })
+
+  it('skips the brief when nothing is on, nothing arrived and nothing is due, and treats missing integrations as settings', async () => {
+    dueAutomations.mockResolvedValue([brief()])
     await authed()
     expect(listEvents).toHaveBeenCalledWith(expect.objectContaining({ include_cancelled: false }), expect.anything())
     expect(runAgent).not.toHaveBeenCalled()
@@ -543,7 +583,7 @@ describe('ready-made watchers', () => {
   })
 
   it('briefs the day when something is on, with weather included only when it worked', async () => {
-    dueAutomations.mockResolvedValue([automation({ kind: 'morning', label: 'Morning brief' })])
+    dueAutomations.mockResolvedValue([brief()])
     listEvents.mockResolvedValue({ events: [{ id: 1, title: 'Swimming', start_local: 'Wed 3 Sep 2026, 09:00' }] })
     weatherTool.mockResolvedValue({ place: 'Melbourne', now: { summary: 'Rain' } })
     runAgent.mockResolvedValue({ text: 'Swimming at 9am; take an umbrella, rain is forecast.', notices: [], model: 'primary:test' })
@@ -552,16 +592,71 @@ describe('ready-made watchers', () => {
     expect(call.text).toContain('Swimming')
     expect(call.text).toContain('Rain')
     expect(call.text).not.toContain('not configured')
-    expect(call.tools).toEqual(['recall'])
+    expect(call.tools).toEqual(['recall', 'read_email', 'propose_family_event', 'list_family_events'])
     expect(send).toHaveBeenCalledWith('-100999', 'Swimming at 9am; take an umbrella, rain is forecast.')
   })
 
   it('briefs on an overdue board item even with an empty calendar', async () => {
-    dueAutomations.mockResolvedValue([automation({ kind: 'morning', label: 'Morning brief' })])
+    dueAutomations.mockResolvedValue([brief()])
     boardSummary.mockResolvedValue({ project: 'HTL', open: 3, overdue: [{ key: 'HTL-344', summary: 'Pay rates' }] })
     await authed()
     expect(runAgent).toHaveBeenCalled()
     expect((runAgent.mock.calls[0][0] as { text: string }).text).toContain('HTL-344')
+  })
+
+  it('posts the money snapshot from PocketSmith, the week and the month so far with the budget', async () => {
+    dueAutomations.mockResolvedValue([snapshot()])
+    spendingSummary.mockImplementation(async ({ from, source }: { from?: string; source: string }) =>
+      source === 'pocketsmith'
+        ? { source, transactions: from ? 12 : 40, spent: from ? '$812.40' : '$3,120.00' }
+        : { error: 'should not have fallen back' },
+    )
+    budgetSummary.mockResolvedValue({ expenses: { actual: '$3,120.00', forecast: '$5,000.00', used: '62%' }, period_progress: '15 of 30 days (50% of the month)' })
+    runAgent.mockResolvedValue({ text: '**Week to Sun 15 Sep**\n| | |\n| --- | --- |\n| This week | $812.40 |', notices: [], model: 'primary:test' })
+    await authed()
+    const call = runAgent.mock.calls[0][0] as { tools: string[]; text: string }
+    expect(call.tools).toEqual(['recall'])
+    expect(call.text).toContain('$812.40')
+    expect(call.text).toContain('$3,120.00')
+    expect(call.text).toContain('62%')
+    expect(call.text).not.toContain('fallen back')
+    expect(spendingSummary).toHaveBeenCalledTimes(2)
+    expect(send).toHaveBeenCalledWith('-100999', expect.stringContaining('$812.40'))
+  })
+
+  it('falls back to the raw Up feed for the snapshot when PocketSmith is not configured', async () => {
+    dueAutomations.mockResolvedValue([snapshot()])
+    spendingSummary.mockImplementation(async ({ source }: { source: string }) =>
+      source === 'pocketsmith' ? { error: 'PocketSmith is not configured.' } : { source: 'up', transactions: 9, spent: '$412.30' },
+    )
+    await authed()
+    expect(spendingSummary).toHaveBeenCalledTimes(4)
+    const call = runAgent.mock.calls[0][0] as { text: string }
+    expect(call.text).toContain('$412.30')
+    expect(call.text).not.toContain('not configured')
+    expect(send).not.toHaveBeenCalledWith('900', expect.anything())
+  })
+
+  it('stays quiet on the snapshot when no bank is connected, or when no money moved', async () => {
+    dueAutomations.mockResolvedValue([snapshot()])
+    spendingSummary.mockResolvedValue({ error: 'Up Bank is not configured.' })
+    await authed()
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+
+    spendingSummary.mockResolvedValue({ source: 'pocketsmith', transactions: 0, spent: '$0.00' })
+    await authed()
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('reports a bank that will not answer to an admin, and leaves the chat alone', async () => {
+    dueAutomations.mockResolvedValue([snapshot()])
+    spendingSummary.mockResolvedValue({ error: 'PocketSmith API 502' })
+    await authed()
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('spending_summary (week): PocketSmith API 502'))
+    expect(runAgent).not.toHaveBeenCalled()
   })
 })
 
@@ -611,11 +706,11 @@ describe('the corners of a run', () => {
   const authed = () => tick({ 'x-tick-secret': 'let-me-in' })
 
   it('reports a mail fetch that fails outright, with nothing left to phrase', async () => {
-    dueAutomations.mockResolvedValue([automation({ kind: 'inbox', label: 'Family inbox sweep' })])
-    newMail.mockResolvedValue({ error: 'Nobody has linked a mailbox yet.' })
+    dueAutomations.mockResolvedValue([automation({ kind: 'morning', label: 'Morning brief' })])
+    newMail.mockResolvedValue({ error: 'Graph answered 503' })
     await authed()
     expect(send).toHaveBeenCalledTimes(1)
-    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('new_mail: Nobody has linked a mailbox yet.'))
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('new_mail: Graph answered 503'))
     expect(runAgent).not.toHaveBeenCalled()
   })
 

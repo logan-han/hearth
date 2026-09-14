@@ -123,6 +123,31 @@ describe('the family API', () => {
     })
     expect((await post({ action: 'delete_automation', id: a.id })).status).toBe(200)
     expect(await q.getAutomation(a.id)).toBeUndefined()
+    expect((await post({ action: 'delete_automation', id: a.id })).status).toBe(404)
+  })
+
+  it('will not delete a built-in watcher, only pause it', async () => {
+    await asMember()
+    const a = await q.addAutomation({
+      chatId: '-100', memberId: null, label: 'Morning brief', cronExpr: '0 7 * * *',
+      instruction: 'x', kind: 'morning', nextRunAt: new Date('2026-09-07T09:00:00Z'),
+    })
+    const res = await post({ action: 'delete_automation', id: a.id })
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toContain('built in')
+    expect(await q.getAutomation(a.id)).toBeDefined()
+    expect((await post({ action: 'pause_automation', id: a.id, enabled: false })).status).toBe(200)
+    expect((await q.getAutomation(a.id))!.enabled).toBe(false)
+  })
+
+  it('forgets a remembered fact softly, and only once', async () => {
+    await asMember()
+    const m = await q.addMemory('bin night is Monday')
+    const res = await post({ action: 'forget_memory', id: m.id })
+    expect(res.status).toBe(200)
+    expect((await res.json()).forgotten).toBe('bin night is Monday')
+    expect(await q.listMemories()).toHaveLength(0)
+    expect((await post({ action: 'forget_memory', id: m.id })).status).toBe(404)
   })
 
   it('ticks, unticks, deletes and adds list items', async () => {

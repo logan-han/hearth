@@ -10,6 +10,7 @@ import {
 import { nextRun, isValidCron, formatLocal } from '../cron'
 import { tickGrid, fitsGrid, suggestAligned, describeGrid } from '../scheduler'
 import { timezone } from '../env'
+import { isBuiltinKind } from '../watchers'
 import type { ToolContext } from './context'
 
 export function automationTools(ctx: ToolContext) {
@@ -87,10 +88,18 @@ export function automationTools(ctx: ToolContext) {
     }),
 
     delete_automation: tool({
-      description: 'Permanently delete a scheduled automation by id.',
+      description:
+        'Permanently delete a scheduled automation by id. The built-in watchers (the morning brief, the money snapshot) cannot be deleted, only paused.',
       inputSchema: z.object({ id: z.number().int() }),
-      execute: async ({ id }) =>
-        (await deleteAutomation(id)) ? { deleted: id } : { error: `No automation ${id}.` },
+      execute: async ({ id }) => {
+        const existing = await getAutomation(id)
+        if (!existing) return { error: `No automation ${id}.` }
+        // Built in means the tick would only put it back; a pause is the off switch.
+        if (isBuiltinKind(existing.kind)) {
+          return { error: `"${existing.label}" is built in and cannot be deleted. Pause it with pause_automation if it is not wanted.` }
+        }
+        return (await deleteAutomation(id)) ? { deleted: id } : { error: `No automation ${id}.` }
+      },
     }),
 
     pause_automation: tool({

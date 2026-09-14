@@ -99,6 +99,16 @@ export async function strangersIn(chatId: string): Promise<Stranger[]> {
   return parseStrangers(row?.strangers)
 }
 
+/** The household's rooms: every group the bot has been in, with who there is unrecognised. */
+export async function groupChats(): Promise<{ chatId: string; title: string | null; strangers: Stranger[] }[]> {
+  const rows = await db()
+    .select()
+    .from(chats)
+    .where(inArray(chats.type, ['group', 'supergroup']))
+    .orderBy(asc(chats.id))
+  return rows.map((r) => ({ chatId: r.chatId, title: r.title, strangers: parseStrangers(r.strangers) }))
+}
+
 function parseStrangers(raw: string | undefined | null): Stranger[] {
   if (!raw) return []
   try {
@@ -353,10 +363,12 @@ export async function listMemories(limit = 100) {
  * think before" survives and a wrong correction can be undone by hand.
  */
 export async function deleteMemory(id: number, supersededBy?: number | null) {
-  await db()
+  const [row] = await db()
     .update(memories)
     .set({ invalidatedAt: new Date(), supersededBy: supersededBy ?? null })
     .where(and(eq(memories.id, id), isNull(memories.invalidatedAt)))
+    .returning()
+  return row
 }
 
 /* ------------------------------------------------------------ automations */
@@ -420,6 +432,15 @@ export async function setAutomationEnabled(id: number, enabled: boolean, nextRun
     .set(nextRunAt ? { enabled, nextRunAt } : { enabled })
     .where(eq(automations.id, id))
     .returning()
+  return row
+}
+
+/** Bring a ready-made watcher's row back in step with its definition; a converted one changes kind too. */
+export async function syncAutomation(
+  id: number,
+  patch: { kind?: string; label: string; cronExpr: string; instruction: string; nextRunAt?: Date },
+) {
+  const [row] = await db().update(automations).set(patch).where(eq(automations.id, id)).returning()
   return row
 }
 

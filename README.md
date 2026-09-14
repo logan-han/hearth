@@ -86,6 +86,7 @@ first time the cap holds something back.
 | `lib/agent.ts` | Per-mode prompts, agent loop, post decision, ambient gate |
 | `lib/handler.ts` | Update parsing, allowlist, commands, reply routing |
 | `lib/watchers.ts` | The ready-made watchers: schedule, phrasing rules, context tools |
+| `lib/builtins.ts` | Installs the built-in watchers in every household group and keeps them in step with their definitions |
 | `lib/model.ts` | Tiered model chain: local, Gemini, OpenRouter |
 | `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations |
 | `lib/tools/router.ts` | Which tool groups a chat turn sees, and the `more_tools` escape hatch |
@@ -325,19 +326,33 @@ one.
 
 ## Keeping watch
 
-The bot is not only reactive. **/watch** switches on a ready-made watcher for
-this chat — each is an ordinary automation underneath, checks on a schedule,
-and posts **only when there is something worth saying**:
+The bot is not only reactive. Two watchers come built in and are switched on
+in every household group without anyone asking — each an ordinary automation
+underneath that checks on a schedule and posts **only when there is something
+worth saying**:
 
+- **Morning brief**, daily at 7am: today's family calendar; the mail that has
+  arrived since the last brief and is worth knowing about (appointments,
+  notices, bills, deliveries), with calendar-worthy dates proposed for the
+  family calendar; anything overdue on the board; and the weather. In the
+  group it sweeps every member's linked mailbox, each on its own cursor via
+  `new_mail`, and says whose each item was. A day with nothing on, no new mail
+  and nothing due gets no brief; weather alone is not news.
+- **Money snapshot**, Sunday at 6pm: the week's spending and the month so far,
+  with the budget's pacing and the categories over it where PocketSmith is
+  connected, or the totals from the raw Up feed where it is not.
+
+Home lists both under Reminders with a pause; neither can be deleted, since
+the next tick would only put it back. The tick also keeps them in step with
+their definitions in `lib/watchers.ts`, and leaves a room alone while someone
+unrecognised is in it — nothing is posted there, by any watcher, until they go.
+
+**/watch** adds the rest, or switches a paused one back on:
+
+- `/watch morning` — the brief, in a DM as well, where it reads your own mailbox.
+- `/watch snapshot` — the money snapshot.
 - `/watch money` — new 2Up transactions, checked hourly 9am–10pm. Cursor-disciplined,
   so a transaction is never posted twice.
-- `/watch inbox` — each morning's mail worth knowing about (appointments, notices,
-  bills, deliveries), with calendar-worthy dates proposed for the family
-  calendar. In a DM it reads your inbox; **in the family group it sweeps every
-  member's linked mailbox**, each on its own cursor via `new_mail` — and, like
-  live questions, never while someone unrecognised is in the room.
-- `/watch morning` — a weekday brief: today's family calendar and anything due
-  on the board, flagging what needs preparation.
 - `/watch list` — what this chat is already watching.
 
 Watchers are grounded before they are clever. Each ready-made watcher fetches
@@ -355,14 +370,17 @@ read-only tools, the same right to stay silent, and the same post decision.
 
 ## Sweeping email onto the calendar
 
-Ask once and it keeps happening:
+The morning brief already does this for the family group: each day's mail
+worth acting on is read, and every calendar-worthy date in it is proposed,
+tagged with the message it came from, so the same notice is never proposed
+twice however many mornings it turns up. Home lists the proposals under
+"Waiting on a yes", each with what it is and where it came from in words, and
+Add or No settles it.
+
+A variation is a sentence away, and becomes a custom automation:
 
 > every weekday at 7am, check my inbox for anything with a date in it and
 > propose it for the family calendar
-
-That stores an automation. Each run proposes what it finds, tagged with the
-email it came from, so the same message is never proposed twice however often
-the sweep runs.
 
 ## Shared lists
 

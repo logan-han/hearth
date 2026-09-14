@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { Receiver } from '@upstash/qstash'
 import {
-  dueAutomations, claimAutomation, allowedMembers, recordMessage,
+  dueAutomations, claimAutomation, allowedMembers, recordMessage, strangersIn,
   messagesSince, getSetting, setSetting, retireStaleProposals, recordTick,
 } from '@/lib/db/queries'
 import { localDateKey, tzOffsetMs, nextRun } from '@/lib/cron'
@@ -11,7 +11,8 @@ import { eq } from 'drizzle-orm'
 import { runAgent, decideWatcherPost, reviewDraft, type AgentResult } from '@/lib/agent'
 import { buildTools, type ToolName } from '@/lib/tools'
 import type { ToolContext } from '@/lib/tools/context'
-import { WATCHERS, isWatcherKind, type WatcherKind } from '@/lib/watchers'
+import { WATCHERS, isWatcherKind, isGroupChat, watcherInstruction, type WatcherKind } from '@/lib/watchers'
+import { installBuiltins } from '@/lib/builtins'
 import { send } from '@/lib/telegram'
 import { hydrateSecrets } from '@/lib/settings'
 import { flushTelemetry } from '@/lib/telemetry'
@@ -89,9 +90,6 @@ const HELD_DRAFT_CHARS = 600
 const heldBack = (a: Automation, why: string, draft: string) =>
   `Watcher **${a.label}** was held back: ${why}\n\nDraft:\n${draft.length > HELD_DRAFT_CHARS ? `${draft.slice(0, HELD_DRAFT_CHARS)}…` : draft}`
 
-/** Telegram gives groups negative ids; a private chat's id is the person's own. */
-const isGroupChat = (chatId: string) => chatId.startsWith('-')
-
 /**
  * The nightly memory pass: relying on the chat-turn model to file memories
  * while it is busy answering leaves most facts on the floor, so once a day the
@@ -144,6 +142,8 @@ async function runTool(tools: Tools, name: ToolName, args: unknown): Promise<Rec
 const errorOf = (r: Record<string, unknown>): string | null => (typeof r.error === 'string' ? r.error : null)
 /** Optional integrations answer "not configured"; that is a setting, not a fault. */
 const isUnconfigured = (err: string | null) => Boolean(err && /not configured/i.test(err))
+/** Nobody having linked a mailbox yet is a setting too; a mailbox that will not answer is a fault. */
+const isUnlinked = (err: string | null) => Boolean(err && /linked a mailbox|no email account linked/i.test(err))
 
 type Fetched = { data: Record<string, unknown>; empty: boolean; problems: string[] }
 
@@ -163,28 +163,28 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
       const transactions = Array.isArray(r.transactions) ? r.transactions : []
       return { data: { transactions: r }, empty: transactions.length === 0, problems }
     }
-    case 'inbox': {
-      const r = await runTool(tools, 'new_mail', { limit: 10, everyone: isGroupChat(a.chatId) })
-      const err = errorOf(r)
-      if (err) problems.push(`new_mail: ${err}`)
-      const accounts = Array.isArray(r.accounts) ? (r.accounts as Record<string, unknown>[]) : []
-      let count = 0
-      for (const acct of accounts) {
-        const e = errorOf(acct)
-        if (e) problems.push(`new_mail (${String(acct.member)}, ${String(acct.provider)}): ${e}`)
-        if (Array.isArray(acct.messages)) count += acct.messages.length
-      }
-      return { data: { mail: r }, empty: count === 0, problems }
-    }
     case 'morning': {
       const day = localDateKey(ctx.now)
-      const [events, board, weather] = await Promise.all([
+      // In a group the brief sweeps every linked mailbox, each on its own
+      // cursor; in a DM only the owner's. The cursor is the chat's, so the
+      // brief picks up where the retired inbox sweep left off.
+      const [events, mail, board, weather] = await Promise.all([
         runTool(tools, 'list_family_events', { from: `${day}T00:00`, to: `${day}T23:59`, include_cancelled: false }),
+        runTool(tools, 'new_mail', { limit: 10, everyone: isGroupChat(a.chatId) }),
         runTool(tools, 'jira_board_summary', {}),
         runTool(tools, 'weather', {}),
       ])
       const eventsErr = errorOf(events)
       if (eventsErr) problems.push(`list_family_events: ${eventsErr}`)
+      const mailErr = errorOf(mail)
+      if (mailErr && !isUnlinked(mailErr)) problems.push(`new_mail: ${mailErr}`)
+      const accounts = Array.isArray(mail.accounts) ? (mail.accounts as Record<string, unknown>[]) : []
+      let arrived = 0
+      for (const acct of accounts) {
+        const e = errorOf(acct)
+        if (e) problems.push(`new_mail (${String(acct.member)}, ${String(acct.provider)}): ${e}`)
+        if (Array.isArray(acct.messages)) arrived += acct.messages.length
+      }
       for (const [name, r] of [['jira_board_summary', board], ['weather', weather]] as const) {
         const e = errorOf(r)
         if (e && !isUnconfigured(e)) problems.push(`${name}: ${e}`)
@@ -192,11 +192,39 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
       const todays = Array.isArray(events.events) ? events.events : []
       const overdue = Array.isArray(board.overdue) ? board.overdue : []
       const data: Record<string, unknown> = { events }
+      if (!mailErr) data.mail = mail
       if (!errorOf(board)) data.board = board
       if (!errorOf(weather)) data.weather = weather
-      // A day with nothing on and nothing due gets no brief; weather alone is
-      // not news the household needs pushed at it.
-      return { data, empty: todays.length === 0 && overdue.length === 0, problems }
+      // A day with nothing on, no new mail and nothing due gets no brief;
+      // weather alone is not news the household needs pushed at it.
+      return { data, empty: todays.length === 0 && arrived === 0 && overdue.length === 0, problems }
+    }
+    case 'snapshot': {
+      const today = localDateKey(ctx.now)
+      const weekStart = localDateKey(new Date(ctx.now.getTime() - 6 * 86_400_000))
+      // PocketSmith has the categories and the budget; without it the raw Up
+      // feed still gives the totals.
+      const spending = async (range: { from?: string; to?: string }) => {
+        const categorised = await runTool(tools, 'spending_summary', { ...range, source: 'pocketsmith' })
+        return isUnconfigured(errorOf(categorised)) ? runTool(tools, 'spending_summary', { ...range, source: 'up' }) : categorised
+      }
+      const [week, month, budget] = await Promise.all([
+        spending({ from: weekStart, to: today }),
+        spending({}),
+        runTool(tools, 'budget_summary', {}),
+      ])
+      for (const [name, r] of [['spending_summary (week)', week], ['spending_summary (month)', month], ['budget_summary', budget]] as const) {
+        const e = errorOf(r)
+        if (e && !isUnconfigured(e)) problems.push(`${name}: ${e}`)
+      }
+      const data: Record<string, unknown> = { week: `${weekStart} to ${today}` }
+      if (!errorOf(week)) data.this_week = week
+      if (!errorOf(month)) data.month_so_far = month
+      if (!errorOf(budget)) data.budget = budget
+      // No bank connected is a setting, not a fault, and a week in which no
+      // money moved is nothing to post about either.
+      const moved = Number(week.transactions ?? 0) + Number(month.transactions ?? 0)
+      return { data, empty: moved === 0, problems }
     }
   }
 }
@@ -217,7 +245,7 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
   }
 
   const watcher = WATCHERS[kind]
-  const familyNote = kind === 'inbox' && isGroupChat(a.chatId) ? ' Say whose mailbox each item came from.' : ''
+  const instruction = watcherInstruction(kind, a.chatId)
   const data = JSON.stringify(fetched.data, null, 1)
   const result = await runAgent({
     chatId: a.chatId,
@@ -227,9 +255,9 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
     mode: 'watcher',
     tools: watcher.tools,
     history: false,
-    text: `Scheduled check "${a.label}".\n\n${watcher.instruction}${familyNote}\n\nDATA (fetched just now):\n${data}`,
+    text: `Scheduled check "${a.label}".\n\n${instruction}\n\nDATA (fetched just now):\n${data}`,
   })
-  await deliver(a, member, result, `INSTRUCTION:\n${watcher.instruction}\n\nDATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`)
+  await deliver(a, member, result, `INSTRUCTION:\n${instruction}\n\nDATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`)
 }
 
 /** A member's own scheduled instruction: the model decides what to fetch, with read-only tools. */
@@ -386,6 +414,15 @@ async function runDue(): Promise<{ ran: number; skipped: number }> {
       continue
     }
 
+    // The house rule for a room holds for what is posted into it unasked:
+    // nothing while someone unrecognised is there. The run is claimed all the
+    // same, so a morning brief does not turn up mid-afternoon once they leave.
+    if (isGroupChat(a.chatId) && (await strangersIn(a.chatId)).length > 0) {
+      console.info(`[tick] ${a.label}: someone unrecognised is in chat ${a.chatId}, not posting`)
+      skipped++
+      continue
+    }
+
     try {
       const member = a.memberId
         ? (await db().select().from(schema.members).where(eq(schema.members.id, a.memberId)).limit(1))[0]
@@ -429,6 +466,16 @@ export async function POST(req: Request) {
     } catch (err) {
       console.error('[tick] could not record the tick:', err)
     }
+  }
+  // The built-in watchers are part of the product: every household group has
+  // them, kept in step with their definitions, before anything due is run.
+  try {
+    const builtins = await installBuiltins(new Date())
+    if (builtins.installed.length || builtins.converted || builtins.retired || builtins.synced) {
+      console.info('[tick] built-in watchers:', JSON.stringify(builtins))
+    }
+  } catch (err) {
+    console.error('[tick] could not install the built-in watchers:', err)
   }
   const result = await runDue()
   await maybeConsolidateMemory(new Date())

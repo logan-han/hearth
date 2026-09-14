@@ -33,7 +33,7 @@ export default async function SystemPage() {
         <Stat value={t.connections} label="Mailboxes linked" />
         <Stat value={t.messages} label="Messages" />
         <Stat value={t.events} label="On the calendar" />
-        <Stat value={t.memories} label="Remembered" />
+        <Stat value={t.memories} label="Remembered" note="listed on Home" />
         <Stat value={t.sent} label="Emails sent" note={t.drafts ? `${t.drafts} awaiting yes` : undefined} />
         <Stat
           value={pulse.minutesAgo === null ? 'never' : pulse.minutesAgo === 0 ? 'just now' : `${pulse.minutesAgo} min ago`}

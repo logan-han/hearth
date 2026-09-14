@@ -221,8 +221,9 @@ describe('/watch', () => {
   it('offers the ready-made watchers when called bare', async () => {
     await processUpdate(dm('/watch'))
     expect(lastSent()).toContain('/watch money')
-    expect(lastSent()).toContain('/watch inbox')
+    expect(lastSent()).toContain('/watch snapshot')
     expect(lastSent()).toContain('/watch morning')
+    expect(lastSent()).not.toContain('/watch inbox')
   })
 
   it('switches a watcher on as an ordinary automation', async () => {
@@ -243,20 +244,35 @@ describe('/watch', () => {
     expect(await q.listAutomations('111')).toHaveLength(1)
   })
 
-  it('asks for a linked mailbox before watching an inbox', async () => {
+  it('folds an inbox request into the morning brief, which needs no mailbox to start', async () => {
     await processUpdate(dm('/watch inbox'))
-    expect(lastSent()).toContain('/connect')
-    expect(await q.listAutomations('111')).toHaveLength(0)
+    expect(lastSent()).toContain('Mail is part of the morning brief now')
+    expect(lastSent()).toContain('Watching')
+    const [a] = await q.listAutomations('111')
+    expect(a.kind).toBe('morning')
+    expect(a.label).toBe('Morning brief')
+    expect(a.cronExpr).toBe('0 7 * * *')
+    expect(a.instruction).not.toContain('whose mailbox')
   })
 
-  it('names an inbox watcher after its owner, bound to their account', async () => {
+  it('binds a personal brief to whoever switched it on', async () => {
     await processUpdate(dm('/whoami')) // creates the member row
     const m = (await q.memberByTelegramId('111'))!
-    await q.saveConnection({ memberId: m.id, provider: 'google', email: 'a@b.com', refreshToken: 'r', scopes: null })
-    await processUpdate(dm('/watch inbox'))
+    await processUpdate(dm('/watch morning'))
     const [a] = await q.listAutomations('111')
-    expect(a.label).toBe("User111's inbox")
     expect(a.memberId).toBe(m.id)
+  })
+
+  it('switches a paused watcher back on rather than doubling it', async () => {
+    await processUpdate(dm('/watch morning'))
+    const [a] = await q.listAutomations('111')
+    await q.setAutomationEnabled(a.id, false)
+    await processUpdate(dm('/watch morning'))
+    expect(lastSent()).toContain('Resumed')
+    const rows = await q.listAutomations('111')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].enabled).toBe(true)
+    expect(rows[0].nextRunAt.getTime()).toBeGreaterThan(Date.now())
   })
 
   it('lists what this chat is watching', async () => {
@@ -281,20 +297,19 @@ describe('/watch', () => {
     },
   }) as never
 
-  it('sweeps every linked mailbox when watched from the group', async () => {
-    const m = await q.upsertMember('111', 'User111', { allowed: true })
-    await q.saveConnection({ memberId: m.id, provider: 'google', email: 'a@b.com', refreshToken: 'r', scopes: null })
+  it('has the group brief say whose mailbox each item came from', async () => {
     await processUpdate(group('/watch inbox'))
     const [a] = await q.listAutomations('-100')
-    expect(a.label).toBe('Family inbox sweep')
-    expect(a.kind).toBe('inbox')
+    expect(a.label).toBe('Morning brief')
+    expect(a.kind).toBe('morning')
     expect(a.instruction).toContain('whose mailbox')
   })
 
-  it('will not start a family sweep before anyone has linked a mailbox', async () => {
-    await processUpdate(group('/watch inbox'))
-    expect(lastSent()).toContain('/connect')
-    expect(await q.listAutomations('-100')).toHaveLength(0)
+  it('tells a group the built-in watchers are already on', async () => {
+    await processUpdate(group('/watch'))
+    expect(lastSent()).toContain('already on in a family group')
+    await processUpdate(dm('/watch'))
+    expect(lastSent()).not.toContain('already on')
   })
 })
 
@@ -410,8 +425,10 @@ describe('command replies that depend on who is asking', () => {
     expect(lastSent()).toContain('paused')
   })
 
-  it("describes the inbox watcher as everyone's when asked from the group", async () => {
+  it("describes the brief's mail as everyone's when asked from the group, and as yours in a DM", async () => {
     await processUpdate(group('/watch'))
-    expect(lastSent()).toContain("everyone's linked inboxes")
+    expect(lastSent()).toContain("everyone's new mail")
+    await processUpdate(dm('/watch'))
+    expect(lastSent()).toContain('your new mail')
   })
 })
