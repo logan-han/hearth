@@ -38,7 +38,7 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
   inbox: {
     kind: 'inbox',
     label: 'Inbox sweep',
-    cron: '45 7 * * *',
+    cron: '0 8 * * *',
     needs: 'a linked email account (send /connect first)',
     instruction: [
       'New email is listed under DATA. Mention only what the household would act on: anything with a date, a deadline, a payment or a delivery in it (appointments, notices, bills, bookings). Leave out newsletters and promotions.',

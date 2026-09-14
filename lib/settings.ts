@@ -306,7 +306,7 @@ export const SETTING_GROUPS = [
 /** A word about the group as a whole, shown once above its settings. */
 export const GROUP_NOTES: Partial<Record<(typeof SETTING_GROUPS)[number], string>> = {
   Scheduler:
-    'QStash calls /api/tick every five minutes to fire reminders; these keys prove a call really came from it. Saved here they apply straight away, no redeploy.',
+    'QStash calls /api/tick on a schedule to fire reminders; these keys prove a call really came from it. Hourly is plenty: every call wakes the Neon database for five minutes, and a five-minute schedule never lets it sleep. Saved here they apply straight away, no redeploy.',
   Telegram:
     'How the family reaches the bot. Values saved here take effect straight away, but Telegram keeps delivering with the old token and secret until the webhook is reconnected below.',
   OpenRouter:

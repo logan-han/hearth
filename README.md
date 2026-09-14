@@ -36,7 +36,7 @@ Telegram ──webhook──> /api/telegram ──ack 200──┐
         ┌───────┬───────┼────────┬──────────┬─────────┐
       Tavily  Gmail   GCal    MS Graph   family cal  memory/automations
                                           │
-QStash ──every 5 min──> /api/tick ──due automations──> agent ──> Telegram
+QStash ──hourly tick──> /api/tick ──due automations──> agent ──> Telegram
 Google/Outlook/Apple ──subscribe──> /api/calendar/{token}/family.ics
 ```
 
@@ -164,9 +164,16 @@ Delegated permissions: `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`,
   and friends into the project. Copy them into `.env.local` too, so `db:push`
   works. `drizzle.config.ts` prefers `DATABASE_URL_UNPOOLED` for DDL, since
   pgbouncer in transaction mode is a poor host for migrations.
-- **Upstash QStash** — one recurring schedule, `*/5 * * * *`, POSTing to
+- **Upstash QStash** — one recurring schedule, `0 * * * *`, POSTing to
   `https://<your-deployment>/api/tick`. Copy both signing keys into Settings →
-  Scheduler (or the env). (Vercel Hobby cron is once-a-day minimum, which
+  Scheduler (or the env). Hourly is deliberate: every tick wakes the Neon
+  compute and the free plan keeps it awake for five minutes afterwards, so a
+  tick every five minutes never lets it sleep. That is 0.25 CU around the
+  clock, 180 CU-hours a month against the 100 the free plan allows, after
+  which Neon suspends the database until the next month. Hourly ticks cost
+  about 16 CU-hours a month, every 15 minutes about 60. A reminder due
+  between ticks runs at the next one, so keep schedules on the hour, as the
+  built-in watchers are. (Vercel Hobby cron is once-a-day minimum, which
   cannot drive reminders.)
 - **Tavily** — API key, 1k credits/month free.
 - **OpenWeatherMap** — optional; a free key from
@@ -495,9 +502,10 @@ System shows message volume over a fortnight, which model in the chain
 actually answered (the head answering nearly everything is the healthy shape),
 every reminder with its schedule, and any chat currently muted by an
 unrecognised person. Two diagnostics sit beside those. **Last tick** is when
-QStash last called the scheduler, flagged once it is more than fifteen
-minutes ago, because a scheduler that has gone quiet otherwise shows up only
-as reminders not arriving. **Chain health** is every model call of the last
+QStash last called the scheduler, with the cadence read off its last two
+calls, and flagged once three of those intervals have passed without one,
+because a scheduler that has gone quiet otherwise shows up only as reminders
+not arriving. **Chain health** is every model call of the last
 seven days, per slot: how many it answered and how quickly, how many times it
 was skipped for the next slot and why (rate limited, timed out, no reply,
 provider error), and how many chat replies were sent back for reporting a

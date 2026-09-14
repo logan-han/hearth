@@ -499,6 +499,17 @@ describe('settings and the calendar token', () => {
     expect(first).toHaveLength(32)
     expect(await q.calendarToken()).toBe(first)
   })
+
+  it('keeps the previous tick beside the latest, so the cadence can be read off the pair', async () => {
+    const first = new Date('2026-09-14T09:00:01Z')
+    const second = new Date('2026-09-14T10:00:00Z')
+    await q.recordTick(first)
+    expect(await q.getSetting('last_tick_at')).toBe(first.toISOString())
+    expect(await q.getSetting('prev_tick_at')).toBeNull()
+    await q.recordTick(second)
+    expect(await q.getSetting('last_tick_at')).toBe(second.toISOString())
+    expect(await q.getSetting('prev_tick_at')).toBe(first.toISOString())
+  })
 })
 
 describe('the real driver', () => {

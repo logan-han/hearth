@@ -30,7 +30,7 @@ const LIVE_PROPOSAL = sql`p.status = 'pending' and p.ends_at > now() and not exi
 
 export async function gatherStats(month?: string) {
   const view = monthView(month, ctxNow())
-  const [counts, byDay, models, chats, upcoming, automations, listRows, monthEvents, health, lastTickAt] = await Promise.all([
+  const [counts, byDay, models, chats, upcoming, automations, listRows, monthEvents, health, lastTickAt, prevTickAt] = await Promise.all([
     db().execute(sql`
       select
         (select count(*) from members where allowed) as members,
@@ -88,6 +88,7 @@ export async function gatherStats(month?: string) {
     // Both are diagnostics; a hiccup reading them must not take the page down.
     chainHealth(7).catch((): ChainHealth | null => null),
     getSetting('last_tick_at').catch((): string | null => null),
+    getSetting('prev_tick_at').catch((): string | null => null),
   ])
 
   const c = one(counts)
@@ -95,7 +96,7 @@ export async function gatherStats(month?: string) {
     timezone: timezone(),
     calendar: buildMonth(view, rows(monthEvents)),
     chainHealth: health,
-    scheduler: schedulerPulse(lastTickAt, ctxNow()),
+    scheduler: schedulerPulse(lastTickAt, prevTickAt, ctxNow()),
     totals: {
       members: n(c.members),
       admins: n(c.admins),
@@ -168,16 +169,41 @@ export async function gatherStats(month?: string) {
   }
 }
 
-/** QStash is due every five minutes; three missed ticks is a scheduler that has stopped. */
-const TICK_STALE_MINUTES = 15
+/**
+ * Three missed ticks is a scheduler that has stopped. The cadence is not
+ * assumed: it is read off the gap between the last two ticks, so the same
+ * judgement holds for a schedule of every five minutes or every hour. Hourly
+ * is the expected shape: on Neon's free plan every tick keeps the database
+ * awake for five minutes afterwards, so a five-minute schedule never lets it
+ * sleep and burns the month's compute in a fortnight. Until a second tick has
+ * landed, five minutes is assumed.
+ */
+const ASSUMED_TICK_MINUTES = 5
+const MISSED_TICKS = 3
 
-export type SchedulerPulse = { lastTick: string | null; minutesAgo: number | null; stale: boolean }
+export type SchedulerPulse = {
+  lastTick: string | null
+  minutesAgo: number | null
+  /** The observed cadence, once two ticks have been seen. */
+  everyMinutes: number | null
+  stale: boolean
+}
 
-function schedulerPulse(lastTickAt: string | null, now: Date): SchedulerPulse {
-  if (!lastTickAt) return { lastTick: null, minutesAgo: null, stale: true }
+export function schedulerPulse(lastTickAt: string | null, prevTickAt: string | null, now: Date): SchedulerPulse {
+  if (!lastTickAt) return { lastTick: null, minutesAgo: null, everyMinutes: null, stale: true }
   const at = new Date(lastTickAt)
+  const prev = prevTickAt ? new Date(prevTickAt) : null
   const minutesAgo = Math.max(0, Math.round((now.getTime() - at.getTime()) / 60_000))
-  return { lastTick: formatLocal(at), minutesAgo, stale: minutesAgo > TICK_STALE_MINUTES }
+  const gap = prev && prev.getTime() < at.getTime() ? Math.round((at.getTime() - prev.getTime()) / 60_000) : null
+  // Two ticks close together (a manual one beside the schedule) must not make
+  // the judgement hair-trigger, so the cadence is never taken as under five.
+  const everyMinutes = gap === null ? null : Math.max(ASSUMED_TICK_MINUTES, gap)
+  return {
+    lastTick: formatLocal(at),
+    minutesAgo,
+    everyMinutes,
+    stale: minutesAgo > MISSED_TICKS * (everyMinutes ?? ASSUMED_TICK_MINUTES),
+  }
 }
 
 /** Fourteen days, oldest first, with quiet days present as zeroes. */

@@ -38,7 +38,11 @@ export default async function SystemPage() {
         <Stat
           value={pulse.minutesAgo === null ? 'never' : pulse.minutesAgo === 0 ? 'just now' : `${pulse.minutesAgo} min ago`}
           label="Last tick"
-          note={pulse.stale ? (pulse.lastTick ? 'scheduler has gone quiet' : 'no tick recorded yet') : undefined}
+          note={
+            pulse.stale
+              ? (pulse.lastTick ? 'scheduler has gone quiet' : 'no tick recorded yet')
+              : (pulse.everyMinutes ? `every ${pulse.everyMinutes} min` : undefined)
+          }
         />
       </div>
 

@@ -496,8 +496,8 @@ export function SetupWizard({
             <li>
               <span className="title">Reminders on a schedule</span>
               <span className="meta">
-                Optional: paste both QStash signing keys into Settings under Scheduler, and point a QStash
-                schedule at /api/tick every five minutes. Everything else works without it.
+                Optional: paste both QStash signing keys into Settings under Scheduler, and point an hourly
+                QStash schedule at /api/tick. Everything else works without it.
               </span>
             </li>
             <li>

@@ -444,6 +444,22 @@ export async function setSetting(key: string, value: string) {
   await db().insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } })
 }
 
+/**
+ * The scheduler's pulse, with the pulse before it kept alongside. The gap
+ * between the two is the cadence QStash is actually running at, and that is
+ * what "gone quiet" is judged against: three missed ticks, whether they were
+ * due every five minutes or every hour. The old pulse moves aside first; a
+ * first-ever tick has nothing to move and writes only the new one.
+ */
+export async function recordTick(now: Date): Promise<void> {
+  await db().execute(sql`
+    insert into settings (key, value)
+    select 'prev_tick_at', value from settings where key = 'last_tick_at'
+    on conflict (key) do update set value = excluded.value
+  `)
+  await setSetting('last_tick_at', now.toISOString())
+}
+
 /** The long random path segment guarding the ICS feed; created on first use. */
 export async function calendarToken(): Promise<string> {
   const existing = await getSetting('calendar_token')

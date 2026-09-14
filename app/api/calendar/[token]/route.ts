@@ -32,7 +32,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ token: 
     headers: {
       'content-type': 'text/calendar; charset=utf-8',
       'content-disposition': 'inline; filename="family.ics"',
-      'cache-control': 'public, max-age=300, s-maxage=300',
+      // Calendar apps poll on their own clocks, some every few minutes. The
+      // edge answers repeat polls for half an hour so a keen client cannot
+      // keep the Neon compute awake: every miss here wakes it for five minutes.
+      'cache-control': 'public, max-age=300, s-maxage=1800',
     },
   })
 }

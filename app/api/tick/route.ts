@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { Receiver } from '@upstash/qstash'
 import {
   dueAutomations, claimAutomation, allowedMembers, recordMessage,
-  messagesSince, getSetting, setSetting, retireStaleProposals,
+  messagesSince, getSetting, setSetting, retireStaleProposals, recordTick,
 } from '@/lib/db/queries'
 import { localDateKey, tzOffsetMs, nextRun } from '@/lib/cron'
 import { timezone } from '@/lib/env'
@@ -416,7 +416,7 @@ export async function POST(req: Request) {
   // The pulse the System page shows: a scheduler that has gone quiet is the
   // failure mode that otherwise presents as reminders silently not firing.
   try {
-    await setSetting('last_tick_at', new Date().toISOString())
+    await recordTick(new Date())
   } catch (err) {
     console.error('[tick] could not record the tick:', err)
   }

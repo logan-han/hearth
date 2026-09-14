@@ -15,11 +15,12 @@ const send = vi.fn<(chatId: string, text: string) => Promise<void>>()
 const verify = vi.fn<() => Promise<boolean>>()
 const insertValues = vi.fn()
 
-const { recordMessage, messagesSince, getSetting, setSetting, retireStaleProposals } = vi.hoisted(() => ({
+const { recordMessage, messagesSince, getSetting, setSetting, recordTick, retireStaleProposals } = vi.hoisted(() => ({
   recordMessage: vi.fn(async () => 1),
   messagesSince: vi.fn(async () => [] as unknown[]),
   getSetting: vi.fn<(key: string) => Promise<string | null>>(async () => null),
   setSetting: vi.fn<(key: string, value: string) => Promise<void>>(async () => {}),
+  recordTick: vi.fn<(now: Date) => Promise<void>>(async () => {}),
   retireStaleProposals: vi.fn(async (_now: Date) => ({ expired: 0, superseded: 0 })),
 }))
 vi.mock('@/lib/db/queries', () => ({
@@ -29,6 +30,7 @@ vi.mock('@/lib/db/queries', () => ({
   messagesSince,
   getSetting,
   setSetting,
+  recordTick,
   retireStaleProposals,
   allowedMembers: vi.fn(async () => [
     { id: 9, telegramUserId: '900', name: 'Boss', isAdmin: true, allowed: true },
@@ -124,15 +126,15 @@ describe('POST /api/tick authorisation', () => {
     process.env.QSTASH_CURRENT_SIGNING_KEY = 'sig_current'
     verify.mockResolvedValue(true)
     await tick({ 'upstash-signature': 'v1=abc' })
-    const [key, value] = setSetting.mock.calls.find(([k]) => k === 'last_tick_at') ?? []
-    expect(key).toBe('last_tick_at')
-    expect(new Date(String(value)).getTime()).toBeGreaterThan(Date.now() - 60_000)
+    expect(recordTick).toHaveBeenCalled()
+    const [at] = recordTick.mock.calls.at(-1) ?? []
+    expect(at?.getTime()).toBeGreaterThan(Date.now() - 60_000)
     expect(retireStaleProposals).toHaveBeenCalled()
   })
 
   it('records nothing for a tick it refuses', async () => {
     expect((await tick()).status).toBe(401)
-    expect(setSetting).not.toHaveBeenCalledWith('last_tick_at', expect.anything())
+    expect(recordTick).not.toHaveBeenCalled()
   })
 
   it('rejects an invalid QStash signature', async () => {
