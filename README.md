@@ -273,8 +273,8 @@ is logged.
 
 ## Reading photos, scans and voice notes
 
-Send the bot a photo of a school notice, a permission slip or an invitation and
-it reads the picture, not just the caption. A message with no text at all is
+Send the bot a photo of a notice, a letter or an invitation and it reads the
+picture, not just the caption. A message with no text at all is
 still processed, which is the usual case for a snap of something on the fridge.
 PDFs and voice notes go the same way.
 
@@ -318,8 +318,8 @@ and posts **only when there is something worth saying**:
 
 - `/watch money` — new 2Up transactions, checked hourly 9am–10pm. Cursor-disciplined,
   so a transaction is never posted twice.
-- `/watch inbox` — each morning's mail worth knowing about (appointments, school
-  notices, bills, deliveries), with calendar-worthy dates proposed for the family
+- `/watch inbox` — each morning's mail worth knowing about (appointments, notices,
+  bills, deliveries), with calendar-worthy dates proposed for the family
   calendar. In a DM it reads your inbox; **in the family group it sweeps every
   member's linked mailbox**, each on its own cursor via `new_mail` — and, like
   live questions, never while someone unrecognised is in the room.

@@ -274,7 +274,7 @@ const HELP = [
   '',
   '**Things I can do**',
   '· answer questions, with a web search when it matters',
-  '· read photos of school notices and invitations, and pull the dates out',
+  '· read photos of notices, letters and invitations, and pull the dates out',
   '· keep shared lists: "add milk to the shopping list", "got the milk"',
   '· answer money questions: "how much have we spent this month?"',
   '· look things up in Notion, and add to a page',

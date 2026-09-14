@@ -3,6 +3,7 @@ import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
 import { recordModelEvent } from '@/lib/model-events'
+import { WATCHERS } from '@/lib/watchers'
 
 const generateText = vi.hoisted(() => vi.fn())
 vi.mock('ai', async (orig) => ({ ...(await orig<typeof import('ai')>()), generateText }))
@@ -92,11 +93,19 @@ describe('systemPrompt', () => {
 describe('systemPrompt money rules', () => {
   const base = { memberName: 'Logan', now: new Date('2026-08-27T00:00:00Z'), context: '' }
 
-  it('explains what a payee string is, with the Seattle case as the worked example', () => {
+  it('explains what a payee string is, with a placeholder example rather than a real payee', () => {
     const p = systemPrompt({ ...base, chatType: 'group' })
     expect(p).toContain('a trading name and a registered city, not where the household went')
-    expect(p).toContain('CHEAPTICKETS SEATTLE')
+    expect(p).toContain('<PAYEE CITY>')
     expect(p).toContain('No source names a trip')
+  })
+
+  it('names no real merchant, place, school or event in any mode or watcher instruction', () => {
+    const specific = /cheaptickets|seattle|scoot|sports day|woolworths|northcote|school|tradies/i
+    for (const mode of ['chat', 'watcher', 'sweep'] as const) {
+      expect(systemPrompt({ ...base, mode, chatType: 'group' })).not.toMatch(specific)
+    }
+    for (const w of Object.values(WATCHERS)) expect(w.instruction).not.toMatch(specific)
   })
 
   it('sends the model to the confirmation email for where a booking goes', () => {

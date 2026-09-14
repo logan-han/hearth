@@ -21,7 +21,7 @@ export function jiraTools(ctx: ToolContext) {
       description:
         'Find issues on the household Jira board. Use the plain filters for everyday questions ("what is in progress", "what is due this month"); use `jql` only for something the filters cannot express.',
       inputSchema: z.object({
-        status: z.string().optional().describe('e.g. "To Do", "In Progress", "Wishlist", "Done"'),
+        status: z.string().optional().describe('A status name as the board uses it, e.g. "To Do", "In Progress", "Done"'),
         open_only: z.boolean().default(true).describe('Exclude anything already Done'),
         text: z.string().optional().describe('Words appearing in the summary'),
         due_before: z.string().optional().describe('YYYY-MM-DD'),
@@ -89,7 +89,7 @@ export function jiraTools(ctx: ToolContext) {
 
     jira_read_issue: tool({
       description: 'Read one issue in full, including its description.',
-      inputSchema: z.object({ key: z.string().describe('Issue key, e.g. HTL-346') }),
+      inputSchema: z.object({ key: z.string().describe(`Issue key, e.g. ${defaultProject()}-346`) }),
       execute: async ({ key }) => {
         if (!jira.jiraConfigured()) return { error: NOT_CONFIGURED }
         try {
@@ -125,10 +125,10 @@ export function jiraTools(ctx: ToolContext) {
 
     jira_move_issue: tool({
       description:
-        'Move an issue to another status, e.g. mark it Done or push it to Wishlist.',
+        'Move an issue to another status, e.g. mark it Done or send it back to To Do.',
       inputSchema: z.object({
-        key: z.string().describe('Issue key, e.g. HTL-346'),
-        status: z.string().describe('Target status, e.g. "Done", "In Progress", "To Do", "Wishlist"'),
+        key: z.string().describe(`Issue key, e.g. ${defaultProject()}-346`),
+        status: z.string().describe('Target status as the board names it, e.g. "Done", "In Progress", "To Do"'),
       }),
       execute: async ({ key, status }) => {
         if (!jira.jiraConfigured()) return { error: NOT_CONFIGURED }

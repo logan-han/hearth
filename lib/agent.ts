@@ -259,10 +259,10 @@ function chatPrompt(input: { chatType: string; memberName: string }, tz: string)
     'COMMANDS the app answers before you see them: /watch (money, inbox or morning watchers), /connect, /accounts, /unlink, /calendar, /whoami, /members, /help, and for admins /allow and /deny. Point people at them rather than improvising.',
     "EMAIL is the one irreversible action: draft_email first and show the draft; send_email only in a LATER turn, after the draft's owner says yes, with the draft_id from Context. Never call both in one response. \"Send it\" or \"yes\" from the owner means call send_email NOW with that draft_id; do not draft again or ask again. A revision is a new draft_email with the full text, and the old draft is superseded.",
     '',
-    'EXAMPLES',
-    'Good: "Sports day is Wed 10 Sep, 9am to 12pm, per the school email. Add it to the family calendar?"',
-    'Good: "The feed shows CHEAPTICKETS SEATTLE, $412.30 on 26 Aug. It does not say where the booking goes; I can look for the confirmation email."',
-    'Bad: "Looks like someone booked flights to Seattle!" No source names a trip.',
+    'EXAMPLES, where <angle brackets> stand for the real values:',
+    'Good: "<Event> is <day>, <start> to <end>, per the email from <sender>. Add it to the family calendar?"',
+    'Good: "The feed shows <PAYEE CITY>, $<amount> on <date>. It does not say what the payment was for; I can look for the confirmation email."',
+    'Bad: "Looks like someone booked a trip to <the city in the payee string>!" No source names a trip.',
     'Bad: "Let me check the calendar first... Now the answer:" Working shown; give the answer alone.',
   ]
 }
@@ -278,10 +278,10 @@ function watcherPrompt(tz: string): string[] {
     'PROBLEMS: if a tool fails, write PROBLEM: and one line of diagnosis, then SKIP on its own line. That reaches the admins, not the family.',
     `FORMAT: plain Telegram text in ${language()}, ${units()} units, times in ${tz}; no headings, no preamble, no handover line, no commentary about tools.`,
     '',
-    'EXAMPLES',
-    'Good: "2Up: **$412.30** CHEAPTICKETS SEATTLE, Tue 26 Aug. Purpose not recorded."',
-    'Bad: "Looks like someone booked flights to Seattle, planning a trip?" No source names a trip.',
-    'Bad: "Scoot is a budget airline, so this is probably the other half. Now the post:" Working shown; post alone.',
+    'EXAMPLES, where <angle brackets> stand for the real values:',
+    'Good: "<Account>: **$<amount>** <PAYEE AS SHOWN>, <Day D Mon>. Purpose not recorded."',
+    'Bad: "Looks like someone booked a trip to <the city in the payee string>, planning a holiday?" No source names a trip.',
+    'Bad: "That payee is an airline, so this is probably the other half of a booking. Now the post:" Working shown; post alone.',
     'Skip: DATA lists nothing new. Reply SKIP.',
   ]
 }
@@ -289,7 +289,7 @@ function watcherPrompt(tz: string): string[] {
 function sweepPrompt(): string[] {
   return [
     "This is the nightly memory pass. You have yesterday's household talk and the Known household facts, each with its id.",
-    'FILE with remember any durable fact that is missing: people (family, friends, neighbours, teachers, coaches, doctors, tradies), birthdays and anniversaries, health, allergies and dietary needs, routines and standing arrangements, schools, clubs and activities, pets, vehicles, sizes, codes and account identifiers, house rules, strong preferences and dislikes.',
+    'FILE with remember any durable fact that is missing: people (family, friends, neighbours, and anyone the household deals with regularly), birthdays and anniversaries, health, allergies and dietary needs, routines and standing arrangements, where each person works, studies or trains, clubs and activities, pets, vehicles, sizes, codes and account identifiers, house rules, strong preferences and dislikes.',
     'CORRECT: where the talk contradicts a Known fact, call remember with the new fact and replaces set to the old id. The newer statement wins.',
     'LEAVE OUT one-off plans (the calendar holds those), shopping and list items, tasks, and passing chatter. Do not re-file anything already Known.',
     'WRITE each fact self-contained, so it makes sense months from now.',
@@ -668,9 +668,12 @@ const rewriteSchema = z.object({
 
 const EXTRACT_PROMPT = [
   'You list the checkable statements in a short post from a family assistant.',
-  'One fact per statement, one short self-contained sentence each: a figure, a date or time, a name, a place, a stated purpose, a flag such as new payee, unusual, duplicate or refund. Never combine two facts in one statement: "$412.30 was paid to Cheaptickets for flights to Seattle" is three statements (the amount, the payee, the flights).',
+  'A statement is one fact the post says or suggests about the world, as one short self-contained sentence: an amount, a date or time, who or what was paid or wrote in, where an event is held, a stated purpose, or a flag the post raises (new payee, unusual, duplicate, refund).',
+  'A payee or merchant string is one fact, quoted whole and exactly as written: "<Account>: **$<amount>** <PAYEE CITY>, <date>. Purpose not recorded." is three statements: the amount, the payee string <PAYEE CITY>, the date. The city or number inside a payee string is not a place, and the account label is not a flag.',
+  'Never combine two facts in one statement: "$<amount> was paid to <payee> for flights to <city>" is three statements (the amount, the payee, the flights).',
+  'A guess in a hedge or a question ("looks like someone booked flights", "planning a trip?", "probably the other half") is still a statement: list it as the plain assertion it makes.',
   'Copy names, payee strings, figures and dates exactly as the post writes them; never shorten or normalise them.',
-  'Leave out hedges, offers, questions and statements of what is not known, such as "purpose not recorded".',
+  'Leave out offers to do something, questions that only ask the reader for something, and statements of what is not known, such as "purpose not recorded".',
   'Return an empty list when there is nothing checkable.',
 ].join(' ')
 
@@ -685,7 +688,7 @@ const EXTRACT_CAP =
 const CHECK_PROMPT = [
   'You check one statement against evidence and nothing else.',
   'supported is true when the evidence states the statement or it follows directly from it: a figure that appears, a date that appears, an instruction that says to post exactly this, a sum of listed figures.',
-  'Differences of form do not matter: case, punctuation, currency symbols, and a name that is part of a longer string in the evidence (CHEAPTICKETS within CHEAPTICKETS SEATTLE) all count as the same thing.',
+  'Differences of form do not matter: case, punctuation, currency symbols, and a name that is part of a longer string in the evidence (<PAYEE> within <PAYEE CITY> in the feed) all count as the same thing.',
   'Differences of substance do: a purpose, place, trip, plan or cause is supported only if the evidence names it. A payee string is not a place anyone went. A statement with any unsupported part is not supported. Do not use outside knowledge.',
   'Quote the excerpt that establishes a supported statement.',
 ].join(' ')

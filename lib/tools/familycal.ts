@@ -63,7 +63,7 @@ export function familyCalendarTools(ctx: ToolContext) {
   return {
     add_family_event: tool({
       description:
-        'Add an event to the SHARED family calendar that everyone subscribes to. Use this for anything the whole household needs to see: sports, school events, appointments affecting others, trips. ' +
+        'Add an event to the SHARED family calendar that everyone subscribes to. Use this for anything the whole household needs to see: outings, appointments that affect others, visitors, trips. ' +
         'When no specific time is known, pass the date alone (YYYY-MM-DD): it becomes an all-day event, never a midnight one. ' +
         'To change an event that is already there, use update_family_event instead of adding a second one.',
       inputSchema: z.object({

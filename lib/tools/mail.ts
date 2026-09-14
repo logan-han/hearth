@@ -25,7 +25,7 @@ export function mailTools(ctx: ToolContext) {
         query: z
           .string()
           .optional()
-          .describe('Optional search terms, e.g. "from:school" or "invoice". Omit for the latest inbox mail.'),
+          .describe('Optional search terms, e.g. "from:<sender>" or a word from the subject. Omit for the latest inbox mail.'),
         limit: z.number().int().min(1).max(20).default(8),
         provider: providerEnum.optional().describe('Restrict to one account'),
         everywhere: z

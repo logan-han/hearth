@@ -50,7 +50,7 @@ export function notionTools(_ctx: ToolContext) {
 
     notion_query_database: tool({
       description:
-        'List the rows of a Notion database, by name or id. Use this for "what is on my travel plans", "show my reading list".',
+        'List the rows of a Notion database, by name or id. Use this for "what is on the <database>", "show my <list>".',
       inputSchema: z.object({
         database: z.string().describe('Database name or id'),
         limit: z.number().int().min(1).max(50).default(20),
@@ -70,7 +70,7 @@ export function notionTools(_ctx: ToolContext) {
 
     notion_append_to_page: tool({
       description:
-        'Add lines to the end of a Notion page. This only ever adds; it cannot edit or delete anything already there. Use for "add this to my reading list".',
+        'Add lines to the end of a Notion page. This only ever adds; it cannot edit or delete anything already there. Use for "add this to my <page>".',
       inputSchema: z.object({
         id: z.string().describe('Page id, from notion_search'),
         text: z.string().describe('What to add. Each line becomes its own paragraph.'),

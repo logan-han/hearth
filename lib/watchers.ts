@@ -41,7 +41,7 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
     cron: '45 7 * * *',
     needs: 'a linked email account (send /connect first)',
     instruction: [
-      'New email is listed under DATA. Mention only what the household would act on: appointments, school notices, bills, deliveries, bookings. Leave out newsletters and promotions.',
+      'New email is listed under DATA. Mention only what the household would act on: anything with a date, a deadline, a payment or a delivery in it (appointments, notices, bills, bookings). Leave out newsletters and promotions.',
       'For each item say what it is and what it asks for, using only what the email says; open one with read_email when the snippet is not enough.',
       'Propose any calendar-worthy date with propose_family_event.',
     ].join(' '),
@@ -53,7 +53,7 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
     cron: '0 7 * * 1-5',
     instruction: [
       "Today's family calendar, the board and the weather are under DATA. Post one short brief for the day.",
-      'Flag only what the data supports: an early start, a form or payment due, an umbrella if rain is forecast.',
+      'Flag only what the data supports: an early start, something due or overdue on the board, rain in the forecast.',
     ].join(' '),
     tools: ['recall'],
   },
