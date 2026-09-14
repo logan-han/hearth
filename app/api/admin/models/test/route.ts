@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireAdmin } from '@/lib/auth/session'
 import { hydrateSecrets } from '@/lib/settings'
+import { describeError } from '@/lib/errors'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -51,7 +52,7 @@ export async function POST(req: Request) {
     const message = String(data?.error?.message ?? `HTTP ${res.status}`)
     return NextResponse.json({ ok: false, reason: friendly(message, data?.error?.code) })
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
+    const message = describeError(err)
     return NextResponse.json({ ok: false, reason: message.includes('timed out') ? 'Timed out.' : message })
   }
 }

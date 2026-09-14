@@ -318,4 +318,37 @@ describe('provider odds and ends', () => {
     fetchMock.mockResolvedValue(json({}))
     expect(await jira.transitionIssue('HTL-1', 'Done')).toEqual([])
   })
+
+  it('refuses to call out at all when unconfigured, even from the client', async () => {
+    delete process.env.JIRA_API_TOKEN
+    await expect(jira.ping()).rejects.toThrow('JIRA_BASE_URL')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('reads sparse ADF: text nodes without text, nodes without content or type, an empty doc', () => {
+    expect(jira.fromAdf({})).toBe('')
+    expect(jira.fromAdf({ content: [{ type: 'text' }, { content: [{ type: 'text', text: 'x' }] }, { type: 'paragraph' }] })).toBe('x')
+  })
+
+  it('fills in placeholders for an issue with no fields block at all', async () => {
+    fetchMock.mockResolvedValue(json({ issues: [{ key: 'HTL-10' }] }))
+    const [i] = await jira.searchIssues('project = HTL')
+    expect(i).toMatchObject({ key: 'HTL-10', summary: '', status: 'Unknown', type: '', created: '', url: 'https://loganh.atlassian.net/browse/HTL-10' })
+  })
+
+  it('skips an issue type that lists no statuses', async () => {
+    fetchMock.mockResolvedValue(json([{ name: 'Epic' }, { name: 'Task', statuses: [{ name: 'Done' }] }]))
+    expect(await jira.projectStatuses('HTL')).toEqual(['Done'])
+  })
+
+  it('creates a Task when no issue type is named', async () => {
+    fetchMock.mockResolvedValue(json({ key: 'HTL-11' }))
+    expect(await jira.createIssue({ projectKey: 'HTL', summary: 'Fix the gate' })).toEqual({ key: 'HTL-11', url: 'https://loganh.atlassian.net/browse/HTL-11' })
+    expect(lastBody().fields.issuetype).toEqual({ name: 'Task' })
+  })
+
+  it('names the reachable statuses by their target, or the transition name when there is none', async () => {
+    fetchMock.mockResolvedValue(json({ transitions: [{ id: '1', name: 'Start' }, { id: '2', name: 'Finish', to: { name: 'Done' } }, { id: '3' }] }))
+    expect(await jira.transitionIssue('HTL-1', 'Archived')).toEqual(['Start', 'Done'])
+  })
 })

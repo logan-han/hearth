@@ -174,6 +174,12 @@ describe('strangers in a group', () => {
     await processUpdate(message({ from: '111', chat: '-100999' }))
     expect(clearStranger).toHaveBeenCalledWith('-100999', '111')
   })
+
+  it('names every stranger when there is more than one', async () => {
+    strangersIn.mockResolvedValue([{ id: '998', name: 'Ann' }, { id: '999', name: 'Bob' }])
+    await processUpdate(message({ from: '111', chat: '-100999', text: addressed }))
+    expect(send).toHaveBeenCalledWith('-100999', expect.stringContaining('Ann, Bob are here'), 7)
+  })
 })
 
 describe('ambient mode', () => {
@@ -249,6 +255,31 @@ describe('join and leave events', () => {
     await processUpdate(joinUpdate(222))
     expect(noteStranger).not.toHaveBeenCalled()
     expect(send).not.toHaveBeenCalled()
+  })
+
+  const joinOf = (members: Record<string, unknown>[], title?: string) => ({
+    update_id: 2,
+    message: {
+      message_id: 8, date: 1787000000,
+      chat: { id: -100999, type: 'group', ...(title ? { title } : {}) },
+      from: { id: 111, is_bot: false, first_name: 'Logan' },
+      new_chat_members: members,
+    },
+  }) as never
+
+  it('ignores its own arrival but flags another bot, in a room with no title', async () => {
+    await processUpdate(joinOf([{ id: 1, is_bot: true, first_name: 'Hearth' }, { id: 4242, is_bot: true, first_name: 'Spammer' }]))
+    expect(noteStranger).toHaveBeenCalledTimes(1)
+    expect(noteStranger).toHaveBeenCalledWith('-100999', { id: '4242', name: 'Spammer' })
+    expect(rememberChat).toHaveBeenCalledWith('-100999', 'group', null)
+    expect(send).toHaveBeenCalledWith('-100999', expect.stringContaining('Spammer (4242)'))
+  })
+
+  it('does not repeat itself when a stranger it already knows rejoins', async () => {
+    noteStranger.mockResolvedValue(false)
+    await processUpdate(joinUpdate(999))
+    expect(send).not.toHaveBeenCalled()
+    expect(rememberChat).not.toHaveBeenCalled()
   })
 
   it('clears the flag when someone leaves', async () => {

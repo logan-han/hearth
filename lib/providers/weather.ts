@@ -12,7 +12,8 @@ export function weatherConfigured(): boolean {
 
 /** The household's city, read off the timezone: Australia/Melbourne → Melbourne. */
 export function homeCity(): string {
-  return (timezone().split('/').pop() ?? 'Melbourne').replace(/_/g, ' ')
+  const parts = timezone().split('/')
+  return parts[parts.length - 1].replace(/_/g, ' ')
 }
 
 export type Geo = { name: string; lat: number; lon: number; country?: string; state?: string }

@@ -3,19 +3,21 @@ import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
 
-const { send, typing, runAgent, sendMessage, sendChatAction, getFile } = vi.hoisted(() => ({
+const { send, typing, runAgent, sendMessage, sendChatAction, getFile, me } = vi.hoisted(() => ({
   send: vi.fn(async (_chatId: string | number, _text: string, _replyTo?: number) => {}),
   typing: vi.fn(async (_chatId: string | number) => {}),
   runAgent: vi.fn(async () => ({ text: 'sure', notices: [] as string[], model: 'gemini' })),
   sendMessage: vi.fn(async () => ({})),
   sendChatAction: vi.fn(async () => true),
   getFile: vi.fn(),
+  /** What getMe answers; a test may take the username away. */
+  me: { value: { id: 1, username: 'heart_family_bot' } as { id: number; username?: string } },
 }))
 
 vi.mock('@/lib/telegram', async (orig) => ({
   ...(await orig<typeof import('@/lib/telegram')>()),
   send, typing,
-  bot: () => ({ api: { getMe: async () => ({ id: 1, username: 'heart_family_bot' }), sendMessage, sendChatAction, getFile } }),
+  bot: () => ({ api: { getMe: async () => me.value, sendMessage, sendChatAction, getFile } }),
 }))
 vi.mock('@/lib/agent', () => ({ runAgent, shouldChimeIn: vi.fn(async () => false) }))
 vi.mock('@vercel/functions', () => ({ waitUntil: (p: Promise<unknown>) => p }))
@@ -50,11 +52,22 @@ const groupReply = (text: string, replyFrom: number) => ({
   },
 }) as never
 
+const group = (text: string, from = '111') => ({
+  update_id: 5,
+  message: {
+    message_id: 6, date: 1787000000,
+    from: { id: Number(from), is_bot: false, first_name: `User${from}` },
+    chat: { id: -100, type: 'group', title: 'Family' },
+    text,
+  },
+}) as never
+
 const lastSent = () => String(send.mock.calls.at(-1)?.[1] ?? '')
 
 beforeEach(async () => {
   vi.clearAllMocks()
   vi.spyOn(console, 'warn').mockImplementation(() => {})
+  me.value = { id: 1, username: 'heart_family_bot' }
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
   process.env.APP_URL = 'https://hearth.han.life'
   process.env.ALLOWED_TELEGRAM_IDS = '111'
@@ -317,5 +330,88 @@ describe('agent failures', () => {
     runAgent.mockResolvedValueOnce({ text: '', notices: [], model: 'g' })
     await processUpdate(dm('hmm'))
     expect(send).not.toHaveBeenCalled()
+  })
+})
+
+describe('the shapes Telegram sends', () => {
+  const from = (who: Record<string, unknown>, text = '/whoami') => ({
+    update_id: 9,
+    message: { message_id: 3, date: 1787000000, from: { id: 111, is_bot: false, ...who }, chat: { id: 111, type: 'private' }, text },
+  }) as never
+
+  it('names a sender by handle when there is no name, and by id when there is neither', async () => {
+    await processUpdate(from({ username: 'loganh' }))
+    expect(lastSent()).toContain('**loganh**')
+    await processUpdate(from({}))
+    expect(lastSent()).toContain('**user111**')
+  })
+
+  it('treats an edited message like a new one', async () => {
+    const edited = dm('/help') as { update_id: number; message: unknown }
+    await processUpdate({ update_id: 10, edited_message: edited.message } as never)
+    expect(lastSent()).toContain('/connect')
+  })
+
+  it('ignores a message from another bot', async () => {
+    await processUpdate(from({ is_bot: true }, 'hello'))
+    expect(send).not.toHaveBeenCalled()
+    expect(runAgent).not.toHaveBeenCalled()
+  })
+
+  it('still answers when the bot has no username to be mentioned by', async () => {
+    me.value = { id: 1 }
+    await processUpdate(dm('@heart_family_bot what is on today?'))
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ text: '@heart_family_bot what is on today?' }))
+  })
+})
+
+describe('command replies that depend on who is asking', () => {
+  it('/connect in a DM sends the link once, with nothing to confirm', async () => {
+    await processUpdate(dm('/connect'))
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledWith('111', expect.stringContaining('Link an account'))
+  })
+
+  it('/accounts shows a linked provider plainly when it carries no address', async () => {
+    await processUpdate(dm('/whoami'))
+    const m = (await q.memberByTelegramId('111'))!
+    await q.saveConnection({ memberId: m.id, provider: 'google', email: null, refreshToken: 'r', scopes: null })
+    await processUpdate(dm('/accounts'))
+    expect(lastSent()).toContain('· google')
+    expect(lastSent()).not.toContain('· google —')
+  })
+
+  it('/whoami leaves the admin tag off an ordinary member, and /members marks only the admins', async () => {
+    await q.saveMember({ telegramUserId: '333', name: 'Ada', email: null, allowed: true, isAdmin: false })
+    await processUpdate(dm('/whoami', '333'))
+    expect(lastSent()).toContain('`333`')
+    expect(lastSent()).not.toContain('admin')
+
+    await processUpdate(dm('/whoami'))
+    await processUpdate(dm('/members'))
+    expect(lastSent()).toContain('2 people')
+    const ada = lastSent().split('\n').find((l) => l.includes('`333`'))!
+    expect(ada).not.toContain('admin')
+    expect(lastSent().split('\n').find((l) => l.includes('`111`'))).toContain('(admin)')
+  })
+
+  it('/allow with an explicit id names them by id, even when replying to someone else', async () => {
+    await processUpdate(groupReply('/allow 555', 777))
+    expect((await q.memberByTelegramId('555'))!.name).toBe('user555')
+  })
+
+  it('/watch list says so when nothing is watched, and marks a paused watcher', async () => {
+    await processUpdate(dm('/watch list'))
+    expect(lastSent()).toContain('Nothing is being watched')
+    await processUpdate(dm('/watch morning'))
+    const [a] = await q.listAutomations('111')
+    await q.setAutomationEnabled(a.id, false)
+    await processUpdate(dm('/watch list'))
+    expect(lastSent()).toContain('paused')
+  })
+
+  it("describes the inbox watcher as everyone's when asked from the group", async () => {
+    await processUpdate(group('/watch'))
+    expect(lastSent()).toContain("everyone's linked inboxes")
   })
 })

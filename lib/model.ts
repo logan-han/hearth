@@ -1,6 +1,7 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import type { LanguageModel } from 'ai'
 import { recordModelEvent, structuredRecord, type StructuredRecord } from './model-events'
+import { describeError } from './errors'
 
 export type ModelSlot = { name: string; model: LanguageModel }
 
@@ -178,7 +179,7 @@ export async function withModelFallback<T>(
       return out
     } catch (err) {
       lastError = err
-      const message = err instanceof Error ? err.message : String(err)
+      const message = describeError(err)
       console.error(`[model] ${slot.name} failed:`, message)
       await recordModelEvent({ slot: slot.name, purpose, outcome: 'failed', ms: Date.now() - started, error: message })
     }

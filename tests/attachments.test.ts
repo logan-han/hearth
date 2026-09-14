@@ -173,3 +173,33 @@ describe('photos', () => {
     expect(runAgent).not.toHaveBeenCalled()
   })
 })
+
+describe('voice, audio and unlabelled files', () => {
+  const withMedia = (media: Record<string, unknown>) => ({
+    update_id: 2,
+    message: {
+      message_id: 6, date: 1787000000,
+      from: { id: 111, is_bot: false, first_name: 'Logan' },
+      chat: { id: 111, type: 'private' },
+      ...media,
+    },
+  }) as never
+  const attachmentsSent = () =>
+    (runAgent.mock.calls[0][0] as { attachments: { mediaType: string; kind: string; filename?: string }[] }).attachments
+
+  it('reads a voice note and an audio file as voice attachments, named for the model', async () => {
+    downloadFile.mockResolvedValue({ bytes: new Uint8Array([79, 103, 103, 83]), path: 'voice/file_2.oga' })
+    await processUpdate(withMedia({ voice: { file_id: 'v1', duration: 3, mime_type: 'audio/ogg' } }))
+    expect(attachmentsSent()).toEqual([expect.objectContaining({ kind: 'voice', mediaType: 'audio/ogg', filename: 'voice.oga' })])
+
+    runAgent.mockClear()
+    await processUpdate(withMedia({ audio: { file_id: 'a1', duration: 3, mime_type: 'audio/mpeg', file_name: 'song.mp3' } }))
+    expect(attachmentsSent()).toEqual([expect.objectContaining({ kind: 'voice', mediaType: 'audio/mpeg', filename: 'song.mp3' })])
+  })
+
+  it('recognises a calendar export by its contents when the type and name say nothing', async () => {
+    downloadFile.mockResolvedValue({ bytes: new TextEncoder().encode('BEGIN:VCALENDAR\nEND:VCALENDAR'), path: 'documents/file_3' })
+    await processUpdate(withMedia({ document: { file_id: 'd1', mime_type: 'application/octet-stream', file_name: 'invite.bin' } }))
+    expect(attachmentsSent()).toEqual([expect.objectContaining({ kind: 'document', mediaType: 'text/calendar', filename: 'invite.bin' })])
+  })
+})

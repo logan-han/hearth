@@ -6,6 +6,7 @@ import * as ps from '@/lib/providers/pocketsmith'
 import * as notion from '@/lib/providers/notion'
 import * as jira from '@/lib/providers/jira'
 import * as weather from '@/lib/providers/weather'
+import { describeError } from '@/lib/errors'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -40,7 +41,7 @@ export async function GET() {
         await timeboxed(p.run())
         return { name: p.name, ok: true as const }
       } catch (err) {
-        return { name: p.name, ok: false as const, error: (err instanceof Error ? err.message : String(err)).slice(0, 160) }
+        return { name: p.name, ok: false as const, error: describeError(err).slice(0, 160) }
       }
     }),
   )

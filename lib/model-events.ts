@@ -1,6 +1,7 @@
 import { and, desc, gte, inArray, lt, sql } from 'drizzle-orm'
 import { db } from './db'
 import { modelEvents } from './db/schema'
+import { describeError } from './errors'
 
 /**
  * What the chain actually did, call by call. Everything here is best effort:
@@ -24,7 +25,7 @@ export async function recordModelEvent(event: {
       error: event.error ? event.error.slice(0, 300) : null,
     })
   } catch (err) {
-    console.warn('[model] could not record an event:', err instanceof Error ? err.message : err)
+    console.warn('[model] could not record an event:', describeError(err))
   }
 }
 
@@ -108,7 +109,7 @@ export async function pruneModelEvents(days = 30, now: Date = new Date()): Promi
   try {
     await db().delete(modelEvents).where(and(lt(modelEvents.createdAt, new Date(now.getTime() - days * 86_400_000)), sql`true`))
   } catch (err) {
-    console.warn('[model] could not prune events:', err instanceof Error ? err.message : err)
+    console.warn('[model] could not prune events:', describeError(err))
   }
 }
 
@@ -141,7 +142,7 @@ export async function structuredRecord(days = 3, now: Date = new Date()): Promis
       record.set(r.slot, s)
     }
   } catch (err) {
-    console.warn('[model] could not read the structured-output record:', err instanceof Error ? err.message : err)
+    console.warn('[model] could not read the structured-output record:', describeError(err))
   }
   return record
 }

@@ -1,5 +1,6 @@
 import type { LangfuseSpanProcessor } from '@langfuse/otel'
 import type { PropagateAttributesParams } from '@langfuse/tracing'
+import { describeError } from './errors'
 
 /**
  * Langfuse tracing for every model call, switched on by the presence of the
@@ -73,6 +74,6 @@ export async function flushTelemetry(): Promise<void> {
   try {
     await active.forceFlush()
   } catch (err) {
-    console.warn('[telemetry] flush failed:', err instanceof Error ? err.message : err)
+    console.warn('[telemetry] flush failed:', describeError(err))
   }
 }

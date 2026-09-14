@@ -2,6 +2,7 @@ import { tool } from 'ai'
 import { z } from 'zod'
 import * as notion from '../providers/notion'
 import type { ToolContext } from './context'
+import { describeError } from '../errors'
 
 const NOT_CONFIGURED = 'Notion is not configured (NOTION_TOKEN missing).'
 
@@ -29,7 +30,7 @@ export function notionTools(_ctx: ToolContext) {
             note: found.length === 0 ? SHARING_HINT : undefined,
           }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
@@ -43,7 +44,7 @@ export function notionTools(_ctx: ToolContext) {
           const [page, text] = await Promise.all([notion.getPage(id), notion.getPageText(id)])
           return { title: page.title, url: page.url, properties: page.properties, content: text }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
@@ -63,7 +64,7 @@ export function notionTools(_ctx: ToolContext) {
           const rows = await notion.queryDataSource(source.id, limit)
           return { database: source.title, count: rows.length, rows: rows.map((r) => r.properties) }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
@@ -81,13 +82,9 @@ export function notionTools(_ctx: ToolContext) {
           const { added } = await notion.appendToPage(id, text)
           return added === 0 ? { error: 'Nothing to add.' } : { added, id }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
   }
-}
-
-function describe(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
 }

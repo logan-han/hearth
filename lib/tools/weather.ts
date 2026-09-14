@@ -3,6 +3,7 @@ import { z } from 'zod'
 import * as owm from '../providers/weather'
 import { units } from '../env'
 import type { ToolContext } from './context'
+import { describeError } from '../errors'
 
 export function weatherTools(_ctx: ToolContext) {
   return {
@@ -27,7 +28,7 @@ export function weatherTools(_ctx: ToolContext) {
             days,
           }
         } catch (e) {
-          return { error: e instanceof Error ? e.message : String(e) }
+          return { error: describeError(e) }
         }
       },
     }),

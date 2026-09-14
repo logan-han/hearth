@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { ToolContext } from '@/lib/tools/context'
 
 const { weatherTools } = await import('@/lib/tools/weather')
+const weather = await import('@/lib/providers/weather')
 
 const fetchMock = vi.fn()
 const ctx: ToolContext = { chatId: '-1', member: null, memberName: 'Logan', now: new Date(), notices: [] }
@@ -112,5 +113,47 @@ describe('the weather tool', () => {
     fetchMock.mockResolvedValue(json({ cod: 401 }, false, 401))
     const r = await call({})
     expect(String(r.error)).toContain('401')
+  })
+
+  it('copes with a sparse payload, reporting unknowns rather than inventing readings', async () => {
+    fetchMock.mockImplementation(async (u: unknown) => {
+      const url = String(u)
+      if (url.includes('/geo/')) return json([{ name: 'Nowhere', lat: 0, lon: 0 }])
+      if (url.includes('/data/2.5/weather')) return json({})
+      // No city block, a slot with no readings, and a slot with a temperature but no conditions.
+      if (url.includes('/data/2.5/forecast')) return json({ list: [{ dt: DAY1 }, { dt: DAY2, main: { temp_min: 8 } }] })
+      return json({}, false, 404)
+    })
+    const r = await call({ location: 'Nowhere' })
+    expect(r.place).toBe('Nowhere')
+    expect(r.now).toEqual({ description: 'unknown', temp: null, feels_like: null, humidity: null, wind_speed: null, rain_last_hour_mm: 0 })
+    expect(r.days).toEqual([
+      { day: '2026-09-01', min: null, max: null, condition: 'unknown', rain_mm: 0 },
+      { day: '2026-09-02', min: 8, max: null, condition: 'unknown', rain_mm: 0 },
+    ])
+  })
+
+  it('has no days at all when the forecast list is missing', async () => {
+    fetchMock.mockImplementation(async (u: unknown) => {
+      const url = String(u)
+      if (url.includes('/geo/')) return json([{ name: 'Melbourne', lat: -37.8, lon: 144.9, country: 'AU' }])
+      return json({})
+    })
+    expect((await call({})).days).toEqual([])
+  })
+})
+
+describe('the weather client', () => {
+  it('refuses to call out without a key, even when asked directly', async () => {
+    delete process.env.OPENWEATHER_API_KEY
+    await expect(weather.geocode('Melbourne')).rejects.toThrow('OPENWEATHER_API_KEY')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('reads the home city off the timezone, with underscores as spaces', () => {
+    process.env.TIMEZONE = 'America/Los_Angeles'
+    expect(weather.homeCity()).toBe('Los Angeles')
+    process.env.TIMEZONE = 'UTC'
+    expect(weather.homeCity()).toBe('UTC')
   })
 })

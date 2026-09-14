@@ -18,6 +18,7 @@ import { flushTelemetry } from '@/lib/telemetry'
 import { pruneModelEvents } from '@/lib/model-events'
 import { parseLog, prune, underCap, recordPost, shouldWarn, markWarned, PROACTIVE_POSTS_PER_HOUR } from '@/lib/rate-cap'
 import type { Automation, Member } from '@/lib/db/schema'
+import { describeError } from '@/lib/errors'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
@@ -276,7 +277,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
     }
     reviewed = review.message
   } catch (err) {
-    console.error(`[tick] ${a.label}: claim check unavailable, deciding on the raw draft:`, err instanceof Error ? err.message : err)
+    console.error(`[tick] ${a.label}: claim check unavailable, deciding on the raw draft:`, describeError(err))
   }
   try {
     const d = await decideWatcherPost({ label: a.label, draft: reviewed, evidence })
@@ -290,7 +291,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
     await tellAdminQuietly(member, heldBack(a, why, reviewed))
     return null
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err)
+    const reason = describeError(err)
     console.error(`[tick] ${a.label}: post decision unavailable, posting the draft:`, reason)
     await tellAdminQuietly(member, `Watcher **${a.label}**: the post decision failed (${reason}), so its draft went out unchecked.`)
     return reviewed
@@ -391,7 +392,7 @@ async function runDue(): Promise<{ ran: number; skipped: number }> {
       ran++
     } catch (err) {
       console.error(`[tick] automation ${a.id} failed:`, err)
-      const reason = err instanceof Error ? err.message : String(err)
+      const reason = describeError(err)
       try {
         await tellAdminQuietly(undefined, `Watcher **${a.label}** failed: ${reason}`)
       } catch (sendErr) {

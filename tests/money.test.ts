@@ -408,6 +408,24 @@ describe('pocketsmith client', () => {
     expect(r.income).toEqual({ actual: '$0.00', forecast: '$0.00' })
   })
 
+  it('reads a sparse budget line as an uncategorised zero over the asked range, and a non-list as nothing', async () => {
+    fetchMock.mockImplementation(async (url: URL) =>
+      String(url).endsWith('/me') ? json({ id: 42 }) : json([{ expense: {} }, { income: {} }]),
+    )
+    expect(await ps.budgetByCategory({ startDate: '2026-08-01', endDate: '2026-08-31' })).toEqual([
+      { title: 'Uncategorised', actual: 0, forecast: 0, overBy: 0, underBy: 0, from: '2026-08-01', to: '2026-08-31' },
+    ])
+    fetchMock.mockImplementation(async (url: URL) => (String(url).endsWith('/me') ? json({ id: 42 }) : json({})))
+    expect(await ps.budgetByCategory({ startDate: '2026-08-01', endDate: '2026-08-31' })).toEqual([])
+  })
+
+  it('asks for a page of 100 when no limit is given', async () => {
+    fetchMock.mockImplementation(async (url: URL) => (String(url).endsWith('/me') ? json({ id: 42 }) : json([])))
+    await ps.listTransactions({ startDate: '2026-08-01', endDate: '2026-08-31' })
+    const asked = fetchMock.mock.calls.map(([u]) => new URL(String(u))).find((u) => u.pathname.endsWith('/transactions'))!
+    expect(asked.searchParams.get('per_page')).toBe('100')
+  })
+
   it('surfaces an API error with its status', async () => {
     fetchMock.mockImplementation(async (url: URL) =>
       String(url).endsWith('/me') ? json({ id: 42 }) : { ok: false, status: 403, text: async () => 'nope' },

@@ -27,6 +27,7 @@ import { WATCHERS, isWatcherKind } from './watchers'
 import { flushTelemetry } from './telemetry'
 import { maybeSummarise } from './summary'
 import type { Member } from './db/schema'
+import { describeError } from './errors'
 
 /**
  * Authorisation is per person, never per room. `ALLOWED_TELEGRAM_IDS` seeds the
@@ -91,7 +92,7 @@ async function collectAttachments(msg: Message): Promise<Attachment[]> {
       if (!SUPPORTED_DOC_TYPES.test(mediaType)) return
       out.push({ bytes, mediaType, filename: name, kind })
     } catch (err) {
-      console.warn('[telegram] could not fetch attachment:', err instanceof Error ? err.message : err)
+      console.warn('[telegram] could not fetch attachment:', describeError(err))
     }
   }
 
@@ -570,7 +571,7 @@ export async function processUpdate(update: Update): Promise<void> {
     }
   } catch (err) {
     console.error('[agent] run failed:', err)
-    await send(c.chatId, `Sorry, that went wrong: ${err instanceof Error ? err.message : String(err)}`)
+    await send(c.chatId, `Sorry, that went wrong: ${describeError(err)}`)
   } finally {
     await housekeeping(c.chatId)
   }

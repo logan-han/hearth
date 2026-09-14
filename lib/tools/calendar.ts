@@ -6,6 +6,7 @@ import { localToUtc, formatLocal } from '../cron'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
 import { requireMember } from './context'
+import { describeError } from '../errors'
 
 const providerEnum = z.enum(['google', 'microsoft'])
 
@@ -93,5 +94,5 @@ function describe(e: unknown): string {
   if (e instanceof NotConnectedError) {
     return `No ${e.provider} account linked. Send /connect to link one.`
   }
-  return e instanceof Error ? e.message : String(e)
+  return describeError(e)
 }

@@ -599,3 +599,100 @@ describe('the proactive post cap', () => {
     expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
   })
 })
+
+describe('the corners of a run', () => {
+  beforeEach(() => {
+    process.env.TICK_SECRET = 'let-me-in'
+  })
+  const authed = () => tick({ 'x-tick-secret': 'let-me-in' })
+
+  it('reports a mail fetch that fails outright, with nothing left to phrase', async () => {
+    dueAutomations.mockResolvedValue([automation({ kind: 'inbox', label: 'Family inbox sweep' })])
+    newMail.mockResolvedValue({ error: 'Nobody has linked a mailbox yet.' })
+    await authed()
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('new_mail: Nobody has linked a mailbox yet.'))
+    expect(runAgent).not.toHaveBeenCalled()
+  })
+
+  it('reports a calendar or board failure in the morning brief, and stays quiet when nothing is left to say', async () => {
+    dueAutomations.mockResolvedValue([automation({ kind: 'morning', label: 'Morning brief' })])
+    listEvents.mockResolvedValue({ error: 'calendar down' })
+    boardSummary.mockResolvedValue({ error: 'Jira API 500 on /search' })
+    weatherTool.mockResolvedValue({ now: { temp: 12 } })
+    await authed()
+    expect(send).toHaveBeenCalledTimes(1)
+    const [to, text] = send.mock.calls[0]
+    expect(to).toBe('900')
+    expect(text).toContain('list_family_events: calendar down')
+    expect(text).toContain('jira_board_summary: Jira API 500 on /search')
+    expect(runAgent).not.toHaveBeenCalled()
+  })
+
+  it('cuts a long held-back draft short in the admin DM', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    runAgent.mockResolvedValue({ text: 'x'.repeat(700), notices: [], model: 'primary:test' })
+    decideWatcherPost.mockResolvedValue({ decision: 'skip', confidence: 0.9, model: 'primary:test' })
+    await authed()
+    const text = String(send.mock.calls[0][1])
+    expect(text).toContain('x'.repeat(600) + '…')
+    expect(text).not.toContain('x'.repeat(601))
+  })
+
+  it('copes with a tool that answers nothing at all', async () => {
+    dueAutomations.mockResolvedValue([automation({ kind: 'money', label: '2Up transactions' })])
+    newTransactions.mockResolvedValue(undefined)
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('phrases for a private chat when the automation lives in one', async () => {
+    dueAutomations.mockResolvedValue([
+      automation({ id: 1, chatId: '111' }),
+      automation({ id: 2, chatId: '111', kind: 'money', label: '2Up transactions' }),
+    ])
+    newTransactions.mockResolvedValue({ account: '2Up', count: 1, transactions: [{ description: 'CAFE', amount: '$4.50', when: 'Mon', status: 'SETTLED' }] })
+    await authed()
+    expect(runAgent).toHaveBeenCalledTimes(2)
+    for (const [input] of runAgent.mock.calls) expect((input as { chatType: string }).chatType).toBe('private')
+  })
+
+  it('routes a problem hidden in a tool notice to the admins, and swallows a bare SKIP notice', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    runAgent.mockResolvedValue({ text: 'SKIP', notices: ['SKIP\nPROBLEM: calendar unreachable', 'SKIP'], model: 'primary:test' })
+    await authed()
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('PROBLEM: calendar unreachable'))
+  })
+
+  it('looks the creator up when the automation has one, and runs without them if they are gone', async () => {
+    dueAutomations.mockResolvedValue([automation({ memberId: 9 })])
+    await authed()
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ member: null, memberName: 'the family' }))
+  })
+
+  it('logs retired proposals when there were any', async () => {
+    retireStaleProposals.mockResolvedValue({ expired: 2, superseded: 1 })
+    await authed()
+    expect(console.info).toHaveBeenCalledWith(expect.stringContaining('proposals retired: 2 expired, 1 already on the calendar'))
+  })
+
+  it('writes the nightly transcript with the bot as you and a nameless sender as someone', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-30T18:30:00Z')) // 4:30am in Melbourne
+    try {
+      getSetting.mockImplementation(async () => null)
+      messagesSince.mockResolvedValue([
+        { chatId: '-1', authorName: null, role: 'user', content: 'hello there' },
+        { chatId: '-1', authorName: null, role: 'assistant', content: 'hi, how can I help' },
+      ] as never)
+      await authed()
+      const call = runAgent.mock.calls.at(-1)![0] as { text: string }
+      expect(call.text).toContain('[-1] someone: hello there')
+      expect(call.text).toContain('[-1] you: hi, how can I help')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

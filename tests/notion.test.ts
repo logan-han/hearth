@@ -40,6 +40,9 @@ describe('request shape', () => {
     expect(notion.notionConfigured()).toBe(false)
     expect(String((await call('notion_search', {})).error)).toContain('NOTION_TOKEN')
     expect(String((await call('notion_read_page', { id: 'x' })).error)).toContain('NOTION_TOKEN')
+    // The client itself refuses too, so a caller that skips the tool check cannot leak a request.
+    await expect(notion.search({})).rejects.toThrow('NOTION_TOKEN')
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('surfaces an API error with its status', async () => {
@@ -71,6 +74,24 @@ describe('readProperty', () => {
     ['unique_id', { type: 'unique_id', unique_id: { prefix: 'HTL', number: 12 } }, 'HTL-12'],
     ['unknown type', { type: 'wormhole' }, ''],
     ['missing', undefined, ''],
+    // The API leaves a field out or null rather than sending an empty value,
+    // so every reader has to cope with a sparse shape.
+    ['rich_text without plain_text', { type: 'rich_text', rich_text: [{}] }, ''],
+    ['status empty', { type: 'status', status: null }, ''],
+    ['multi_select missing', { type: 'multi_select' }, ''],
+    ['url missing', { type: 'url' }, ''],
+    ['email', { type: 'email', email: 'a@b.c' }, 'a@b.c'],
+    ['phone_number missing', { type: 'phone_number' }, ''],
+    ['people by id when unnamed', { type: 'people', people: [{ id: 'u1' }] }, 'u1'],
+    ['people missing', { type: 'people' }, ''],
+    ['files', { type: 'files', files: [{ name: 'a.pdf' }, { name: 'b.pdf' }] }, 'a.pdf, b.pdf'],
+    ['files missing', { type: 'files' }, ''],
+    ['relation missing', { type: 'relation' }, '0 linked'],
+    ['rollup of another type', { type: 'rollup', rollup: { type: 'array' } }, ''],
+    ['rollup with no number', { type: 'rollup', rollup: { type: 'number', number: null } }, ''],
+    ['created_time', { type: 'created_time', created_time: '2026-01-01T00:00:00Z' }, '2026-01-01T00:00:00Z'],
+    ['last_edited_time missing', { type: 'last_edited_time' }, ''],
+    ['formula missing', { type: 'formula' }, ''],
   ]
 
   for (const [name, input, expected] of cases) {
@@ -96,6 +117,21 @@ describe('notion_search', () => {
   it('falls back to (untitled) rather than blank', async () => {
     fetchMock.mockResolvedValue(json({ results: [{ object: 'page', id: 'p', properties: {} }] }))
     expect((await call('notion_search', { limit: 5 })).results).toMatchObject([{ title: '(untitled)' }])
+  })
+
+  it('copes with results that carry no title, no properties, or an empty title', async () => {
+    fetchMock.mockResolvedValue(
+      json({
+        results: [
+          { object: 'page', id: 'bare' },
+          { object: 'data_source', id: 'empty', title: [] },
+          { object: 'page', id: 'odd', properties: { Gap: null, Name: { type: 'title', title: [] } } },
+        ],
+      }),
+    )
+    const r = await call('notion_search', { limit: 5 })
+    expect((r.results as { title: string; url: string | null }[]).map((x) => x.title)).toEqual(['(untitled)', '(untitled)', '(untitled)'])
+    expect((r.results as { url: string | null }[])[0].url).toBeNull()
   })
 
   it('explains the sharing requirement when nothing comes back', async () => {
@@ -157,6 +193,35 @@ describe('notion_query_database', () => {
     expect(String(r.error)).toContain('reading list')
     expect(String(r.error)).toContain('Connections')
   })
+
+  it('takes an id straight to the data source, skipping the search', async () => {
+    const id = '0123456789abcdef0123456789abcdef'
+    fetchMock.mockImplementation(async (url: string) =>
+      url.endsWith(`/data_sources/${id}`)
+        ? json({ object: 'data_source', id, title: rich('By id') })
+        : url.endsWith('/query')
+          ? json({ results: [{ id: 'r1' }] })
+          : json({ results: [] }),
+    )
+    const r = await call('notion_query_database', { database: id, limit: 5 })
+    expect(r.database).toBe('By id')
+    // A bare row: no url, no properties.
+    expect(r.rows).toEqual([{}])
+    expect(fetchMock.mock.calls.map(([u]) => String(u))).not.toContain('https://api.notion.com/v1/search')
+  })
+
+  it('falls back to a name search when an id-shaped name is not a data source', async () => {
+    const id = 'deadbeefdeadbeefdeadbeefdeadbeef'
+    fetchMock.mockImplementation(async (url: string) =>
+      url.endsWith(`/data_sources/${id}`)
+        ? { ok: false, status: 404, text: async () => 'object_not_found' }
+        : url.endsWith('/search')
+          ? json({ results: [{ object: 'data_source', id: 'ds9', title: rich(id) }] })
+          : json({ results: [] }),
+    )
+    const r = await call('notion_query_database', { database: id, limit: 5 })
+    expect(r.database).toBe(id)
+  })
 })
 
 describe('notion_read_page', () => {
@@ -178,6 +243,17 @@ describe('notion_read_page', () => {
     const r = await call('notion_read_page', { id: 'p1' })
     expect(r.title).toBe('Health')
     expect(r.content).toBe('## Notes\nBody text\n[x] Book flights\n- A point')
+  })
+
+  it('reads a page with no properties and an unticked to-do', async () => {
+    fetchMock.mockImplementation(async (url: string) =>
+      url.includes('/blocks/')
+        ? json({ results: [{ type: 'to_do', to_do: { rich_text: rich('Pack bags') } }] })
+        : json({ object: 'page', id: 'p2' }),
+    )
+    const r = await call('notion_read_page', { id: 'p2' })
+    expect(r.title).toBe('(untitled)')
+    expect(r.content).toBe('[ ] Pack bags')
   })
 })
 

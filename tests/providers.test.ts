@@ -136,6 +136,44 @@ describe('google mail', () => {
     fetchMock.mockResolvedValueOnce(reply('quota exceeded', false, 429))
     await expect(googleClient(1).listMail({})).rejects.toThrow(/Google API 429/)
   })
+
+  it('reads a bare message without inventing headers, and a body-less one as empty', async () => {
+    fetchMock.mockResolvedValueOnce(reply({ id: 'bare' }))
+    const m = await googleClient(1).readMail('bare')
+    expect(m).toEqual({ id: 'bare', from: '', to: '', subject: '(no subject)', snippet: '', date: '', unread: false, body: '' })
+  })
+
+  it('skips parts with no data and decodes a lone html part', async () => {
+    fetchMock.mockResolvedValueOnce(
+      reply({
+        id: 'x',
+        payload: {
+          mimeType: 'multipart/mixed',
+          parts: [{ mimeType: 'text/plain' }, { mimeType: 'text/plain', body: { data: b64url('second wins') } }],
+        },
+      }),
+    )
+    expect((await googleClient(1).readMail('x')).body).toBe('second wins')
+
+    fetchMock.mockResolvedValueOnce(reply({ id: 'y', payload: { mimeType: 'text/html', body: { data: b64url('<i>only</i> html') } } }))
+    expect((await googleClient(1).readMail('y')).body).toBe('only html')
+
+    fetchMock.mockResolvedValueOnce(reply({ id: 'z', payload: { mimeType: 'text/html' } }))
+    expect((await googleClient(1).readMail('z')).body).toBe('')
+  })
+
+  it('defaults a whole-mailbox listing to recent mail when there is no search term', async () => {
+    fetchMock.mockResolvedValueOnce(reply({ messages: [] }))
+    await googleClient(1).listMail({ scope: 'all' })
+    expect(new URL(lastCall()[0]).searchParams.get('q')).toBe('newer_than:14d -in:sent -in:chats')
+  })
+
+  it('treats a 204 from a send as success, and an empty calendar as no events', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 204, json: async () => { throw new Error('no body') }, text: async () => '' })
+    expect(await googleClient(1).sendMail({ to: ['a@b.com'], subject: 's', body: 'b' })).toEqual({ ok: true })
+    fetchMock.mockResolvedValueOnce(reply({}))
+    expect(await googleClient(1).listEvents(new Date(), new Date())).toEqual([])
+  })
 })
 
 describe('google calendar', () => {
@@ -263,5 +301,51 @@ describe('microsoft graph', () => {
   it('surfaces a Graph error with its status', async () => {
     fetchMock.mockResolvedValueOnce(reply('forbidden', false, 403))
     await expect(microsoftClient(1).listMail({})).rejects.toThrow(/Graph API 403/)
+  })
+
+  it('reads a bare message without inventing fields', async () => {
+    fetchMock.mockResolvedValueOnce(reply({ id: 'bare' }))
+    const m = await microsoftClient(1).readMail('bare')
+    expect(m).toEqual({ id: 'bare', from: '', to: '', subject: '(no subject)', snippet: '', date: '', unread: false, body: '' })
+  })
+
+  it('shows a name alone when the address is missing, and drops recipients with neither', async () => {
+    fetchMock.mockResolvedValueOnce(
+      reply({
+        value: [{
+          ...graphMessage,
+          from: { emailAddress: { name: 'Only Name' } },
+          toRecipients: [{ emailAddress: { address: 'a@b.com' } }, { emailAddress: {} }, {}],
+        }],
+      }),
+    )
+    const [m] = await microsoftClient(1).listMail({})
+    expect(m.from).toBe('Only Name')
+    expect(m.to).toBe('a@b.com')
+  })
+
+  it('treats a listing or calendar with no value as empty', async () => {
+    fetchMock.mockResolvedValueOnce(reply({}))
+    expect(await microsoftClient(1).listMail({})).toEqual([])
+    fetchMock.mockResolvedValueOnce(reply({}))
+    expect(await microsoftClient(1).listEvents(new Date(), new Date())).toEqual([])
+  })
+
+  it('sends no cc recipients when there is no cc', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({}), text: async () => '' })
+    await microsoftClient(1).sendMail({ to: ['a@b.com'], subject: 's', body: 'b' })
+    expect(JSON.parse(String(lastCall()[1].body)).message.ccRecipients).toEqual([])
+  })
+
+  it('passes a description and location through when creating an event', async () => {
+    fetchMock.mockResolvedValueOnce(reply({ id: 'e', subject: 'Dentist', location: { displayName: 'Clinic' } }))
+    const created = await microsoftClient(1).createEvent({
+      title: 'Dentist', description: 'Check-up', location: 'Clinic',
+      start: new Date('2026-09-01T09:00:00Z'), end: new Date('2026-09-01T10:00:00Z'), allDay: false,
+    })
+    const sent = JSON.parse(String(lastCall()[1].body))
+    expect(sent.body).toEqual({ contentType: 'Text', content: 'Check-up' })
+    expect(sent.location).toEqual({ displayName: 'Clinic' })
+    expect(created).toMatchObject({ title: 'Dentist', location: 'Clinic' })
   })
 })

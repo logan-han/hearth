@@ -58,6 +58,19 @@ describe('listing models is admin only', () => {
     await asAdmin()
     expect((await list('skynet')).status).toBe(400)
   })
+
+  it('rejects a request with no provider at all', async () => {
+    await asAdmin()
+    expect((await GET(new Request('https://h/api/admin/models'))).status).toBe(400)
+  })
+
+  it('gives a generic reason when the failure is not an Error', async () => {
+    await asAdmin()
+    fetchMock.mockRejectedValue('offline')
+    const res = await list('openrouter')
+    expect(res.status).toBe(502)
+    expect((await res.json()).error).toBe('Could not reach that provider.')
+  })
 })
 
 describe('gemini listing', () => {
@@ -91,6 +104,13 @@ describe('gemini listing', () => {
     fetchMock.mockResolvedValue(json({}, false, 403))
     expect((await list('gemini')).status).toBe(502)
   })
+
+  it('offers nothing from an empty or method-less catalogue', async () => {
+    fetchMock.mockResolvedValue(json({}))
+    expect((await (await list('gemini')).json()).models).toEqual([])
+    fetchMock.mockResolvedValue(json({ models: [{ name: 'models/gemini-3.5-flash' }] }))
+    expect((await (await list('gemini')).json()).models).toEqual([])
+  })
 })
 
 describe('openrouter listing', () => {
@@ -117,6 +137,19 @@ describe('openrouter listing', () => {
     expect(models[0]).toMatchObject({ id: 'b/free:free', free: true, note: 'free' })
     expect(models[1]).toMatchObject({ free: false })
     expect(models[1].note).toContain('$0.30 in')
+  })
+
+  it('reads a sparse catalogue: no pricing means free, no name means the id, no parameters means out', async () => {
+    fetchMock.mockResolvedValue(
+      json({ data: [{ id: 'z/gratis', supported_parameters: ['tools'] }, { id: 'a/bare' }, { id: 'a/also-free:free', supported_parameters: ['tools'] }] }),
+    )
+    const models = (await (await list('openrouter')).json()).models
+    expect(models).toEqual([
+      { id: 'a/also-free:free', label: 'a/also-free:free', free: true, note: 'free' },
+      { id: 'z/gratis', label: 'z/gratis', free: true, note: 'free' },
+    ])
+    fetchMock.mockResolvedValue(json({}))
+    expect((await (await list('openrouter')).json()).models).toEqual([])
   })
 })
 
@@ -155,6 +188,12 @@ describe('self-hosted listing', () => {
     process.env.LLM_BASE_URL = 'http://127.0.0.1:11434/v1'
     fetchMock.mockResolvedValue(json({}, false, 500))
     expect((await list('self-hosted')).status).toBe(502)
+  })
+
+  it('reads a server that lists nothing as empty', async () => {
+    process.env.LLM_BASE_URL = 'http://127.0.0.1:11434/v1'
+    fetchMock.mockResolvedValue(json({}))
+    expect((await (await list('self-hosted')).json()).models).toEqual([])
   })
 })
 
@@ -248,5 +287,35 @@ describe('testing one model', () => {
     const d = await (await probe({ provider: 'gemini', model: 'g' })).json()
     expect(d.ok).toBe(false)
     expect(String(d.reason).length).toBeLessThanOrEqual(140)
+  })
+
+  it('needs a provider it knows', async () => {
+    expect((await probe({ model: 'x' })).status).toBe(400)
+    expect((await probe({ provider: 'skynet', model: 'x' })).status).toBe(400)
+  })
+
+  it('falls back to the status when a refusal carries no message', async () => {
+    fetchMock.mockResolvedValue(json({ error: {} }, false, 503))
+    const d = await (await probe({ provider: 'openrouter', model: 'x' })).json()
+    expect(d).toEqual({ ok: false, reason: 'HTTP 503' })
+  })
+
+  it('reports a failure that is not an Error, and one that is not a timeout, as they are', async () => {
+    fetchMock.mockRejectedValue('offline')
+    expect(await (await probe({ provider: 'openrouter', model: 'x' })).json()).toEqual({ ok: false, reason: 'offline' })
+    fetchMock.mockRejectedValue(new Error('connection refused'))
+    expect(await (await probe({ provider: 'openrouter', model: 'x' })).json()).toEqual({ ok: false, reason: 'connection refused' })
+  })
+
+  it('sends the self-hosted key when one is set', async () => {
+    process.env.LLM_BASE_URL = 'http://127.0.0.1:11434/v1'
+    process.env.LLM_API_KEY = 'sk-local'
+    try {
+      fetchMock.mockResolvedValue(json({ choices: [] }))
+      await probe({ provider: 'self-hosted', model: 'qwen3' })
+      expect((fetchMock.mock.calls[0][1] as { headers: Record<string, string> }).headers.authorization).toBe('Bearer sk-local')
+    } finally {
+      delete process.env.LLM_API_KEY
+    }
   })
 })

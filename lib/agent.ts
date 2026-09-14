@@ -18,6 +18,7 @@ import { traced, callTelemetry } from './telemetry'
 import { formatLocal, localDateKey } from './cron'
 import { parseIcs, describeIcs } from './ics-parse'
 import { recordModelEvent } from './model-events'
+import { describeError } from './errors'
 
 const MAX_STEPS = 8
 const STEP_TIMEOUT_MS = 60_000
@@ -420,7 +421,7 @@ async function claimsUnmadeAction(
   try {
     return await reportsChange(slot, text, ctx.chatId)
   } catch (err) {
-    console.warn(`[agent] ${slot.name} could not judge the reply for an unmade change:`, err instanceof Error ? err.message : err)
+    console.warn(`[agent] ${slot.name} could not judge the reply for an unmade change:`, describeError(err))
     return false
   }
 }
@@ -573,7 +574,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
               cleaned = { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
             }
           } catch (err) {
-            console.error(`[agent] ${slot.name} retry after an untaken action failed:`, err instanceof Error ? err.message : err)
+            console.error(`[agent] ${slot.name} retry after an untaken action failed:`, describeError(err))
             cleaned = { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
           }
         }

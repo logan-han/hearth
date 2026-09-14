@@ -2,6 +2,7 @@ import { tool } from 'ai'
 import { z } from 'zod'
 import type { ToolContext } from './context'
 import { decodeEntities, stripBlocks, stripTags } from '../html'
+import { describeError } from '../errors'
 
 /**
  * Following links is what separates "the email mentions a form" from actually
@@ -133,7 +134,7 @@ export function browseTools(_ctx: ToolContext) {
 
           return { url: res.url, kind: type.split(';')[0] || 'file', text: raw.slice(0, MAX_CHARS) }
         } catch (e) {
-          const reason = e instanceof Error ? e.message : String(e)
+          const reason = describeError(e)
           return { error: reason.includes('timeout') || reason.includes('timed out') ? 'The page took too long to answer.' : reason }
         }
       },

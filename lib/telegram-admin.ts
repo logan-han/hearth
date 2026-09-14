@@ -1,4 +1,5 @@
 import { appUrl } from './env'
+import { describeError } from './errors'
 
 /**
  * Talking to Telegram about the bot itself: is the token real, where does the
@@ -17,7 +18,7 @@ export async function telegramApi<T>(token: string, method: string, body?: unkno
     })
     return (await res.json()) as TelegramApiResult<T>
   } catch (err) {
-    return { ok: false, description: err instanceof Error ? err.message : String(err) }
+    return { ok: false, description: describeError(err) }
   }
 }
 

@@ -7,6 +7,7 @@ import { flagTransactions, HISTORY_DAYS, type TransactionFlag } from '../money-f
 import { localToUtc, formatLocal, localDateKey } from '../cron'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
+import { describeError } from '../errors'
 
 const money = (n: number, currency = 'AUD') =>
   new Intl.NumberFormat('en-AU', { style: 'currency', currency }).format(n)
@@ -36,7 +37,7 @@ export function moneyTools(ctx: ToolContext) {
               balance: money(a.balance, a.currency), shared: a.ownership === 'JOINT',
             }))
           } catch (e) {
-            out.up = { error: describe(e) }
+            out.up = { error: describeError(e) }
           }
         }
         if (ps.pocketsmithConfigured()) {
@@ -47,7 +48,7 @@ export function moneyTools(ctx: ToolContext) {
               as_at: a.balanceDate,
             }))
           } catch (e) {
-            out.pocketsmith = { error: describe(e) }
+            out.pocketsmith = { error: describeError(e) }
           }
         }
         return Object.keys(out).length ? out : { error: 'No bank integration is configured.' }
@@ -87,7 +88,7 @@ export function moneyTools(ctx: ToolContext) {
             })),
           }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
@@ -187,7 +188,7 @@ export function moneyTools(ctx: ToolContext) {
               })),
           }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
@@ -236,7 +237,7 @@ export function moneyTools(ctx: ToolContext) {
               flags = report.flags
               typicalDebit = report.typicalDebit
             } catch (e) {
-              console.warn('[money] could not read history for flags:', describe(e))
+              console.warn('[money] could not read history for flags:', describeError(e))
             }
           }
 
@@ -265,7 +266,7 @@ export function moneyTools(ctx: ToolContext) {
             })),
           }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
@@ -337,13 +338,9 @@ export function moneyTools(ctx: ToolContext) {
               })),
           }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
   }
-}
-
-function describe(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
 }

@@ -3,6 +3,7 @@ import { z } from 'zod'
 import * as jira from '../providers/jira'
 import { localDateKey } from '../cron'
 import type { ToolContext } from './context'
+import { describeError } from '../errors'
 
 const NOT_CONFIGURED = 'Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).'
 
@@ -50,7 +51,7 @@ export function jiraTools(ctx: ToolContext) {
             })),
           }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
@@ -82,7 +83,7 @@ export function jiraTools(ctx: ToolContext) {
               .map((i) => ({ key: i.key, summary: i.summary, due: i.dueDate })),
           }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
@@ -95,7 +96,7 @@ export function jiraTools(ctx: ToolContext) {
         try {
           return await jira.getIssue(key)
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
@@ -118,7 +119,7 @@ export function jiraTools(ctx: ToolContext) {
           ctx.notices.push(`Added to the board: **${made.key}** ${summary}`)
           return { ...made, summary, due: due_date ?? null }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
@@ -138,7 +139,7 @@ export function jiraTools(ctx: ToolContext) {
             ? { error: `Cannot move ${key} to "${status}". Available from here: ${alternatives.join(', ')}.` }
             : { key, status }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
@@ -152,13 +153,9 @@ export function jiraTools(ctx: ToolContext) {
           await jira.addComment(key, text)
           return { commented: true, key }
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeError(e) }
         }
       },
     }),
   }
-}
-
-function describe(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
 }
