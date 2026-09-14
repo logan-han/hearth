@@ -395,10 +395,11 @@ describe('the post decision', () => {
     expect(send).toHaveBeenCalledWith('900', expect.stringContaining('post at 0.40'))
   })
 
-  it('posts the rewritten message when the decision offers one', async () => {
-    decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.95, message: 'Bins out tonight, recycling week.', model: 'primary:test' })
+  it('posts the reviewed draft as written, never a retype from the decision', async () => {
+    runAgent.mockResolvedValue({ text: '**Bins** out tonight.', notices: [], model: 'primary:test' })
+    decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.95, message: 'Bins out tonight.', model: 'primary:test' })
     await authed()
-    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight, recycling week.')
+    expect(send).toHaveBeenCalledWith('-100999', '**Bins** out tonight.')
   })
 
   it('posts the draft unchecked and warns an admin when the decision itself fails', async () => {

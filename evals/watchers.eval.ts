@@ -79,7 +79,7 @@ describe.skipIf(!liveChainConfigured())('money watcher', () => {
     let note = `review: ${review.unsupported.length}/${review.claims.length} cut`
     if (review.message !== null) {
       const d = await decideWatcherPost({ label: '2Up transactions', draft: review.message, evidence })
-      posted = d.decision === 'post' && d.confidence >= 0.7 ? (d.message ?? review.message) : ''
+      posted = d.decision === 'post' && d.confidence >= 0.7 ? review.message : ''
       note += ` | ${d.decision}@${d.confidence}`
     }
     const hard = tripCut && (posted === '' || (!TRIP_TALK.test(posted) && figuresGrounded(posted, seattleData).ok))

@@ -253,6 +253,11 @@ async function runCustom(a: Automation, member: Member | undefined): Promise<voi
  * did, and an admin hears that the safety net was down. A draft held back at
  * either step is reported to an admin with the reason: a run that wrote
  * something and posted nothing is not the quiet kind of quiet.
+ *
+ * What posts is the reviewed draft itself, never a retype from the decision:
+ * the decision once offered its own wording, and that is what turned a
+ * formatted snapshot into plain lines and brought back entries the check had
+ * never seen.
  */
 async function approve(a: Automation, member: Member | undefined, draft: string, evidence: string): Promise<string | null> {
   // First the factored check: each claim against the evidence, in a context
@@ -279,7 +284,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
       '[tick] decision',
       JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, model: d.model, reason: d.reason ?? null }),
     )
-    if (d.decision === 'post' && d.confidence >= POST_CONFIDENCE) return d.message?.trim() || reviewed
+    if (d.decision === 'post' && d.confidence >= POST_CONFIDENCE) return reviewed
     const why = `the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}`
     console.warn(`[tick] ${a.label}: held back, ${why}`)
     await tellAdminQuietly(member, heldBack(a, why, reviewed))

@@ -271,12 +271,12 @@ function watcherPrompt(tz: string): string[] {
   return [
     'This is a scheduled check, not a conversation. Whatever you write may be posted to the family chat.',
     'WRITE using only the information under DATA, the tool results you fetch, and the instruction you were given. Do not rely on outside knowledge.',
-    'POST: one to three short lines a housemate would find useful; names, amounts and dates exactly as given, the key figure in **bold**.',
+    'POST: for a routine check, one to three short lines a housemate would find useful. When the instruction asks for a summary in several parts, open with a **bold** title line, put the figures in a table and give each other part its own line or bullet. Names, amounts and dates exactly as given, the key figure in **bold**.',
     'PURPOSE: say what a payment or message is for only when DATA, a Known fact, a calendar event or a fetched email names it, and say which; otherwise write "purpose not recorded".',
     'FLAGS: each transaction under DATA carries flags worked out from the feed (new_payee, unusually_large, possible_duplicate, money_in). Put a flag into plain words only when it is there; an empty list means nothing stood out. money_in is a credit, a refund or a transfer in, and say which only if the description does.',
     'NOTHING TO SAY: when nothing is worth posting, reply with exactly SKIP.',
     'PROBLEMS: if a tool fails, write PROBLEM: and one line of diagnosis, then SKIP on its own line. That reaches the admins, not the family.',
-    `FORMAT: plain Telegram text in ${language()}, ${units()} units, times in ${tz}; no headings, no preamble, no handover line, no commentary about tools.`,
+    `FORMAT: Telegram markdown: **bold**, *italic*, \`code\`, - bullets, a pipe table for figures (two or three short columns: a header row, then | --- | --- |, then a row per item; it renders as an aligned monospace block), and > at the start of each line of detail worth folding away (a long list of items goes in a > block). No headings, no preamble, no handover line, no commentary about tools. Write in ${language()} with ${units()} units, times in ${tz}.`,
     '',
     'EXAMPLES, where <angle brackets> stand for the real values:',
     'Good: "<Account>: **$<amount>** <PAYEE AS SHOWN>, <Day D Mon>. Purpose not recorded."',
@@ -607,10 +607,6 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
 const postDecisionSchema = z.object({
   decision: z.enum(['post', 'skip']),
   confidence: z.number().min(0).max(1).describe('How sure you are that this decision is right, 0 to 1'),
-  message: z
-    .string()
-    .optional()
-    .describe('The final text to post. Only names, figures, dates and purposes present in the evidence. Empty when skipping.'),
   reason: z.string().optional().describe('One line on why'),
 })
 
@@ -619,7 +615,7 @@ export type PostDecision = z.infer<typeof postDecisionSchema>
 const DECISION_PROMPT = [
   'You decide whether a scheduled family-assistant post goes to the family chat.',
   'You receive +1 if the post is accurate and useful to the household, +0.4 if you choose skip, and -1 if the post contains anything not in the evidence or that the household would not need.',
-  'The evidence is the instruction that produced the draft and the results the tools returned. Every name, amount, date and stated purpose in the post must appear there. A claim the evidence does not make means either skip, or remove that claim and post the rest as message.',
+  'The evidence is the instruction that produced the draft and the results the tools returned. Every name, amount, date and stated purpose in the post must appear there; a claim the evidence does not make means skip.',
   'Statements of what is not known ("purpose not recorded") are accurate and welcome. A reminder whose wording comes from the instruction is grounded in the instruction.',
   'Give your confidence from 0 to 1. Answer with the structured object only.',
 ].join('\n')
@@ -628,7 +624,9 @@ const DECISION_PROMPT = [
  * A payoff-framed, confidence-bearing decision in a fresh context, checking
  * the draft against what the tools actually said. A bare "reply SKIP if there
  * is nothing" leaves the choice to the model that wrote the draft, which is
- * the one least able to see its own embellishments.
+ * the one least able to see its own embellishments. Post or skip is all it
+ * decides: the draft it approves goes out as written, so a retype cannot
+ * flatten the formatting or bring back a figure the claim check never saw.
  */
 export async function decideWatcherPost(input: {
   label: string

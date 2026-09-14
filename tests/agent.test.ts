@@ -851,3 +851,16 @@ describe('reviewDraft', () => {
     expect(generateText).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('watcher formatting', () => {
+  const base = { memberName: 'Logan', now: new Date('2026-08-27T00:00:00Z'), context: '' }
+
+  it('offers Telegram markdown and a fold-away quote, and never asks for plain text', () => {
+    const p = systemPrompt({ ...base, mode: 'watcher', chatType: 'group' })
+    expect(p).toContain('**bold**')
+    expect(p).toContain('> at the start of each line')
+    expect(p).toContain('pipe table for figures')
+    expect(p).toContain('**bold** title line')
+    expect(p).not.toMatch(/plain Telegram text/)
+  })
+})

@@ -48,4 +48,32 @@ describe('toTelegramHtml', () => {
     expect(toTelegramHtml('a *broken _markdown')).toBe('a *broken _markdown')
   })
 
+  it('turns a run of quoted lines into one blockquote, with the emphasis inside it converted', () => {
+    expect(toTelegramHtml('Spend by category:\n> **Kids** $42.75\n> Housing $826.41\nDone.')).toBe(
+      'Spend by category:\n<blockquote><b>Kids</b> $42.75\nHousing $826.41</blockquote>\nDone.',
+    )
+  })
+
+  it('folds a long quote, so a snapshot reads as a card with its detail tucked away', () => {
+    expect(toTelegramHtml('> one\n> two\n> three\n> four')).toBe('<blockquote expandable>one\ntwo\nthree\nfour</blockquote>')
+  })
+
+  it('keeps a bullet inside a quote a bullet', () => {
+    expect(toTelegramHtml('> - milk\n> - bread')).toBe('<blockquote>• milk\n• bread</blockquote>')
+  })
+
+  it('leaves a greater-than sign that is not at the start of a line alone', () => {
+    expect(toTelegramHtml('5 > 3 and > so on')).toBe('5 &gt; 3 and &gt; so on')
+  })
+
+  it('lays a pipe table out as an aligned monospace block, figures on the right', () => {
+    const md = ['| Category | Spend |', '|---|---:|', '| **Kids** | $42.75 |', '| Housing | $826.41 |'].join('\n')
+    expect(toTelegramHtml(md)).toBe('<pre>Category    Spend\nKids       $42.75\nHousing   $826.41</pre>')
+  })
+
+  it('escapes a table cell and keeps the text around a table', () => {
+    expect(toTelegramHtml('Before\n| a<b | n |\n|---|---|\n| `x` | 1 |\nAfter')).toBe(
+      'Before\n<pre>a&lt;b  n\nx    1</pre>\nAfter',
+    )
+  })
 })
