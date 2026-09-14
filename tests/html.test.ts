@@ -25,8 +25,8 @@ describe('stripping markup', () => {
     expect(stripBlocks('a<!-- note -->b')).toBe('a b')
   })
 
-  it('keeps going while removal exposes more markup, so a script split by a comment still goes', () => {
-    expect(stripBlocks('a<scr<!---->ipt>x()</script>b')).toBe('a b')
+  it('lets a tag hidden inside a comment come out once the comment is gone', () => {
+    expect(htmlToPlainText('a<<!-- x -->b>c')).toBe('a c')
     expect(stripTags('a <b>b</b> c')).toBe('a  b  c')
   })
 
