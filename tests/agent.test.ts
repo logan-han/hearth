@@ -586,6 +586,13 @@ describe('per-mode prompts', () => {
     expect(p).not.toContain('/connect')
   })
 
+  it('tells a watcher to follow a standing instruction among the Known facts, and shows it those facts', () => {
+    const p = systemPrompt({ ...base, mode: 'watcher', chatType: 'group', context: 'Known household facts:\n- [7] leave the gym newsletter out of the brief' })
+    expect(p).toContain('HOUSE RULES: a Known household fact under Context can be a standing instruction')
+    expect(p).toContain('do not say that you did')
+    expect(p).toContain('Context:\nKnown household facts:\n- [7] leave the gym newsletter out of the brief')
+  })
+
   it('gives the sweep only the memory rules', () => {
     const p = systemPrompt({ ...base, mode: 'sweep', chatType: 'private' })
     expect(p).toContain('nightly memory pass')
@@ -688,13 +695,19 @@ describe('tool scoping by mode', () => {
     expect(generateText.mock.calls[1][0].temperature).toBeLessThan(0.5)
   })
 
-  it('gives a watcher no memories in context, and the sweep all of them', async () => {
+  it('gives a watcher the household facts but none of a chat turn\'s other business, and the sweep all of the facts', async () => {
     await q.addMemory('bin night is Monday')
+    await q.upsertMember('111', 'Logan', { allowed: true })
     generateText.mockResolvedValue(reply('ok'))
     await runAgent({ ...input, mode: 'watcher' })
-    expect(String(generateText.mock.calls[0][0].system)).not.toContain('bin night')
+    const watcher = String(generateText.mock.calls[0][0].system)
+    expect(watcher).toContain('Known household facts:')
+    expect(watcher).toContain('bin night is Monday')
+    expect(watcher).not.toContain('Family members')
     await runAgent({ ...input, mode: 'sweep' })
     expect(String(generateText.mock.calls[1][0].system)).toContain('bin night is Monday')
+    await runAgent({ ...input, mode: 'chat' })
+    expect(String(generateText.mock.calls[2][0].system)).toContain('Family members and their linked accounts: Logan')
   })
 
   it('returns what the tools said as evidence for a watcher run', async () => {
@@ -707,6 +720,14 @@ describe('tool scoping by mode', () => {
     expect(r.evidence).toContain('"count":1')
     generateText.mockResolvedValue(reply('hello'))
     expect((await runAgent({ ...input, mode: 'chat' })).evidence).toBeUndefined()
+  })
+
+  it('hands back the facts a watcher wrote with, so the post checks see the same sources', async () => {
+    await q.addMemory('bin night is Monday')
+    generateText.mockResolvedValue(reply('Bins out tonight.'))
+    const r = await runAgent({ ...input, mode: 'watcher' })
+    expect(r.facts).toContain('bin night is Monday')
+    expect((await runAgent({ ...input, mode: 'chat' })).facts).toBeUndefined()
   })
 })
 

@@ -55,6 +55,8 @@ export type AgentResult = {
   model: string
   /** Watcher runs: what the tools actually returned, for the post decision. */
   evidence?: string
+  /** Watcher runs: the Known household facts the model wrote with, so the post checks judge against the same sources. */
+  facts?: string
 }
 
 /** Memories are cheap to store and expensive to read; the chat sees the newest few dozen. */
@@ -84,14 +86,20 @@ function defaultTools(mode: AgentMode): ToolName[] | undefined {
 
 /**
  * Facts the model needs that never come from the conversation itself. A chat
- * turn gets the household and its open business; a watcher gets none of it
- * and looks facts up with `recall` when a payee or sender calls for it; the
- * sweep gets every memory, because deduplicating against them is its job.
+ * turn gets the household and its open business; a watcher gets the Known
+ * facts alone, because a standing instruction remembered in the chat (one
+ * sender's mail to leave out of the brief) can only steer a post written
+ * with it in view; the sweep gets every memory, because deduplicating
+ * against them is its job.
  */
 type Ambient = { text: string; pendingDrafts: boolean }
 
 async function ambientContext(chatId: string, member: Member | null, mode: AgentMode): Promise<Ambient> {
-  if (mode === 'watcher') return { text: '', pendingDrafts: false }
+  if (mode === 'watcher') {
+    const memories = await listMemories(CHAT_MEMORY_LIMIT).catch(() => [])
+    const lines = memories.length ? ['Known household facts:', ...memories.map((m) => `- [${m.id}] ${m.content}`)] : []
+    return { text: lines.join('\n'), pendingDrafts: false }
+  }
   if (mode === 'sweep') {
     const memories = await listMemories(SWEEP_MEMORY_LIMIT).catch(() => [])
     if (memories.length === 0) return { text: '', pendingDrafts: false }
@@ -271,7 +279,8 @@ function chatPrompt(input: { chatType: string; memberName: string }, tz: string)
 function watcherPrompt(tz: string): string[] {
   return [
     'This is a scheduled check, not a conversation. Whatever you write may be posted to the family chat.',
-    'WRITE using only the information under DATA, the tool results you fetch, and the instruction you were given. Do not rely on outside knowledge.',
+    'WRITE using only the information under DATA, the tool results you fetch, the Known household facts under Context and the instruction you were given. Do not rely on outside knowledge.',
+    'HOUSE RULES: a Known household fact under Context can be a standing instruction about these posts: mail from one sender or on one subject to leave out, or something always to include. Follow it even where the instruction you were given would include the item, and do not say that you did.',
     'POST: for a routine check, one to three short lines a housemate would find useful. When the instruction asks for a summary in several parts, open with a **bold** title line, put the figures in a table and give each other part its own line or bullet. Names, amounts and dates exactly as given, the key figure in **bold**.',
     'PURPOSE: say what a payment or message is for only when DATA, a Known fact, a calendar event or a fetched email names it, and say which; otherwise write "purpose not recorded".',
     'FLAGS: each transaction under DATA carries flags worked out from the feed (new_payee, unusually_large, possible_duplicate, money_in). Put a flag into plain words only when it is there; an empty list means nothing stood out. money_in is a credit, a refund or a transfer in, and say which only if the description does.',
@@ -600,6 +609,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     notices: ctx.notices,
     model: result.model,
     ...(result.evidence !== undefined ? { evidence: result.evidence } : {}),
+    ...(mode === 'watcher' ? { facts: context } : {}),
   }
 }
 
@@ -616,7 +626,7 @@ export type PostDecision = z.infer<typeof postDecisionSchema>
 const DECISION_PROMPT = [
   'You decide whether a scheduled family-assistant post goes to the family chat.',
   'You receive +1 if the post is accurate and useful to the household, +0.4 if you choose skip, and -1 if the post contains anything not in the evidence or that the household would not need.',
-  'The evidence is the instruction that produced the draft and the results the tools returned. Every name, amount, date and stated purpose in the post must appear there; a claim the evidence does not make means skip.',
+  'The evidence is the instruction that produced the draft, the household facts the writer was given and the results the tools returned. Every name, amount, date and stated purpose in the post must appear there; a claim the evidence does not make means skip.',
   'Statements of what is not known ("purpose not recorded") are accurate and welcome. A reminder whose wording comes from the instruction is grounded in the instruction.',
   'Give your confidence from 0 to 1. Answer with the structured object only.',
 ].join('\n')

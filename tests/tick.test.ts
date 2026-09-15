@@ -397,8 +397,11 @@ describe('the post decision', () => {
   })
   const authed = () => tick({ 'x-tick-secret': 'let-me-in' })
 
-  it('checks the draft against the instruction and the tool results', async () => {
-    runAgent.mockResolvedValue({ text: 'Bins out tonight.', notices: [], model: 'primary:test', evidence: 'recall({}) -> {"memories":[]}' })
+  it('checks the draft against the instruction, the facts the writer had and the tool results', async () => {
+    runAgent.mockResolvedValue({
+      text: 'Bins out tonight.', notices: [], model: 'primary:test',
+      evidence: 'recall({}) -> {"memories":[]}', facts: 'Known household facts:\n- [4] bin night is Monday',
+    })
     await authed()
     expect(decideWatcherPost).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -408,6 +411,7 @@ describe('the post decision', () => {
       }),
     )
     expect((decideWatcherPost.mock.calls[0][0] as { evidence: string }).evidence).toContain('recall({})')
+    expect((decideWatcherPost.mock.calls[0][0] as { evidence: string }).evidence).toContain('- [4] bin night is Monday')
     expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
   })
 

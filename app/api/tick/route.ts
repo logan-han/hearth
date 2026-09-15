@@ -230,6 +230,9 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
   }
 }
 
+/** The Known facts the writer had in view, so the checks judge the draft against the same sources. */
+const factsGiven = (r: AgentResult) => (r.facts ? `${r.facts}\n\n` : '')
+
 async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | undefined): Promise<void> {
   const now = new Date()
   const memberName = member?.name ?? 'the family'
@@ -258,7 +261,7 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
     history: false,
     text: `Scheduled check "${a.label}".\n\n${instruction}\n\nDATA (fetched just now):\n${data}`,
   })
-  await deliver(a, member, result, `INSTRUCTION:\n${instruction}\n\nDATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`)
+  await deliver(a, member, result, `INSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`)
 }
 
 /** A member's own scheduled instruction: the model decides what to fetch, with read-only tools. */
@@ -276,7 +279,7 @@ async function runCustom(a: Automation, member: Member | undefined): Promise<voi
       'If a tool fails or errors, never post the failure to the chat: write PROBLEM: followed by a one-line diagnosis, then SKIP on its own line. That, and only that, reaches the admins privately. ' +
       'Reply with the post alone: no preamble, no planning notes, no handover line such as "now the post:", no commentary about what the tools returned.',
   })
-  await deliver(a, member, result, `INSTRUCTION:\n${a.instruction}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`)
+  await deliver(a, member, result, `INSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`)
 }
 
 /**
