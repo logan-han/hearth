@@ -5,7 +5,8 @@ import {
 } from '../db/queries'
 import { localToUtc, formatLocal, localDateKey } from '../cron'
 import { timezone } from '../env'
-import type { ToolContext } from './context'
+import { announce, type ToolContext } from './context'
+import { FEED_LAG } from './familycal'
 
 const LOCAL_DATETIME = z
   .string()
@@ -166,8 +167,12 @@ export function proposalTools(ctx: ToolContext) {
           allDay: row.allDay,
           createdBy: ctx.member?.id ?? null,
         })
-        ctx.notices.push(`Added to the family calendar: **${row.title}** — ${formatLocal(row.startsAt)}`)
-        return { added: true, event_id: event.id, title: row.title }
+        return {
+          added: true,
+          event_id: event.id,
+          title: row.title,
+          ...announce(ctx, `Added to the family calendar: **${row.title}** — ${formatLocal(row.startsAt)}`, FEED_LAG),
+        }
       },
     }),
 

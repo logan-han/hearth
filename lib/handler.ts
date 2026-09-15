@@ -28,6 +28,7 @@ import { flushTelemetry } from './telemetry'
 import { maybeSummarise } from './summary'
 import type { Member } from './db/schema'
 import { describeError } from './errors'
+import { unsaid } from './notices'
 
 /**
  * Authorisation is per person, never per room. `ALLOWED_TELEGRAM_IDS` seeds the
@@ -553,7 +554,7 @@ export async function processUpdate(update: Update): Promise<void> {
       attachments: c.attachments,
     })
 
-    const reply = [result.text, ...result.notices.filter((n) => !result.text.includes(n))]
+    const reply = [result.text, ...unsaid(result.text, result.notices)]
       .filter(Boolean)
       .join('\n\n')
       .trim()

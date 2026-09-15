@@ -341,6 +341,16 @@ describe('agent failures', () => {
     expect(lastSent()).toBe('Added Soccer to the calendar')
   })
 
+  it('posts one confirmation when the reply restates a notice in its own words', async () => {
+    runAgent.mockResolvedValueOnce({
+      text: 'Added to the family calendar: Home cleaner on Monday, 5 October 2026 from 1:00 pm to 4:00 pm.',
+      notices: ['Added to the family calendar: **Home cleaner** — Mon, 5 Oct 2026, 1:00 pm'],
+      model: 'g',
+    })
+    await processUpdate(dm('the cleaner is coming monday 1 to 4'))
+    expect(lastSent()).toBe('Added to the family calendar: Home cleaner on Monday, 5 October 2026 from 1:00 pm to 4:00 pm.')
+  })
+
   it('stays silent when there is nothing at all to say', async () => {
     runAgent.mockResolvedValueOnce({ text: '', notices: [], model: 'g' })
     await processUpdate(dm('hmm'))

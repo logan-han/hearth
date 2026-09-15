@@ -5,7 +5,7 @@ import {
 } from '../db/queries'
 import { localToUtc, formatLocal, formatLocalDate } from '../cron'
 import { timezone, appUrl } from '../env'
-import type { ToolContext } from './context'
+import { announce, type ToolContext } from './context'
 
 const LOCAL_DATETIME = z
   .string()
@@ -57,7 +57,7 @@ async function findClash(title: string, startsAt: Date, endsAt: Date, ignoreId?:
   )
 }
 
-const FEED_NOTE = 'Subscribed calendars may take a few hours to show this; it has been announced in the chat.'
+export const FEED_LAG = 'Subscribed calendars may take a few hours to show this.'
 
 export function familyCalendarTools(ctx: ToolContext) {
   return {
@@ -99,15 +99,14 @@ export function familyCalendarTools(ctx: ToolContext) {
           allDay,
           createdBy: ctx.member?.id ?? null,
         })
-        // Subscribed clients can take hours to re-poll an ICS feed, so the bot
-        // announces the event in chat too.
-        ctx.notices.push(`Added to the family calendar: **${title}** — ${whenLabel(startsAt, allDay)}`)
         return {
           id: event.id,
           title: event.title,
           start_local: formatLocal(startsAt),
           all_day: allDay,
-          note: FEED_NOTE,
+          // Subscribed clients can take hours to re-poll an ICS feed, so the bot
+          // announces the event in chat too.
+          ...announce(ctx, `Added to the family calendar: **${title}** — ${whenLabel(startsAt, allDay)}`, FEED_LAG),
         }
       },
     }),
@@ -166,17 +165,18 @@ export function familyCalendarTools(ctx: ToolContext) {
         const row = await updateFamilyEvent(id, patch)
         if (!row) return { error: `No live family event ${id}.` }
         const changed = Object.keys(patch).map((k) => (k === 'startsAt' ? 'start' : k === 'endsAt' ? 'end' : k === 'allDay' ? 'all-day' : k))
-        ctx.notices.push(
-          `Updated on the family calendar: **${row.title}** — ${whenLabel(row.startsAt, row.allDay)}` +
-            (existing.title !== row.title ? ` (was "${existing.title}")` : ''),
-        )
         return {
           id: row.id,
           title: row.title,
           start_local: formatLocal(row.startsAt),
           all_day: row.allDay,
           changed,
-          note: 'Subscribed calendars pick the change up on their next refresh, which can take hours; it has been announced in the chat.',
+          ...announce(
+            ctx,
+            `Updated on the family calendar: **${row.title}** — ${whenLabel(row.startsAt, row.allDay)}` +
+              (existing.title !== row.title ? ` (was "${existing.title}")` : ''),
+            'Subscribed calendars pick the change up on their next refresh, which can take hours.',
+          ),
         }
       },
     }),
@@ -231,21 +231,19 @@ export function familyCalendarTools(ctx: ToolContext) {
             added.push({ id: row.id, title: e.title, when: whenLabel(e.startsAt, e.allDay) })
           }
         }
-        if (added.length) {
-          const names = files.map((f) => f.filename).join(', ')
-          ctx.notices.push(
-            `Added to the family calendar from ${names}:\n${added.map((a) => `· **${a.title}** — ${a.when}`).join('\n')}`,
-          )
-        }
+        const names = files.map((f) => f.filename).join(', ')
         return {
           added,
           already_on_calendar: alreadyThere,
           repeating_not_added: repeating,
           unreadable_or_cancelled: leftOut,
-          note:
-            added.length > 0
-              ? FEED_NOTE
-              : 'Nothing was added. Say so, and say why: already on the calendar, repeating, or nothing matched.',
+          ...(added.length > 0
+            ? announce(
+                ctx,
+                `Added to the family calendar from ${names}:\n${added.map((a) => `· **${a.title}** — ${a.when}`).join('\n')}`,
+                FEED_LAG,
+              )
+            : { note: 'Nothing was added. Say so, and say why: already on the calendar, repeating, or nothing matched.' }),
         }
       },
     }),
@@ -284,8 +282,15 @@ export function familyCalendarTools(ctx: ToolContext) {
       execute: async ({ id }) => {
         const row = await cancelFamilyEvent(id)
         if (!row) return { error: `No family event ${id}.` }
-        ctx.notices.push(`Cancelled on the family calendar: **${row.title}**`)
-        return { cancelled: true, title: row.title }
+        return {
+          cancelled: true,
+          title: row.title,
+          ...announce(
+            ctx,
+            `Cancelled on the family calendar: **${row.title}**`,
+            'Subscribed calendars can keep showing it until their next refresh, which can take hours.',
+          ),
+        }
       },
     }),
 

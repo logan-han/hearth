@@ -2,7 +2,7 @@ import { tool } from 'ai'
 import { z } from 'zod'
 import * as jira from '../providers/jira'
 import { localDateKey } from '../cron'
-import type { ToolContext } from './context'
+import { announce, type ToolContext } from './context'
 import { describeError } from '../errors'
 
 const NOT_CONFIGURED = 'Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).'
@@ -116,8 +116,7 @@ export function jiraTools(ctx: ToolContext) {
           const made = await jira.createIssue({
             projectKey: defaultProject(), summary, description, dueDate: due_date, issueType: issue_type,
           })
-          ctx.notices.push(`Added to the board: **${made.key}** ${summary}`)
-          return { ...made, summary, due: due_date ?? null }
+          return { ...made, summary, due: due_date ?? null, ...announce(ctx, `Added to the board: **${made.key}** ${summary}`) }
         } catch (e) {
           return { error: describeError(e) }
         }

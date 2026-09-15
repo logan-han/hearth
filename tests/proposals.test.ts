@@ -115,6 +115,8 @@ describe('accepting and rejecting', () => {
     expect(r.added).toBe(true)
     expect(addFamilyEvent).toHaveBeenCalledWith(expect.objectContaining({ title: 'School photo day' }))
     expect(ctx.notices.join(' ')).toContain('School photo day')
+    expect(r.posted).toBe(ctx.notices[0])
+    expect(r.note).toMatch(/do not say the same thing again.*few hours/i)
   })
 
   it('cannot add the same proposal twice', async () => {

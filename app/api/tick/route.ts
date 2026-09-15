@@ -20,6 +20,7 @@ import { pruneModelEvents } from '@/lib/model-events'
 import { parseLog, prune, underCap, recordPost, shouldWarn, markWarned, PROACTIVE_POSTS_PER_HOUR } from '@/lib/rate-cap'
 import type { Automation, Member } from '@/lib/db/schema'
 import { describeError } from '@/lib/errors'
+import { unsaid } from '@/lib/notices'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
@@ -368,7 +369,7 @@ async function deliver(a: Automation, member: Member | undefined, result: AgentR
     const approved = await approve(a, member, draft.rest, evidence)
     if (approved) parts.push(approved)
   }
-  parts.push(...notices.filter((n) => !parts.some((p) => p.includes(n))))
+  parts.push(...unsaid(parts.join('\n\n'), notices))
 
   const message = parts.join('\n\n').trim()
   if (!message) return

@@ -19,3 +19,18 @@ export function requireMember(ctx: ToolContext): Member {
   }
   return ctx.member
 }
+
+/**
+ * Post a line in the chat on the tool's behalf, and say so in the tool result.
+ * The line goes out under the model's reply whatever the model writes, so the
+ * result asks the model to add only what the line does not already say. A
+ * model that restates it anyway is caught on the way out; see lib/notices.ts.
+ */
+export function announce(ctx: ToolContext, line: string, also?: string): { posted: string; note: string } {
+  ctx.notices.push(line)
+  return { posted: line, note: also ? `${POSTED} ${also}` : POSTED }
+}
+
+const POSTED =
+  'Hearth posts the `posted` line in the chat itself, straight after your reply. ' +
+  'Do not say the same thing again in other words: reply with only whatever else is worth saying, or with nothing at all.'
