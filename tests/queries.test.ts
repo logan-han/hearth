@@ -1,0 +1,560 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import type { PGlite } from '@electric-sql/pglite'
+import { freshDb, closeDb } from './helpers/db'
+import * as q from '@/lib/db/queries'
+
+let client: PGlite
+
+beforeEach(async () => {
+  process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
+  const { resetKeyCache } = await import('@/lib/crypto')
+  resetKeyCache()
+  client = (await freshDb()).client
+})
+afterEach(async () => closeDb(client))
+
+describe('members', () => {
+  it('creates on first sight and refreshes the name after', async () => {
+    const first = await q.upsertMember('111', 'Rowan')
+    const second = await q.upsertMember('111', 'Rowan Hale')
+    expect(second.id).toBe(first.id)
+    expect(second.name).toBe('Rowan Hale')
+  })
+
+  it('only ever raises privileges, never lowers them', async () => {
+    await q.upsertMember('111', 'Rowan', { allowed: true, isAdmin: true })
+    const plain = await q.upsertMember('111', 'Rowan')
+    expect(plain.allowed).toBe(true)
+    expect(plain.isAdmin).toBe(true)
+  })
+
+  it('starts a new member with no access at all', async () => {
+    const m = await q.upsertMember('222', 'Guest')
+    expect(m.allowed).toBe(false)
+    expect(m.isAdmin).toBe(false)
+  })
+
+  it('revoking access also drops admin', async () => {
+    await q.upsertMember('111', 'Rowan', { allowed: true, isAdmin: true })
+    const revoked = await q.setMemberAllowed('111', false)
+    expect(revoked?.allowed).toBe(false)
+    expect(revoked?.isAdmin).toBe(false)
+  })
+
+  it('lists only allowed members', async () => {
+    await q.upsertMember('111', 'Rowan', { allowed: true })
+    await q.upsertMember('222', 'Guest')
+    expect((await q.allowedMembers()).map((m) => m.name)).toEqual(['Rowan'])
+  })
+
+  it('returns undefined for someone unknown', async () => {
+    expect(await q.memberByTelegramId('nope')).toBeUndefined()
+  })
+})
+
+describe('chats and strangers', () => {
+  beforeEach(async () => q.rememberChat('-100', 'group', 'Family'))
+
+  it('records a stranger once', async () => {
+    expect(await q.noteStranger('-100', { id: '9', name: 'Guest' })).toBe(true)
+    expect(await q.noteStranger('-100', { id: '9', name: 'Guest' })).toBe(false)
+    expect(await q.strangersIn('-100')).toHaveLength(1)
+  })
+
+  it('accumulates several and clears them individually', async () => {
+    await q.noteStranger('-100', { id: '9', name: 'A' })
+    await q.noteStranger('-100', { id: '8', name: 'B' })
+    await q.clearStranger('-100', '9')
+    expect((await q.strangersIn('-100')).map((s) => s.id)).toEqual(['8'])
+  })
+
+  it('is empty for a room never seen', async () => {
+    expect(await q.strangersIn('-999')).toEqual([])
+  })
+
+  it('updates the title without losing strangers', async () => {
+    await q.noteStranger('-100', { id: '9', name: 'A' })
+    await q.rememberChat('-100', 'group', 'Renamed')
+    expect(await q.strangersIn('-100')).toHaveLength(1)
+  })
+})
+
+describe('messages', () => {
+  it('excludes the message being answered from its own history', async () => {
+    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
+    await q.recordMessage({ chatId: 'c', memberId: m.id, authorName: 'Rowan', role: 'user', content: 'first' })
+    const id = await q.recordMessage({ chatId: 'c', memberId: m.id, authorName: 'Rowan', role: 'user', content: 'second' })
+    const history = await q.recentMessages('c', 30, id)
+    expect(history.map((h) => h.content)).toEqual(['first'])
+  })
+
+  it('returns oldest first', async () => {
+    for (const t of ['a', 'b', 'c']) {
+      await q.recordMessage({ chatId: 'c', role: 'user', content: t })
+    }
+    expect((await q.recentMessages('c')).map((m) => m.content)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('truncates very long content rather than failing', async () => {
+    const id = await q.recordMessage({ chatId: 'c', role: 'user', content: 'x'.repeat(20000) })
+    expect(id).toBeGreaterThan(0)
+    expect((await q.recentMessages('c'))[0].content).toHaveLength(8000)
+  })
+
+  it('prunes down to the most recent N', async () => {
+    for (let i = 0; i < 12; i++) {
+      await q.recordMessage({ chatId: 'c', role: 'user', content: `m${i}` })
+    }
+    await q.pruneMessages('c', 5)
+    const left = await q.recentMessages('c', 50)
+    expect(left).toHaveLength(5)
+    expect(left.map((m) => m.content)).toEqual(['m7', 'm8', 'm9', 'm10', 'm11'])
+  })
+
+  it('prunes one chat without touching another', async () => {
+    for (let i = 0; i < 4; i++) await q.recordMessage({ chatId: 'a', role: 'user', content: `${i}` })
+    await q.recordMessage({ chatId: 'b', role: 'user', content: 'keep' })
+    await q.pruneMessages('a', 1)
+    expect(await q.recentMessages('b')).toHaveLength(1)
+  })
+})
+
+describe('connections', () => {
+  it('encrypts the refresh token at rest and decrypts it back', async () => {
+    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
+    await q.saveConnection({ memberId: m.id, provider: 'google', email: 'a@b.com', refreshToken: 'r3fr3sh', scopes: 's' })
+    const conn = await q.connectionFor(m.id, 'google')
+    expect(conn!.refreshToken).not.toContain('r3fr3sh')
+    expect(await q.decryptRefreshToken(conn!)).toBe('r3fr3sh')
+  })
+
+  it('replaces the token when the same provider is relinked', async () => {
+    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
+    await q.saveConnection({ memberId: m.id, provider: 'google', email: 'a@b.com', refreshToken: 'old', scopes: null })
+    await q.saveConnection({ memberId: m.id, provider: 'google', email: 'a@b.com', refreshToken: 'new', scopes: null })
+    expect(await q.connectionsFor(m.id)).toHaveLength(1)
+    expect(await q.decryptRefreshToken((await q.connectionFor(m.id, 'google'))!)).toBe('new')
+  })
+
+  it('keeps the two providers separate', async () => {
+    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
+    await q.saveConnection({ memberId: m.id, provider: 'google', email: null, refreshToken: 'g', scopes: null })
+    await q.saveConnection({ memberId: m.id, provider: 'microsoft', email: null, refreshToken: 'm', scopes: null })
+    expect(await q.connectionsFor(m.id)).toHaveLength(2)
+    await q.deleteConnection(m.id, 'google')
+    expect((await q.connectionsFor(m.id)).map((c) => c.provider)).toEqual(['microsoft'])
+  })
+
+  it('disappears with the member', async () => {
+    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
+    await q.saveConnection({ memberId: m.id, provider: 'google', email: null, refreshToken: 'g', scopes: null })
+    const { db } = await import('@/lib/db')
+    const { sql } = await import('drizzle-orm')
+    await db().execute(sql`delete from members where id = ${m.id}`)
+    expect(await q.connectionsFor(m.id)).toHaveLength(0)
+  })
+})
+
+describe('family events and the ICS feed', () => {
+  const at = (iso: string) => new Date(iso)
+
+  it('gives every event a unique uid', async () => {
+    const a = await q.addFamilyEvent({ title: 'A', startsAt: at('2026-09-01T00:00:00Z'), endsAt: at('2026-09-01T01:00:00Z') })
+    const b = await q.addFamilyEvent({ title: 'B', startsAt: at('2026-09-01T00:00:00Z'), endsAt: at('2026-09-01T01:00:00Z') })
+    expect(a.uid).not.toBe(b.uid)
+    expect(a.uid).toMatch(/@hearth$/)
+  })
+
+  it('lists a window by start time, in order', async () => {
+    await q.addFamilyEvent({ title: 'later', startsAt: at('2026-09-10T00:00:00Z'), endsAt: at('2026-09-10T01:00:00Z') })
+    await q.addFamilyEvent({ title: 'sooner', startsAt: at('2026-09-02T00:00:00Z'), endsAt: at('2026-09-02T01:00:00Z') })
+    const rows = await q.listFamilyEvents(at('2026-09-01T00:00:00Z'), at('2026-09-30T00:00:00Z'))
+    expect(rows.map((r) => r.title)).toEqual(['sooner', 'later'])
+  })
+
+  it('excludes events outside the window', async () => {
+    await q.addFamilyEvent({ title: 'old', startsAt: at('2025-01-01T00:00:00Z'), endsAt: at('2025-01-01T01:00:00Z') })
+    expect(await q.listFamilyEvents(at('2026-01-01T00:00:00Z'), at('2026-12-31T00:00:00Z'))).toHaveLength(0)
+  })
+
+  it('drops cancelled events from the feed, since subscribers mirror what they see', async () => {
+    // Outlook renders a STATUS:CANCELLED event rather than hiding it; clients
+    // reliably remove an event only when it stops appearing in the feed.
+    const keep = await q.addFamilyEvent({ title: 'Stays', startsAt: at('2026-09-01T00:00:00Z'), endsAt: at('2026-09-01T01:00:00Z') })
+    const gone = await q.addFamilyEvent({ title: 'Gone', startsAt: at('2026-09-02T00:00:00Z'), endsAt: at('2026-09-02T01:00:00Z') })
+    await q.cancelFamilyEvent(gone.id)
+    const feed = await q.allFamilyEventsForFeed(at('2026-01-01T00:00:00Z'))
+    expect(feed.map((e) => e.id)).toEqual([keep.id])
+  })
+
+  it('drops events that finished before the feed window', async () => {
+    await q.addFamilyEvent({ title: 'ancient', startsAt: at('2020-01-01T00:00:00Z'), endsAt: at('2020-01-01T01:00:00Z') })
+    expect(await q.allFamilyEventsForFeed(at('2026-01-01T00:00:00Z'))).toHaveLength(0)
+  })
+
+  it('reports nothing for a cancel of an unknown id', async () => {
+    expect(await q.cancelFamilyEvent(999)).toBeUndefined()
+  })
+
+  it('updates an event in place, keeping its uid and moving updated_at so the feed bumps SEQUENCE', async () => {
+    const e = await q.addFamilyEvent({ title: 'Vacation care', startsAt: at('2026-09-29T14:00:00Z'), endsAt: at('2026-09-30T14:00:00Z'), allDay: true })
+    await new Promise((r) => setTimeout(r, 5))
+    const row = (await q.updateFamilyEvent(e.id, { title: 'Scouts Cuboree' }))!
+    expect(row.uid).toBe(e.uid)
+    expect(row.title).toBe('Scouts Cuboree')
+    expect(row.startsAt.getTime()).toBe(e.startsAt.getTime())
+    expect(row.updatedAt.getTime()).toBeGreaterThan(e.updatedAt.getTime())
+    expect((await q.getFamilyEvent(e.id))!.title).toBe('Scouts Cuboree')
+  })
+
+  it('will not update a cancelled event, which subscribers no longer see', async () => {
+    const e = await q.addFamilyEvent({ title: 'Gone', startsAt: at('2026-09-01T00:00:00Z'), endsAt: at('2026-09-01T01:00:00Z') })
+    await q.cancelFamilyEvent(e.id)
+    expect(await q.updateFamilyEvent(e.id, { title: 'Back?' })).toBeUndefined()
+    expect(await q.getFamilyEvent(999)).toBeUndefined()
+  })
+})
+
+describe('memories', () => {
+  it('stores, lists newest first, and forgets', async () => {
+    const a = await q.addMemory('bin night is Monday')
+    await q.addMemory('milk allergy')
+    const rows = await q.listMemories()
+    expect(rows.map((r) => r.content)).toEqual(['milk allergy', 'bin night is Monday'])
+    await q.deleteMemory(a.id)
+    expect(await q.listMemories()).toHaveLength(1)
+  })
+
+  it('keeps a forgotten fact as history rather than deleting the row', async () => {
+    const a = await q.addMemory('bin night is Monday')
+    await q.deleteMemory(a.id)
+    const { db, schema } = await import('@/lib/db')
+    const [row] = await db().select().from(schema.memories)
+    expect(row.id).toBe(a.id)
+    expect(row.invalidatedAt).not.toBeNull()
+    expect(row.supersededBy).toBeNull()
+  })
+
+  it('supersedes the old fact in the same step as storing the correction', async () => {
+    const old = await q.addMemory('bin night is Tuesday')
+    const fresh = await q.addMemory('bin night is Monday', null, old.id)
+    expect((await q.listMemories()).map((m) => m.id)).toEqual([fresh.id])
+    const { db, schema } = await import('@/lib/db')
+    const rows = await db().select().from(schema.memories)
+    expect(rows.find((r) => r.id === old.id)?.supersededBy).toBe(fresh.id)
+  })
+})
+
+describe('memory questions', () => {
+  it('asks once, lists open and unasked, marks asked, and settles claim-first', async () => {
+    const first = await q.askQuestion({ question: 'Who attends Hillside Grammar?', candidate: 'Juno attends Hillside Grammar' })
+    const again = await q.askQuestion({ question: 'who attends hillside grammar?', candidate: 'someone else' })
+    expect(first.fresh).toBe(true)
+    expect(again.fresh).toBe(false)
+    expect(again.row.id).toBe(first.row.id)
+    const second = await q.askQuestion({ question: 'Whose uniform is the order for?', candidate: 'Ada attends Riverbend Primary' })
+    expect((await q.openQuestions()).map((r) => r.id)).toEqual([first.row.id, second.row.id])
+
+    await q.markQuestionsAsked([first.row.id])
+    await q.markQuestionsAsked([])
+    expect((await q.unaskedQuestions()).map((r) => r.id)).toEqual([second.row.id])
+
+    const yes = await q.answerQuestion(first.row.id, 'Juno attends Hillside Grammar', null)
+    expect(yes!.memory!.content).toBe('Juno attends Hillside Grammar')
+    expect(yes!.question.outcome).toBe('confirmed')
+    expect(yes!.question.memoryId).toBe(yes!.memory!.id)
+    expect(await q.answerQuestion(first.row.id, 'Juno attends Hillside Grammar', null)).toBeUndefined()
+
+    const no = await q.answerQuestion(second.row.id, null)
+    expect(no!.memory).toBeNull()
+    expect(no!.question.outcome).toBe('dismissed')
+    expect(await q.openQuestions()).toHaveLength(0)
+    expect((await q.listMemories()).map((m) => m.content)).toEqual(['Juno attends Hillside Grammar'])
+  })
+
+  it('points a yes at a fact already known in other words rather than filing it twice', async () => {
+    const known = await q.addMemory('Juno attends Hillside Grammar')
+    const { row } = await q.askQuestion({ question: 'Who attends Hillside Grammar?', candidate: 'Juno attends Hillside Grammar' })
+    const yes = await q.answerQuestion(row.id, 'Juno attends Hillside Grammar by the way', null)
+    expect(yes!.memory!.id).toBe(known.id)
+    expect(await q.listMemories()).toHaveLength(1)
+  })
+})
+
+describe('chat summaries', () => {
+  it('starts empty and remembers what it has covered', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    expect(await q.chatSummary('-100')).toEqual({ summary: null, through: 0 })
+    await q.setChatSummary('-100', 'Talked about bins.', 42)
+    expect(await q.chatSummary('-100')).toEqual({ summary: 'Talked about bins.', through: 42 })
+  })
+
+  it('lists messages after an id, oldest first', async () => {
+    const a = await q.recordMessage({ chatId: '-100', authorName: 'Rowan', role: 'user', content: 'one' })
+    await q.recordMessage({ chatId: '-100', authorName: 'Rowan', role: 'user', content: 'two' })
+    await q.recordMessage({ chatId: '-200', authorName: 'Rowan', role: 'user', content: 'elsewhere' })
+    expect((await q.messagesAfter('-100', a)).map((m) => m.content)).toEqual(['two'])
+    expect((await q.messagesAfter('-100', 0)).map((m) => m.content)).toEqual(['one', 'two'])
+  })
+})
+
+describe('automations', () => {
+  const soon = new Date('2026-09-01T00:00:00Z')
+
+  const make = () =>
+    q.addAutomation({ chatId: 'c', label: 'bins', cronExpr: '0 19 * * 1', instruction: 'remind', nextRunAt: soon })
+
+  it('is due once its time has passed', async () => {
+    await make()
+    expect(await q.dueAutomations(new Date('2026-09-02T00:00:00Z'))).toHaveLength(1)
+    expect(await q.dueAutomations(new Date('2026-08-01T00:00:00Z'))).toHaveLength(0)
+  })
+
+  it('claims exactly once, so two ticks cannot double-run it', async () => {
+    const a = await make()
+    const next = new Date('2026-09-08T00:00:00Z')
+    expect(await q.claimAutomation(a.id, soon, next)).toBe(true)
+    expect(await q.claimAutomation(a.id, soon, next)).toBe(false)
+  })
+
+  it('disables itself when there is no next run', async () => {
+    const a = await make()
+    await q.claimAutomation(a.id, soon, null)
+    expect((await q.getAutomation(a.id))!.enabled).toBe(false)
+  })
+
+  it('skips disabled automations even when overdue', async () => {
+    const a = await make()
+    await q.setAutomationEnabled(a.id, false)
+    expect(await q.dueAutomations(new Date('2026-12-01T00:00:00Z'))).toHaveLength(0)
+  })
+
+  it('resuming can reset the next run', async () => {
+    const a = await make()
+    await q.setAutomationEnabled(a.id, false)
+    const later = new Date('2027-01-01T00:00:00Z')
+    const row = await q.setAutomationEnabled(a.id, true, later)
+    expect(row!.enabled).toBe(true)
+    expect(row!.nextRunAt.toISOString()).toBe(later.toISOString())
+  })
+
+  it('lists per chat and deletes', async () => {
+    const a = await make()
+    await q.addAutomation({ chatId: 'other', label: 'x', cronExpr: '0 8 * * *', instruction: 'i', nextRunAt: soon })
+    expect(await q.listAutomations('c')).toHaveLength(1)
+    expect(await q.listAutomations()).toHaveLength(2)
+    expect(await q.deleteAutomation(a.id)).toBe(true)
+    expect(await q.deleteAutomation(a.id)).toBe(false)
+  })
+})
+
+describe('email drafts', () => {
+  const draft = async () => {
+    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
+    return q.createDraft({ chatId: 'c', memberId: m.id, provider: 'google', to: ['a@b.com'], subject: 's', body: 'b' })
+  }
+
+  it('joins recipients and starts pending', async () => {
+    const d = await draft()
+    expect(d.recipients).toBe('a@b.com')
+    expect(d.status).toBe('pending')
+  })
+
+  it('can only be sent once', async () => {
+    const d = await draft()
+    expect(await q.markDraft(d.id, 'sent')).toBe(true)
+    expect(await q.markDraft(d.id, 'sent')).toBe(false)
+  })
+
+  it('can be handed back to pending after a failed send', async () => {
+    const d = await draft()
+    await q.markDraft(d.id, 'sent')
+    expect(await q.markDraft(d.id, 'pending', 'sent')).toBe(true)
+    expect((await q.getDraft(d.id))!.status).toBe('pending')
+  })
+
+  it('lists only pending ones for the chat', async () => {
+    const d = await draft()
+    await draft()
+    await q.markDraft(d.id, 'cancelled')
+    expect(await q.pendingDrafts('c')).toHaveLength(1)
+  })
+})
+
+describe('shared lists', () => {
+  it('creates on first use and matches case-insensitively', async () => {
+    const a = await q.findOrCreateList('Shopping')
+    const b = await q.findOrCreateList('  shopping ')
+    expect(b.id).toBe(a.id)
+    expect(await q.findList('SHOPPING')).toBeDefined()
+  })
+
+  it('ticks off by substring and counts what is open', async () => {
+    const l = await q.findOrCreateList('shopping')
+    await q.addListItems(l.id, ['2L milk', 'eggs'])
+    const done = await q.markListItems(l.id, ['milk'], true)
+    expect(done.map((d) => d.content)).toEqual(['2L milk'])
+    expect((await q.listContents(l.id)).filter((i) => !i.done)).toHaveLength(1)
+  })
+
+  it('sorts open items ahead of done ones', async () => {
+    const l = await q.findOrCreateList('shopping')
+    await q.addListItems(l.id, ['a', 'b'])
+    await q.markListItems(l.id, ['a'], true)
+    expect((await q.listContents(l.id)).map((i) => i.content)).toEqual(['b', 'a'])
+  })
+
+  it('clears only ticked items by default', async () => {
+    const l = await q.findOrCreateList('shopping')
+    await q.addListItems(l.id, ['a', 'b'])
+    await q.markListItems(l.id, ['a'], true)
+    expect(await q.clearList(l.id, true)).toHaveLength(1)
+    expect(await q.listContents(l.id)).toHaveLength(1)
+    expect(await q.clearList(l.id, false)).toHaveLength(1)
+  })
+
+  it('removes named ids and reports open counts per list', async () => {
+    const l = await q.findOrCreateList('shopping')
+    const [first] = await q.addListItems(l.id, ['a', 'b'])
+    expect(await q.removeListItems(l.id, [first.id])).toHaveLength(1)
+    expect(await q.allLists()).toEqual([{ name: 'shopping', open: 1 }])
+  })
+
+  it('counts an empty list as zero rather than omitting it', async () => {
+    await q.findOrCreateList('packing')
+    expect(await q.allLists()).toEqual([{ name: 'packing', open: 0 }])
+  })
+
+  it('adding nothing is a no-op', async () => {
+    const l = await q.findOrCreateList('shopping')
+    expect(await q.addListItems(l.id, [])).toEqual([])
+    expect(await q.removeListItems(l.id, [])).toEqual([])
+  })
+})
+
+describe('event proposals', () => {
+  // Far enough ahead that these stay in the future for the life of the test.
+  const make = (source?: string) =>
+    q.addProposal({
+      chatId: 'c', title: 'Photo day',
+      startsAt: new Date('2030-09-09T23:00:00Z'), endsAt: new Date('2030-09-10T00:00:00Z'),
+      source: source ?? null,
+    })
+
+  it('finds an existing proposal by source', async () => {
+    await make('google:abc')
+    expect((await q.proposalForSource('google:abc'))!.title).toBe('Photo day')
+    expect(await q.proposalForSource('google:other')).toBeUndefined()
+  })
+
+  it('refuses a duplicate source at the database level', async () => {
+    await make('google:abc')
+    await expect(make('google:abc')).rejects.toThrow()
+  })
+
+  it('allows many proposals with no source', async () => {
+    await make()
+    await make()
+    expect(await q.pendingProposals('c')).toHaveLength(2)
+  })
+
+  it('settles exactly once', async () => {
+    const p = await make('s1')
+    expect(await q.settleProposal(p.id, 'accepted')).toBeDefined()
+    expect(await q.settleProposal(p.id, 'accepted')).toBeUndefined()
+  })
+
+  it('drops out of the pending list once settled', async () => {
+    const p = await make('s1')
+    await q.settleProposal(p.id, 'rejected')
+    expect(await q.pendingProposals('c')).toHaveLength(0)
+  })
+
+  it('hides a proposal whose occasion has passed, before anything has retired it', async () => {
+    const past = await q.addProposal({
+      chatId: 'c', title: 'Pharmacist call',
+      startsAt: new Date('2030-08-31T14:00:00Z'), endsAt: new Date('2030-09-01T14:00:00Z'), allDay: true,
+    })
+    const future = await make('later')
+    expect((await q.pendingProposals('c', new Date('2030-08-01T00:00:00Z'))).map((p) => p.id)).toEqual([past.id, future.id])
+    expect((await q.pendingProposals('c', new Date('2030-09-05T00:00:00Z'))).map((p) => p.id)).toEqual([future.id])
+    // The row itself is still pending until the tick retires it.
+    expect((await q.proposalForSource('later'))!.status).toBe('pending')
+  })
+
+  it('hides a proposal once the same occasion is on the calendar by another route', async () => {
+    const p = await make('s1')
+    expect(await q.pendingProposals('c', new Date('2030-01-01T00:00:00Z'))).toHaveLength(1)
+    const e = await q.addFamilyEvent({ title: ' photo DAY ', startsAt: p.startsAt, endsAt: p.endsAt })
+    expect(await q.pendingProposals('c', new Date('2030-01-01T00:00:00Z'))).toHaveLength(0)
+    // A cancelled event does not count as already there.
+    await q.cancelFamilyEvent(e.id)
+    expect(await q.pendingProposals('c', new Date('2030-01-01T00:00:00Z'))).toHaveLength(1)
+    // A different occasion on the same day is not the same one.
+    await q.addFamilyEvent({ title: 'Photo day', startsAt: new Date(p.startsAt.getTime() + 3_600_000), endsAt: p.endsAt })
+    expect(await q.pendingProposals('c', new Date('2030-01-01T00:00:00Z'))).toHaveLength(1)
+  })
+
+  it('retires stale proposals with a status that says why, and leaves the live ones', async () => {
+    const past = await q.addProposal({
+      chatId: 'c', title: 'Pharmacist call',
+      startsAt: new Date('2030-08-31T14:00:00Z'), endsAt: new Date('2030-09-01T14:00:00Z'), allDay: true,
+    })
+    const covered = await make('covered')
+    await q.addFamilyEvent({ title: 'Photo day', startsAt: covered.startsAt, endsAt: covered.endsAt })
+    const live = await q.addProposal({
+      chatId: 'c', title: 'Concert',
+      startsAt: new Date('2030-10-01T09:00:00Z'), endsAt: new Date('2030-10-01T10:00:00Z'),
+    })
+    const answered = await q.addProposal({
+      chatId: 'c', title: 'Old but answered',
+      startsAt: new Date('2030-08-01T00:00:00Z'), endsAt: new Date('2030-08-01T01:00:00Z'),
+    })
+    await q.settleProposal(answered.id, 'accepted')
+
+    expect(await q.retireStaleProposals(new Date('2030-09-05T00:00:00Z'))).toEqual({ expired: 1, superseded: 1 })
+    expect((await q.pendingProposals('c', new Date('2030-09-05T00:00:00Z'))).map((p) => p.id)).toEqual([live.id])
+    expect((await q.proposalForSource('covered'))!.status).toBe('superseded')
+    // Retired is settled: a late yes finds nothing to accept.
+    expect(await q.settleProposal(past.id, 'accepted')).toBeUndefined()
+    // Nothing left to do on a second pass.
+    expect(await q.retireStaleProposals(new Date('2030-09-05T00:00:00Z'))).toEqual({ expired: 0, superseded: 0 })
+  })
+})
+
+describe('settings and the calendar token', () => {
+  it('round-trips a setting and overwrites it', async () => {
+    await q.setSetting('k', 'v1')
+    await q.setSetting('k', 'v2')
+    expect(await q.getSetting('k')).toBe('v2')
+    expect(await q.getSetting('missing')).toBeNull()
+  })
+
+  it('mints the calendar token once and keeps it', async () => {
+    const first = await q.calendarToken()
+    expect(first).toHaveLength(32)
+    expect(await q.calendarToken()).toBe(first)
+  })
+
+  it('keeps the previous tick beside the latest, so the cadence can be read off the pair', async () => {
+    const first = new Date('2026-09-14T09:00:01Z')
+    const second = new Date('2026-09-14T10:00:00Z')
+    await q.recordTick(first)
+    expect(await q.getSetting('last_tick_at')).toBe(first.toISOString())
+    expect(await q.getSetting('prev_tick_at')).toBeNull()
+    await q.recordTick(second)
+    expect(await q.getSetting('last_tick_at')).toBe(second.toISOString())
+    expect(await q.getSetting('prev_tick_at')).toBe(first.toISOString())
+  })
+})
+
+describe('the real driver', () => {
+  it('is constructed lazily from DATABASE_URL and memoised', async () => {
+    const { db, __setDb } = await import('@/lib/db')
+    __setDb(null)
+    process.env.DATABASE_URL = 'postgresql://user:pass@ep.example.neon.tech/hearth'
+    const first = db()
+    expect(first).toBeTruthy()
+    expect(db()).toBe(first)
+  })
+})
