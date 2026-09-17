@@ -1,0 +1,367 @@
+import { db } from './db'
+import { secrets } from './db/schema'
+import { encrypt, decrypt } from './crypto'
+import { formatLocal } from './cron'
+import { timezone } from './env'
+
+/**
+ * Settings an admin may change from the dashboard. Anything not on this list
+ * cannot be written, so a compromised session cannot repoint DATABASE_URL or
+ * rewrite TOKEN_ENC_KEY, which is what decrypts everything else here.
+ */
+export const MANAGED_KEYS = [
+  'TELEGRAM_BOT_TOKEN',
+  'TELEGRAM_WEBHOOK_SECRET',
+  'ALLOWED_TELEGRAM_IDS',
+  'LLM_ORDER',
+  'GEMINI_API_KEY',
+  'GEMINI_MODEL',
+  'OPENROUTER_API_KEY',
+  'OPENROUTER_MODEL',
+  'LLM_BASE_URL',
+  'LLM_API_KEY',
+  'LLM_MODEL',
+  'TAVILY_API_KEY',
+  'OPENWEATHER_API_KEY',
+  'UP_API_TOKEN',
+  'POCKETSMITH_DEVELOPER_KEY',
+  'NOTION_TOKEN',
+  'JIRA_BASE_URL',
+  'JIRA_EMAIL',
+  'JIRA_API_TOKEN',
+  'JIRA_PROJECT_KEY',
+  'QSTASH_CURRENT_SIGNING_KEY',
+  'QSTASH_NEXT_SIGNING_KEY',
+  'TICK_SECRET',
+  'AMBIENT_MODE',
+  'TIMEZONE',
+  'LANGUAGE',
+  'UNITS',
+] as const
+
+export type ManagedKey = (typeof MANAGED_KEYS)[number]
+
+/**
+ * Which settings are credentials, and so are never rendered back to the
+ * browser. Declared rather than inferred from the name: JIRA_PROJECT_KEY is a
+ * board code like HTL, and a name-matching rule hid it behind dots.
+ */
+const CREDENTIALS = new Set<string>([
+  'TELEGRAM_BOT_TOKEN',
+  'TELEGRAM_WEBHOOK_SECRET',
+  'GEMINI_API_KEY',
+  'OPENROUTER_API_KEY',
+  'LLM_API_KEY',
+  'TAVILY_API_KEY',
+  'OPENWEATHER_API_KEY',
+  'UP_API_TOKEN',
+  'POCKETSMITH_DEVELOPER_KEY',
+  'NOTION_TOKEN',
+  'JIRA_API_TOKEN',
+  'QSTASH_CURRENT_SIGNING_KEY',
+  'QSTASH_NEXT_SIGNING_KEY',
+  'TICK_SECRET',
+])
+
+export function isManaged(key: string): key is ManagedKey {
+  return (MANAGED_KEYS as readonly string[]).includes(key)
+}
+
+export function isSecretShaped(key: string): boolean {
+  return CREDENTIALS.has(key)
+}
+
+/**
+ * The `updated_by` a row carries when its value was taken from the
+ * deployment's environment rather than typed into the dashboard.
+ */
+export const FROM_ENVIRONMENT = 'environment'
+
+let hydrated: { at: number; done: Promise<void> } | null = null
+
+/** How long one instance may trust its copy before re-reading the store. */
+const HYDRATE_TTL_MS = 60_000
+
+/** Put a value where the rest of the code reads it. An empty value is an unset key. */
+function apply(key: string, value: string): void {
+  if (value) process.env[key] = value
+  else delete process.env[key]
+}
+
+/**
+ * Every managed setting has one home. The store owns a key from the moment it
+ * holds a row for it; a key the store has never seen is seeded from the
+ * deployment's environment, once, and owned from then on. So what is copied
+ * over process.env here is the store's value, and an env var changed after
+ * that is simply never read. Copying into process.env spares threading an
+ * async accessor through every `process.env.X` read in the codebase.
+ *
+ * Memoised with a short TTL rather than per cold start: under Fluid compute a
+ * warm instance can live for hours, and a memo-forever meant a key changed in
+ * the dashboard kept failing in instances that had already hydrated.
+ */
+export function hydrateSecrets(): Promise<void> {
+  if (!hydrated || Date.now() - hydrated.at > HYDRATE_TTL_MS) {
+    const done = (async () => {
+      try {
+        const stored = new Map((await db().select().from(secrets)).map((r) => [r.key, r]))
+        for (const key of MANAGED_KEYS) {
+          const row = stored.get(key)
+          // With no row, process.env still holds whatever the deployment set:
+          // nothing here has written to it yet. That is the seed.
+          const fromEnv = process.env[key]
+          if (row) {
+            try {
+              apply(key, await decrypt(row.value))
+            } catch (err) {
+              console.error(`[settings] could not decrypt ${key}:`, err)
+            }
+          } else if (fromEnv) {
+            await seed(key, fromEnv)
+          }
+        }
+      } catch (err) {
+        // A missing table or an unreachable database must not take the bot
+        // down; whatever the deployment's env vars say still applies.
+        console.error('[settings] hydrate failed, using env only:', err)
+      }
+    })()
+    hydrated = { at: Date.now(), done }
+  }
+  return hydrated.done
+}
+
+/**
+ * First sight of a key the environment sets: it becomes a row, marked as the
+ * environment's, and the store owns it from here. Do-nothing on conflict, so
+ * two instances hydrating at once cannot fight over it and a value typed into
+ * the dashboard in the meantime wins.
+ */
+async function seed(key: ManagedKey, value: string): Promise<void> {
+  const inserted = await db()
+    .insert(secrets)
+    .values({ key, value: await encrypt(value), updatedBy: FROM_ENVIRONMENT })
+    .onConflictDoNothing()
+    .returning({ key: secrets.key })
+  if (inserted.length) console.info(`[settings] ${key} taken from the deployment environment; the dashboard owns it now`)
+}
+
+/** Test seam: forget the memo. */
+export function resetHydration(): void {
+  hydrated = null
+}
+
+export async function setSecret(key: ManagedKey, value: string, updatedBy: string): Promise<void> {
+  const encrypted = await encrypt(value)
+  await db()
+    .insert(secrets)
+    .values({ key, value: encrypted, updatedBy })
+    .onConflictDoUpdate({ target: secrets.key, set: { value: encrypted, updatedAt: new Date(), updatedBy } })
+  apply(key, value)
+}
+
+/**
+ * Unset a key for good. The row stays, holding an empty value, so the key is
+ * not seeded from the environment again on the next cold start: removed means
+ * removed, whatever the deployment's env vars still say.
+ */
+export async function clearSecret(key: ManagedKey, updatedBy: string): Promise<void> {
+  await setSecret(key, '', updatedBy)
+}
+
+/**
+ * How the dashboard presents each setting: what to call it in plain words,
+ * which service it belongs to, and where to go to get one. Keyed by env var
+ * because that is what the deployment actually reads.
+ */
+export const SETTING_META: Record<
+  ManagedKey,
+  {
+    group: string
+    label: string
+    help?: string
+    link?: { href: string; text: string }
+    /** Renders as an on/off switch instead of a text field. Values are 'on'/'off'. */
+    toggle?: boolean
+    /** Renders as a dropdown of these values instead of a text field. */
+    options?: readonly string[]
+  }
+> = {
+  TELEGRAM_BOT_TOKEN: {
+    group: 'Telegram', label: 'Bot token',
+    help: 'After changing it, reconnect the webhook below so Telegram delivers to the new bot.',
+    link: { href: 'https://t.me/BotFather', text: '@BotFather' },
+  },
+  TELEGRAM_WEBHOOK_SECRET: {
+    group: 'Telegram', label: 'Webhook secret',
+    help: 'Telegram echoes this on every delivery, and the webhook route refuses anything without it. Reconnecting the webhook generates one when empty.',
+  },
+  ALLOWED_TELEGRAM_IDS: {
+    group: 'Telegram', label: 'Founding members',
+    help: 'Comma separated Telegram user ids, made admins on sight. Optional once someone is in the family list; they cannot be revoked while listed here.',
+  },
+  LLM_ORDER: { group: 'Google Gemini', label: 'Provider order', help: 'Which provider answers first, then who covers for it.' },
+  GEMINI_API_KEY: {
+    group: 'Google Gemini', label: 'API key',
+    link: { href: 'https://aistudio.google.com/apikey', text: 'Google AI Studio' },
+  },
+  GEMINI_MODEL: { group: 'Google Gemini', label: 'Models', help: 'Tried top to bottom.' },
+  OPENROUTER_API_KEY: {
+    group: 'OpenRouter', label: 'API key',
+    link: { href: 'https://openrouter.ai/keys', text: 'openrouter.ai/keys' },
+  },
+  OPENROUTER_MODEL: {
+    group: 'OpenRouter', label: 'Models',
+    help: 'Put :free models first. A paid slot answers only once every model above it has been skipped: an error, a rate limit (free models get 50 requests a day until you buy any credit), a reply that takes over 60 seconds, or no reply at all. System shows who actually answered.',
+  },
+  LLM_BASE_URL: {
+    group: 'Self-hosted LLM', label: 'Endpoint',
+    help: 'Any OpenAI-compatible server you run yourself: Ollama, vLLM, LM Studio, llama.cpp. Nothing leaves the house when this one answers.',
+  },
+  LLM_API_KEY: { group: 'Self-hosted LLM', label: 'API key', help: 'Leave empty if your server does not check one.' },
+  LLM_MODEL: { group: 'Self-hosted LLM', label: 'Models', help: 'Must support tool calling.' },
+  TAVILY_API_KEY: {
+    group: 'Web search', label: 'Tavily key',
+    link: { href: 'https://app.tavily.com', text: 'app.tavily.com' },
+  },
+  OPENWEATHER_API_KEY: {
+    group: 'Weather', label: 'OpenWeatherMap key',
+    help: 'Powers weather questions and the morning brief. The free tier is plenty.',
+    link: { href: 'https://home.openweathermap.org/api_keys', text: 'openweathermap.org' },
+  },
+  UP_API_TOKEN: {
+    group: 'Money', label: 'Up Bank token',
+    help: 'Read-only. Covers joint 2Up accounts.',
+    link: { href: 'https://api.up.com.au/getting_started', text: 'Up developer portal' },
+  },
+  POCKETSMITH_DEVELOPER_KEY: {
+    group: 'Money', label: 'PocketSmith key',
+    help: 'Categorised spending and budgets.',
+    link: { href: 'https://my.pocketsmith.com/security', text: 'PocketSmith security' },
+  },
+  NOTION_TOKEN: {
+    group: 'Notes', label: 'Notion token',
+    help: 'Share each page with the integration in Notion, or it sees nothing.',
+    link: { href: 'https://www.notion.so/my-integrations', text: 'Notion integrations' },
+  },
+  JIRA_BASE_URL: { group: 'Tasks', label: 'Jira site', help: 'e.g. https://yoursite.atlassian.net' },
+  JIRA_EMAIL: { group: 'Tasks', label: 'Atlassian account' },
+  JIRA_API_TOKEN: {
+    group: 'Tasks', label: 'Jira token',
+    help: 'A plain token, not a scoped one. Scoped tokens 401 against the site URL.',
+    link: { href: 'https://id.atlassian.com/manage-profile/security/api-tokens', text: 'Atlassian API tokens' },
+  },
+  JIRA_PROJECT_KEY: { group: 'Tasks', label: 'Board', help: 'Where new tasks go, e.g. HTL.' },
+  QSTASH_CURRENT_SIGNING_KEY: {
+    group: 'Scheduler', label: 'QStash current signing key',
+    help: 'Proves a tick really came from QStash.',
+    link: { href: 'https://console.upstash.com/qstash', text: 'the Upstash console' },
+  },
+  QSTASH_NEXT_SIGNING_KEY: {
+    group: 'Scheduler', label: 'QStash next signing key',
+    help: 'The second key in the console; QStash rotates onto it.',
+  },
+  TICK_SECRET: {
+    group: 'Scheduler', label: 'Manual tick secret',
+    help: 'Optional: lets you POST /api/tick by hand with an x-tick-secret header.',
+  },
+  AMBIENT_MODE: {
+    group: 'Behaviour', label: 'Chime in unprompted', toggle: true,
+    help: 'Lets the bot judge whether an unaddressed group message deserves a reply.',
+  },
+  TIMEZONE: {
+    group: 'Behaviour', label: 'Household timezone',
+    help: 'Where the house is, not where you are reading this. Reminders and calendar entries mean this time wherever anyone happens to be.',
+  },
+  LANGUAGE: {
+    group: 'Behaviour', label: 'Language',
+    help: 'The language and spelling the bot replies and drafts in.',
+    options: [
+      'Australian English', 'British English', 'American English',
+      'German', 'French', 'Spanish', 'Italian', 'Portuguese', 'Dutch',
+      'Japanese', 'Korean', 'Chinese', 'Vietnamese', 'Hindi',
+    ],
+  },
+  UNITS: {
+    group: 'Behaviour', label: 'Units',
+    help: 'Metric or imperial, for weather, distances and recipes.',
+    options: ['metric', 'imperial'],
+  },
+}
+
+export const SETTING_GROUPS = [
+  'Telegram',
+  'Google Gemini',
+  'OpenRouter',
+  'Self-hosted LLM',
+  'Money',
+  'Tasks',
+  'Notes',
+  'Web search',
+  'Weather',
+  'Scheduler',
+  'Behaviour',
+] as const
+
+/** A word about the group as a whole, shown once above its settings. */
+export const GROUP_NOTES: Partial<Record<(typeof SETTING_GROUPS)[number], string>> = {
+  Scheduler:
+    'QStash calls /api/tick on a schedule to fire reminders; these keys prove a call really came from it. Hourly is plenty: every call wakes the Neon database for five minutes, and a five-minute schedule never lets it sleep. Saved here they apply straight away, no redeploy.',
+  Telegram:
+    'How the family reaches the bot. Values saved here take effect straight away, but Telegram keeps delivering with the old token and secret until the webhook is reconnected below.',
+  OpenRouter:
+    'Whether a provider may train on your prompts is an account setting at openrouter.ai/settings/privacy, not a property of the model. With training off, OpenRouter only routes to providers that do not train, so a free model that answers has not trained on you, and one that cannot be reached is being refused rather than quietly used. Test below to see which is which.',
+  'Self-hosted LLM':
+    'The only tier where nothing leaves the house. Point this at a server you run and put it first, and the rest become the fallback.',
+}
+
+export type SettingView = {
+  key: string
+  group: string
+  label: string
+  help?: string
+  link?: { href: string; text: string }
+  toggle?: boolean
+  options?: readonly string[]
+  secret: boolean
+  set: boolean
+  /** Present only for non-secret settings; credentials are never sent back. */
+  value: string | null
+  /**
+   * Where the value was written from: this dashboard, or the deployment's
+   * environment the first time the setting was seen. Null while the key is
+   * unset.
+   */
+  origin: 'dashboard' | 'environment' | null
+  updatedAt: string | null
+  updatedBy: string | null
+  /** When the value was written, in household time: "28 Aug" and the full form. */
+  savedOn: string | null
+  savedAt: string | null
+}
+
+export async function listSettings(): Promise<SettingView[]> {
+  await hydrateSecrets()
+  const stored = new Map((await db().select().from(secrets)).map((r) => [r.key, r]))
+
+  return MANAGED_KEYS.map((key) => {
+    const row = stored.get(key)
+    const current = process.env[key]
+    const secret = isSecretShaped(key)
+    const set = Boolean(current)
+    return {
+      key,
+      ...SETTING_META[key],
+      secret,
+      set,
+      value: secret ? null : (current ?? null),
+      origin: row && set ? (row.updatedBy === FROM_ENVIRONMENT ? 'environment' : 'dashboard') : null,
+      updatedAt: row?.updatedAt.toISOString() ?? null,
+      updatedBy: row?.updatedBy ?? null,
+      // Formatted here, in the household's zone, so the server-rendered page
+      // and the browser agree on the day.
+      savedOn: row ? new Intl.DateTimeFormat('en-AU', { timeZone: timezone(), day: 'numeric', month: 'short' }).format(row.updatedAt) : null,
+      savedAt: row ? formatLocal(row.updatedAt) : null,
+    }
+  })
+}
