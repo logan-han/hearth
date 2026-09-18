@@ -60,6 +60,24 @@ describe('google mail', () => {
     expect(new Date(out[0].date).toISOString()).toBe('2026-08-29T10:40:00.000Z')
   })
 
+  it('hands a quoted display name back bare, as Graph does', async () => {
+    const quoted = {
+      ...message,
+      payload: {
+        ...message.payload,
+        headers: [
+          { name: 'From', value: '"Hillside Grammar, Office" <office@hillsidegrammar.example>' },
+          { name: 'To', value: '"Rowan \\"Ro\\" Fixture" <rowan@hearth.example>, other@hearth.example' },
+          { name: 'Subject', value: 'Photo day' },
+        ],
+      },
+    }
+    fetchMock.mockResolvedValueOnce(reply({ messages: [{ id: 'm1' }] })).mockResolvedValueOnce(reply(quoted))
+    const [m] = await googleClient(1).listMail({ limit: 5 })
+    expect(m.from).toBe('Hillside Grammar, Office <office@hillsidegrammar.example>')
+    expect(m.to).toBe('Rowan "Ro" Fixture <rowan@hearth.example>, other@hearth.example')
+  })
+
   it('defaults to recent inbox mail and caps the page size', async () => {
     fetchMock.mockResolvedValueOnce(reply({ messages: [] }))
     await googleClient(1).listMail({ limit: 100 })

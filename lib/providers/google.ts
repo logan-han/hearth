@@ -32,6 +32,16 @@ function header(msg: GmailMessage, name: string): string {
   return msg.payload?.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? ''
 }
 
+/**
+ * An address header quotes a display name with punctuation in it: "Name, Inc."
+ * <a@b>. The quotes are the header's, not the sender's, and they were copied
+ * into a brief along with the escapes JSON put round them. Graph hands the
+ * same name back bare, so the Gmail side does too.
+ */
+function bareNames(addresses: string): string {
+  return addresses.replace(/"((?:[^"\\]|\\.)*)"\s*(?=<)/g, (_, name: string) => `${name.replace(/\\(.)/g, '$1')} `).trim()
+}
+
 /** Depth-first search for the best text part; prefers text/plain over text/html. */
 function extractBody(part?: GmailPart): string {
   if (!part) return ''
@@ -51,8 +61,8 @@ function extractBody(part?: GmailPart): string {
 function toSummary(msg: GmailMessage): MailSummary {
   return {
     id: msg.id,
-    from: header(msg, 'From'),
-    to: header(msg, 'To'),
+    from: bareNames(header(msg, 'From')),
+    to: bareNames(header(msg, 'To')),
     subject: header(msg, 'Subject') || '(no subject)',
     snippet: msg.snippet ?? '',
     date: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : header(msg, 'Date'),

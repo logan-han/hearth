@@ -564,6 +564,23 @@ describe('ready-made watchers', () => {
     expect(send).toHaveBeenCalledWith('-100999', 'Sam: school says the athletics carnival is Thu 15 Oct.')
   })
 
+  it('hands the brief its mail as plain lines, so a quoted subject or sender reaches the model without escapes', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    newMail.mockResolvedValue({
+      accounts: [{ member: 'Sam', mailbox: "Sam's Outlook", provider: 'microsoft', first_check: false, messages: [
+        { id: 'm1', from: 'Sign Desk <no-reply@signdesk.example>', subject: 'Signature requested on "Lease renewal - 12 Elm Street"', snippet: 'Please sign by Friday.', date: '2026-09-18' },
+      ] }],
+    })
+    await authed()
+    const call = runAgent.mock.calls[0][0] as { text: string }
+    expect(call.text).toContain('subject: Signature requested on "Lease renewal - 12 Elm Street"')
+    expect(call.text).toContain('from: Sign Desk <no-reply@signdesk.example>')
+    expect(call.text).not.toContain('\\"')
+    expect(call.text).not.toContain('"subject":')
+    const decision = decideWatcherPost.mock.calls[0][0] as { evidence: string }
+    expect(decision.evidence).toContain('subject: Signature requested on "Lease renewal - 12 Elm Street"')
+  })
+
   it('reports a broken mailbox to an admin but still phrases the rest', async () => {
     dueAutomations.mockResolvedValue([brief()])
     newMail.mockResolvedValue({
