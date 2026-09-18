@@ -22,6 +22,7 @@ import { parseLog, prune, underCap, recordPost, shouldWarn, markWarned, PROACTIV
 import type { Automation, Member } from '@/lib/db/schema'
 import { describeError } from '@/lib/errors'
 import { unsaid } from '@/lib/notices'
+import { plainData } from '@/lib/plain-data'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
@@ -266,7 +267,7 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
 
   const watcher = WATCHERS[kind]
   const instruction = watcherInstruction(kind, a.chatId)
-  const data = JSON.stringify(fetched.data, null, 1)
+  const data = plainData(fetched.data)
   const result = await runAgent({
     chatId: a.chatId,
     chatType: isGroupChat(a.chatId) ? 'group' : 'private',

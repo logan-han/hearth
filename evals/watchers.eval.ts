@@ -3,22 +3,49 @@ import { withRecorded, called, liveChainConfigured } from './harness'
 import { figuresGrounded, noLeak, TRIP_TALK, judgeGroundedness, record, printSummary, strict } from './scorers'
 
 const calls = vi.hoisted(() => [] as { tool: string; input: unknown }[])
-const STUBS = vi.hoisted(() => ({
-  recall: () => ({ memories: [{ id: 3, fact: 'Juno goes to Riverbend College' }] }),
-  list_family_events: () => ({ timezone: 'Australia/Melbourne', events: [] }),
-  list_email: () => ({ accounts: [{ mailbox: "Rowan's Gmail", provider: 'google', messages: [] }] }),
-  read_email: ({ id }: { id?: string } = {}) =>
-    id === 'm3'
-      ? {
-          id: 'm3', from: 'noreply@riverbendcollege.example', subject: "Parents' association trivia night: tickets", date: '2026-09-16T15:02:00+10:00',
-          body: "Dear families, the parents' association trivia night is on Friday 23 October 2026 from 7pm in the college hall. Tickets are $20 each and include supper. Book by Friday 16 October through the portal.",
-        }
-      : {
-          id: 'm1', from: 'office@riverbendcollege.example', subject: 'Athletics carnival', date: '2026-09-01T08:10:00+10:00',
-          body: 'Dear families, the athletics carnival is on Thursday 15 October 2026 from 9am to 12pm at the oval. Students wear house colours. No RSVP needed.',
-        },
-  propose_family_event: (input: unknown) => ({ proposal_id: 7, proposed: input }),
-}))
+const { STUBS, BODIES, TRIAGE } = vi.hoisted(() => {
+  const BODIES: Record<string, object> = {
+    m1: {
+      id: 'm1', from: 'office@riverbendcollege.example', subject: 'Athletics carnival', date: '2026-09-01T08:10:00+10:00',
+      body: 'Dear families, the athletics carnival is on Thursday 15 October 2026 from 9am to 12pm at the oval. Students wear house colours. No RSVP needed.',
+    },
+    m3: {
+      id: 'm3', from: 'noreply@riverbendcollege.example', subject: "Parents' association trivia night: tickets", date: '2026-09-16T15:02:00+10:00',
+      body: "Dear families, the parents' association trivia night is on Friday 23 October 2026 from 7pm in the college hall. Tickets are $20 each and include supper. Book by Friday 16 October through the portal.",
+    },
+  }
+  // Dated against the clock the eval runs on: the collection was yesterday evening, the signature is wanted next week.
+  const longDay = (d: Date) =>
+    new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Melbourne', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(d)
+  const yesterday = new Date(Date.now() - 86_400_000)
+  const nextWeek = new Date(Date.now() + 7 * 86_400_000)
+  const TRIAGE = [
+    {
+      id: 'm20', from: 'Sign Desk <no-reply@signdesk.example>', subject: 'Signature requested on "Lease renewal - 12 Elm Street"',
+      snippet: `Sam Fixture has requested your signature on "Lease renewal - 12 Elm Street". Please review and sign by ${longDay(nextWeek)}.`,
+      date: yesterday.toISOString(),
+    },
+    {
+      id: 'm21', from: 'Northbank Broadband <noreply@northbankbroadband.example>', subject: 'Your internet connection is now active',
+      snippet: 'Good news: the connection at 12 Elm Street is active and your plan has started. There is nothing you need to do.',
+      date: yesterday.toISOString(),
+    },
+    {
+      id: 'm22', from: 'Surplus Bites <orders@surplusbites.example>', subject: 'Your order is confirmed',
+      snippet: `Your Mystery Box from Corner Bakery Hillside is ready for collection on ${longDay(yesterday)} between 6:00 pm and 6:30 pm at 18 Station Street, Hillside.`,
+      date: yesterday.toISOString(),
+    },
+  ]
+  for (const m of TRIAGE) BODIES[m.id] = { ...m, body: m.snippet }
+  const STUBS = {
+    recall: () => ({ memories: [{ id: 3, fact: 'Juno goes to Riverbend College' }] }),
+    list_family_events: () => ({ timezone: 'Australia/Melbourne', events: [] }),
+    list_email: () => ({ accounts: [{ mailbox: "Rowan's Gmail", provider: 'google', messages: [] }] }),
+    read_email: ({ id }: { id?: string } = {}) => BODIES[id ?? 'm1'] ?? { error: `No message ${id}.` },
+    propose_family_event: (input: unknown) => ({ proposal_id: 7, proposed: input }),
+  }
+  return { STUBS, BODIES, TRIAGE }
+})
 vi.mock('@/lib/tools', async (orig) => {
   const actual = await orig<typeof import('@/lib/tools')>()
   return { ...actual, buildTools: (ctx: Parameters<typeof actual.buildTools>[0]) => withRecorded(actual.buildTools(ctx), STUBS, calls) }
@@ -26,6 +53,7 @@ vi.mock('@/lib/tools', async (orig) => {
 
 const { runAgent, decideWatcherPost, reviewDraft } = await import('@/lib/agent')
 const { WATCHERS, watcherInstruction } = await import('@/lib/watchers')
+const { plainData } = await import('@/lib/plain-data')
 
 const LISBON = {
   transactions: {
@@ -33,9 +61,9 @@ const LISBON = {
     transactions: [{ description: 'FARESAVER LISBON', amount: '$389.60', when: 'Tue 26 Aug 2026, 14:02', status: 'SETTLED', by: 'Rowan', message: null, flags: [] as string[] }],
   },
 }
-const lisbonData = JSON.stringify(LISBON, null, 1)
+const lisbonData = plainData(LISBON)
 const FLAGGED = { transactions: { ...LISBON.transactions, typical_debit: '$48.35', history_days: 90, transactions: [{ ...LISBON.transactions.transactions[0], flags: ['new_payee', 'unusually_large'] }] } }
-const flaggedData = JSON.stringify(FLAGGED, null, 1)
+const flaggedData = plainData(FLAGGED)
 const base = { chatId: '-100', chatType: 'group', member: null, memberName: 'the family', history: false as const, mode: 'watcher' as const }
 
 afterAll(() => printSummary('watchers'))
@@ -116,16 +144,20 @@ describe.skipIf(!liveChainConfigured())('money watcher', () => {
   })
 })
 
+const PROMO = { id: 'm2', from: 'deals@bigretailer.example', subject: '48 hours only: 30% off everything', snippet: 'Shop the sale', date: '2026-09-16T07:00:00+10:00' }
+const briefInstruction = watcherInstruction('morning', base.chatId)
+const mailbox = (messages: object[]) => ({ accounts: [{ member: 'Rowan', mailbox: "Rowan's Gmail", provider: 'google', first_check: false, messages }] })
+
 describe.skipIf(!liveChainConfigured())('morning brief, the mail half', () => {
   it('proposes the date it read, and does not invent one', async () => {
     calls.length = 0
-    const data = JSON.stringify({
+    const data = plainData({
       events: { events: [] },
-      mail: { accounts: [{ member: 'Rowan', mailbox: "Rowan's Gmail", provider: 'google', first_check: false, messages: [
+      mail: mailbox([
         { id: 'm1', from: 'office@riverbendcollege.example', subject: 'Athletics carnival', snippet: 'Dear families, the athletics carnival is on Thursday 15 October...', date: '2026-09-01T08:10:00+10:00' },
-        { id: 'm2', from: 'deals@bigretailer.example', subject: '48 hours only: 30% off everything', snippet: 'Shop the sale', date: '2026-09-01T07:00:00+10:00' },
-      ] }] },
-    }, null, 1)
+        { ...PROMO, date: '2026-09-01T07:00:00+10:00' },
+      ]),
+    })
     const r = await runAgent({ ...base, tools: WATCHERS.morning.tools, text: `Scheduled check "Morning brief".\n\n${WATCHERS.morning.instruction}\n\nDATA (fetched just now):\n${data}` })
     const proposals = called(calls, 'propose_family_event')
     const proposedRight = proposals.some((p) => {
@@ -133,7 +165,7 @@ describe.skipIf(!liveChainConfigured())('morning brief, the mail half', () => {
       return /athletics|carnival/i.test(input.title ?? '') && (input.start ?? '').startsWith('2026-10-15')
     })
     const hard = proposedRight && noLeak(r.text) && !/30%|sale/i.test(r.text)
-    const g = await judgeGroundedness({ answer: r.text, context: `${data}\n${JSON.stringify(STUBS.read_email())}` })
+    const g = await judgeGroundedness({ answer: r.text, context: `${data}\n${plainData(BODIES.m1)}` })
     record({ case: 'inbox: school notice proposed, promo ignored', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
     expect(proposedRight).toBe(true)
     expect(r.text).not.toMatch(/30%|sale/i)
@@ -153,16 +185,16 @@ const TICKETS = {
   snippet: "Dear families, the parents' association trivia night is on Friday 23 October 2026 from 7pm in the college hall. Tickets are $20 each. Book by Friday 16 October.",
   date: '2026-09-16T15:02:00+10:00',
 }
-const PROMO = { id: 'm2', from: 'deals@bigretailer.example', subject: '48 hours only: 30% off everything', snippet: 'Shop the sale', date: '2026-09-16T07:00:00+10:00' }
-const briefData = JSON.stringify({
+const briefData = plainData({
   events: { timezone: 'Australia/Melbourne', events: [{ id: 41, title: 'Last day of term', start_local: 'Thu 17 Sep 2026 00:00', end_local: 'Fri 18 Sep 2026 00:00', all_day: true, location: null }] },
-  mail: { accounts: [{ member: 'Rowan', mailbox: "Rowan's Gmail", provider: 'google', first_check: false, messages: [TICKETS, PROMO] }] },
-}, null, 1)
-const briefInstruction = watcherInstruction('morning', base.chatId)
+  mail: mailbox([TICKETS, PROMO]),
+})
 const briefDraft = [
   '**Morning brief**',
-  '- Today: Last day of term, all day.',
-  "- Mail (Rowan's Gmail): parents' association trivia night, Friday 23 October 2026 from 7pm in the college hall. Tickets $20 each; book by Friday 16 October.",
+  '**Today**',
+  '- Last day of term, all day.',
+  '**To do**',
+  "- Rowan's Gmail: the parents' association trivia night is Friday 23 October 2026 from 7pm in the college hall. Tickets $20 each; book by Friday 16 October.",
 ].join('\n')
 const briefEvidence = `INSTRUCTION:\n${briefInstruction}\n\nDATA:\n${briefData}\n\nTOOL RESULTS:\n(none)`
 
@@ -173,7 +205,7 @@ describe.skipIf(!liveChainConfigured())('morning brief, the post check', () => {
     const kept = /trivia|tickets?/i.test(r.text)
     const dropped = !/30%|off everything|bigretailer/i.test(r.text)
     const hard = kept && dropped && noLeak(r.text)
-    const g = await judgeGroundedness({ answer: r.text, context: `${briefData}\n${JSON.stringify(STUBS.read_email({ id: 'm3' }))}` })
+    const g = await judgeGroundedness({ answer: r.text, context: `${briefData}\n${plainData(BODIES.m3)}` })
     record({ case: 'brief: ticket email kept, promo dropped', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
     expect(kept).toBe(true)
     expect(dropped).toBe(true)
@@ -194,5 +226,41 @@ describe.skipIf(!liveChainConfigured())('morning brief, the post check', () => {
     const held = d.decision === 'skip' || d.confidence < 0.7
     record({ case: 'decision: invented price still skips', hard: held ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}${d.reason ? ` ${d.reason}` : ''}` })
     expect(held).toBe(true)
+  })
+})
+
+/*
+ * A brief once wrote every email as `Sender ("Subject"): summary`, with the
+ * escapes JSON had put round a quoted subject still in it, and gave an order
+ * collected the evening before the same weight as a signature still wanted.
+ * The instruction now sorts mail into what is still asked of the household
+ * and what is only worth knowing, drops what has already happened, and never
+ * quotes a subject line; DATA arrives as plain lines with nothing to escape.
+ */
+describe.skipIf(!liveChainConfigured())('morning brief, the mail triage', () => {
+  it('sorts a signature wanted from a notice, drops a collection already past, and quotes no subject line', async () => {
+    calls.length = 0
+    const data = plainData({ events: { timezone: 'Australia/Melbourne', events: [] }, mail: mailbox([...TRIAGE, PROMO]) })
+    const r = await runAgent({ ...base, tools: WATCHERS.morning.tools, text: `Scheduled check "Morning brief".\n\n${briefInstruction}\n\nDATA (fetched just now):\n${data}` })
+    const text = r.text
+    const toDo = text.search(/\*\*\s*to[ -]?do\b/i)
+    const headsUp = text.search(/\*\*\s*heads[ -]?up\b/i)
+    const sorted =
+      toDo >= 0 && headsUp > toDo &&
+      /lease|signature|sign\b/i.test(text.slice(toDo, headsUp)) &&
+      /internet|connection|broadband/i.test(text.slice(headsUp)) &&
+      !/lease|signature/i.test(text.slice(headsUp))
+    const pastDropped = !/mystery box|corner bakery|surplus bites|collection/i.test(text)
+    const promoDropped = !/30%|off everything/i.test(text)
+    const noQuotedSubject = !text.includes('\\"') && !/\("[^"\n]*"\)/.test(text)
+    const hard = sorted && pastDropped && promoDropped && noQuotedSubject && noLeak(text)
+    const g = await judgeGroundedness({ answer: text, context: data })
+    record({ case: 'brief: to do apart from heads up, past order dropped, no quoted subject', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: text.slice(0, 80) })
+    expect(sorted).toBe(true)
+    expect(pastDropped).toBe(true)
+    expect(promoDropped).toBe(true)
+    expect(noQuotedSubject).toBe(true)
+    expect(noLeak(text)).toBe(true)
+    if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
   })
 })
