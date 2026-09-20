@@ -6,6 +6,7 @@ import * as ps from '@/lib/providers/pocketsmith'
 import * as notion from '@/lib/providers/notion'
 import * as jira from '@/lib/providers/jira'
 import * as weather from '@/lib/providers/weather'
+import { jevConfigured, pingJev } from '@/lib/jev'
 import { describeError } from '@/lib/errors'
 
 export const runtime = 'nodejs'
@@ -22,6 +23,7 @@ const PROBES: { name: string; configured: () => boolean; run: () => Promise<unkn
   { name: 'Notion', configured: notion.notionConfigured, run: () => notion.search({ limit: 1 }) },
   { name: 'Jira', configured: jira.jiraConfigured, run: () => jira.ping() },
   { name: 'OpenWeatherMap', configured: weather.weatherConfigured, run: () => weather.geocode('melbourne') },
+  { name: 'Jev', configured: jevConfigured, run: () => pingJev() },
 ]
 
 function timeboxed(work: Promise<unknown>, ms = 6000): Promise<unknown> {

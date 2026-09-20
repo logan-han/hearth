@@ -642,7 +642,10 @@ AES-256-GCM encrypted and are **never sent back to the browser** for
 credential-shaped keys. Every setting has exactly one home: the deployment's
 environment seeds a key the first time it is seen, and the store owns it from
 then on, with the env var never read again. Removing a setting leaves it
-unset, whatever the environment still says.
+unset, whatever the environment still says. The store is read at the start of
+every request, on every instance, so a change made in Settings applies to the
+next message or tick; nothing is cached per instance, and the page shows what
+the store holds rather than what one instance last loaded.
 
 ## Claude, and anything else that speaks MCP
 

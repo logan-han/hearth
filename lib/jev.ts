@@ -90,6 +90,11 @@ export function resetJevClient(): void {
   cached = null
 }
 
+/** The cheapest authenticated call: a refused key fails here, on the Settings page, not in a watcher at 7am. */
+export async function pingJev(): Promise<void> {
+  await client().models.list()
+}
+
 /** The status first, so the chain health can tell a rate limit from a refused key. */
 function describeJevError(err: unknown): string {
   if (err instanceof APIError) {

@@ -169,26 +169,34 @@ describe('listSettings', () => {
 })
 
 describe('hydration is resilient', () => {
-  it('re-reads the store once its memo goes stale, so warm instances catch up', async () => {
-    vi.useFakeTimers()
-    try {
-      await hydrateSecrets()
-      // Another instance stores a key: this one only sees the database row.
-      const { db } = await import('@/lib/db')
-      const { secrets } = await import('@/lib/db/schema')
-      const { encrypt } = await import('@/lib/crypto')
-      await db().insert(secrets).values({ key: 'TAVILY_API_KEY', value: await encrypt('fresh'), updatedBy: 'x' })
-      delete process.env.TAVILY_API_KEY
+  it('reads the store on every hydrate, so a key saved on another instance applies at once and shows as set', async () => {
+    await hydrateSecrets()
+    // Another instance stores a key: this one only sees the database row.
+    const { db } = await import('@/lib/db')
+    const { secrets } = await import('@/lib/db/schema')
+    const { encrypt } = await import('@/lib/crypto')
+    await db().insert(secrets).values({ key: 'TAVILY_API_KEY', value: await encrypt('fresh'), updatedBy: 'x' })
+    delete process.env.TAVILY_API_KEY
 
-      await hydrateSecrets()
-      expect(process.env.TAVILY_API_KEY).toBeUndefined() // memo still warm
+    await hydrateSecrets()
+    expect(process.env.TAVILY_API_KEY).toBe('fresh')
+    const shown = (await listSettings()).find((s) => s.key === 'TAVILY_API_KEY')!
+    expect(shown).toMatchObject({ set: true, origin: 'dashboard', updatedBy: 'x' })
+  })
 
-      vi.advanceTimersByTime(61_000)
-      await hydrateSecrets()
-      expect(process.env.TAVILY_API_KEY).toBe('fresh')
-    } finally {
-      vi.useRealTimers()
-    }
+  it('shares one read between hydrates in flight, and reads again once they settle', async () => {
+    const { __setDb } = await import('@/lib/db')
+    let reads = 0
+    __setDb({
+      select: () => {
+        reads++
+        return { from: async () => [] }
+      },
+    })
+    await Promise.all([hydrateSecrets(), hydrateSecrets(), listSettings()])
+    expect(reads).toBe(1)
+    await hydrateSecrets()
+    expect(reads).toBe(2)
   })
 
   it('skips a row it cannot decrypt and keeps the rest', async () => {

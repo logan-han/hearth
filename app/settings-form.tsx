@@ -144,23 +144,18 @@ export function SettingsForm({
                   <div className="setting" key={s.key}>
                     <div>
                       <span className="name">{s.label}</span>
-                      {s.origin === 'dashboard' ? (
-                        // A standing fact, not a confirmation: this value was typed
-                        // into the dashboard, and has stood since the date shown.
-                        <span
-                          className="tag saved"
-                          title={`Saved from this dashboard ${s.savedAt ?? 'earlier'}${s.updatedBy ? ` by ${s.updatedBy}` : ''}.`}
-                        >
-                          saved here{s.savedOn ? ` · ${s.savedOn}` : ''}
-                        </span>
-                      ) : s.origin === 'environment' ? (
-                        // A past event, not a live source: the value was copied in from
-                        // the deployment's env var the first time the setting was seen.
+                      {s.set && s.savedOn ? (
+                        // When the value was last written; the tooltip says by whom, or
+                        // that it was imported from the deployment's environment once.
                         <span
                           className="tag"
-                          title={`Copied in from the deployment's environment variable ${s.key} ${s.savedAt ?? 'earlier'}, the first time this setting was seen. This page owns it now; the environment is not read again.`}
+                          title={
+                            s.origin === 'environment'
+                              ? `Imported from the deployment's environment variable ${s.key} ${s.savedAt ?? 'earlier'}. The database holds it now and is the only place it is read from.`
+                              : `Saved from this page ${s.savedAt ?? 'earlier'}${s.updatedBy ? ` by ${s.updatedBy}` : ''}.`
+                          }
                         >
-                          seeded from env{s.savedOn ? ` · ${s.savedOn}` : ''}
+                          updated {s.savedOn}
                         </span>
                       ) : null}
                       <span className="env">{s.key}</span>
@@ -312,10 +307,9 @@ export function SettingsForm({
       })}
       {flash ? <p className={`flash${flash.bad ? ' bad' : ''}`}>{flash.text}</p> : null}
       <p className="empty">
-        Anything saved here is encrypted and takes effect straight away, without a redeploy. Keys are
-        never shown back to this page. The deployment&rsquo;s environment is read once, the first time a
-        setting is seen, and never again: this page owns every setting from then on, and removing one
-        leaves it unset.
+        Settings are stored encrypted in the database, the one place they are read from, and a change
+        applies from the next request on: no redeploy. Keys are never shown back to this page. An
+        environment variable is imported once, the first time a setting is seen, and never read again.
       </p>
     </>
   )

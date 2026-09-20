@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm'
 import { db } from './db'
 import { secrets } from './db/schema'
 import { encrypt, decrypt } from './crypto'
@@ -79,10 +80,10 @@ export function isSecretShaped(key: string): boolean {
  */
 export const FROM_ENVIRONMENT = 'environment'
 
-let hydrated: { at: number; done: Promise<void> } | null = null
+/** What the store holds for one key, decrypted: the value and who last wrote it. */
+type StoredValue = { value: string; updatedAt: Date; updatedBy: string | null }
 
-/** How long one instance may trust its copy before re-reading the store. */
-const HYDRATE_TTL_MS = 60_000
+let reading: Promise<Map<ManagedKey, StoredValue>> | null = null
 
 /** Put a value where the rest of the code reads it. An empty value is an unset key. */
 function apply(key: string, value: string): void {
@@ -91,66 +92,90 @@ function apply(key: string, value: string): void {
 }
 
 /**
- * Every managed setting has one home. The store owns a key from the moment it
- * holds a row for it; a key the store has never seen is seeded from the
- * deployment's environment, once, and owned from then on. So what is copied
- * over process.env here is the store's value, and an env var changed after
- * that is simply never read. Copying into process.env spares threading an
- * async accessor through every `process.env.X` read in the codebase.
+ * Read every managed setting from the store and put it where the code reads
+ * it. Called at the start of every request and never memoised: under Fluid
+ * compute several instances serve at once, each with its own process.env, and
+ * a memo meant a key saved on the dashboard was applied on one instance and
+ * unknown to the others for up to a minute, so the page that rendered on one
+ * of the others said it was not set. One small read per request is what makes
+ * the database the only source of truth. Concurrent callers within one
+ * instance share the read in flight. Copying into process.env spares
+ * threading an async accessor through every `process.env.X` read.
  *
- * Memoised with a short TTL rather than per cold start: under Fluid compute a
- * warm instance can live for hours, and a memo-forever meant a key changed in
- * the dashboard kept failing in instances that had already hydrated.
+ * Every managed setting has one home. The store owns a key from the moment it
+ * holds a row for it; a key the store has never seen is imported from the
+ * deployment's environment, once, and owned from then on. An env var changed
+ * after that is simply never read.
  */
 export function hydrateSecrets(): Promise<void> {
-  if (!hydrated || Date.now() - hydrated.at > HYDRATE_TTL_MS) {
-    const done = (async () => {
-      try {
-        const stored = new Map((await db().select().from(secrets)).map((r) => [r.key, r]))
-        for (const key of MANAGED_KEYS) {
-          const row = stored.get(key)
-          // With no row, process.env still holds whatever the deployment set:
-          // nothing here has written to it yet. That is the seed.
-          const fromEnv = process.env[key]
-          if (row) {
-            try {
-              apply(key, await decrypt(row.value))
-            } catch (err) {
-              console.error(`[settings] could not decrypt ${key}:`, err)
-            }
-          } else if (fromEnv) {
-            await seed(key, fromEnv)
-          }
-        }
-      } catch (err) {
-        // A missing table or an unreachable database must not take the bot
-        // down; whatever the deployment's env vars say still applies.
-        console.error('[settings] hydrate failed, using env only:', err)
-      }
-    })()
-    hydrated = { at: Date.now(), done }
+  return readStore().then(() => undefined)
+}
+
+function readStore(): Promise<Map<ManagedKey, StoredValue>> {
+  if (!reading) {
+    reading = load().finally(() => {
+      reading = null
+    })
   }
-  return hydrated.done
+  return reading
+}
+
+async function load(): Promise<Map<ManagedKey, StoredValue>> {
+  const out = new Map<ManagedKey, StoredValue>()
+  try {
+    const stored = new Map((await db().select().from(secrets)).map((r) => [r.key, r]))
+    for (const key of MANAGED_KEYS) {
+      const row = stored.get(key)
+      if (row) {
+        try {
+          const value = await decrypt(row.value)
+          apply(key, value)
+          out.set(key, { value, updatedAt: row.updatedAt, updatedBy: row.updatedBy })
+        } catch (err) {
+          console.error(`[settings] could not decrypt ${key}:`, err)
+        }
+        continue
+      }
+      // With no row, process.env still holds whatever the deployment set:
+      // nothing here has written to it yet. That is the seed.
+      const fromEnv = process.env[key]
+      if (fromEnv) out.set(key, await seed(key, fromEnv))
+    }
+  } catch (err) {
+    // A missing table or an unreachable database must not take the bot
+    // down; whatever the deployment's env vars say still applies.
+    console.error('[settings] could not read the settings store, using the environment:', err)
+  }
+  return out
 }
 
 /**
  * First sight of a key the environment sets: it becomes a row, marked as the
  * environment's, and the store owns it from here. Do-nothing on conflict, so
- * two instances hydrating at once cannot fight over it and a value typed into
- * the dashboard in the meantime wins.
+ * two instances importing at once cannot fight over it, and a value typed
+ * into the dashboard in the meantime wins: whoever lost the race reads the
+ * row that won.
  */
-async function seed(key: ManagedKey, value: string): Promise<void> {
+async function seed(key: ManagedKey, value: string): Promise<StoredValue> {
   const inserted = await db()
     .insert(secrets)
     .values({ key, value: await encrypt(value), updatedBy: FROM_ENVIRONMENT })
     .onConflictDoNothing()
-    .returning({ key: secrets.key })
-  if (inserted.length) console.info(`[settings] ${key} taken from the deployment environment; the dashboard owns it now`)
+    .returning({ updatedAt: secrets.updatedAt })
+  if (inserted.length) {
+    console.info(`[settings] ${key} imported from the deployment environment; the dashboard owns it now`)
+    apply(key, value)
+    return { value, updatedAt: inserted[0].updatedAt, updatedBy: FROM_ENVIRONMENT }
+  }
+  const [row] = await db().select().from(secrets).where(eq(secrets.key, key))
+  const plain = await decrypt(row.value)
+  apply(key, plain)
+  return { value: plain, updatedAt: row.updatedAt, updatedBy: row.updatedBy }
 }
 
-/** Test seam: forget the memo. */
+/** Test seam: forget a read in flight. */
 export function resetHydration(): void {
-  hydrated = null
+  reading = null
 }
 
 export async function setSecret(key: ManagedKey, value: string, updatedBy: string): Promise<void> {
@@ -314,9 +339,9 @@ export const SETTING_GROUPS = [
 /** A word about the group as a whole, shown once above its settings. */
 export const GROUP_NOTES: Partial<Record<(typeof SETTING_GROUPS)[number], string>> = {
   Scheduler:
-    'QStash calls /api/tick on a schedule to fire reminders; these keys prove a call really came from it. Hourly is plenty: every call wakes the Neon database for five minutes, and a five-minute schedule never lets it sleep. Saved here they apply straight away, no redeploy.',
+    'QStash calls /api/tick on a schedule to fire reminders; these keys prove a call really came from it. Hourly is plenty: every call wakes the Neon database for five minutes, and a five-minute schedule never lets it sleep. A change applies straight away, no redeploy.',
   Telegram:
-    'How the family reaches the bot. Values saved here take effect straight away, but Telegram keeps delivering with the old token and secret until the webhook is reconnected below.',
+    'How the family reaches the bot. A change takes effect straight away, but Telegram keeps delivering with the old token and secret until the webhook is reconnected below.',
   OpenRouter:
     'Whether a provider may train on your prompts is an account setting at openrouter.ai/settings/privacy, not a property of the model. With training off, OpenRouter only routes to providers that do not train, so a free model that answers has not trained on you, and one that cannot be reached is being refused rather than quietly used. Test below to see which is which.',
   'Self-hosted LLM':
@@ -350,21 +375,24 @@ export type SettingView = {
   savedAt: string | null
 }
 
+/**
+ * The page's rows, from the store itself rather than from this instance's
+ * process.env: a key saved a moment ago on another instance is set, and says
+ * so, whatever this instance had applied.
+ */
 export async function listSettings(): Promise<SettingView[]> {
-  await hydrateSecrets()
-  const stored = new Map((await db().select().from(secrets)).map((r) => [r.key, r]))
+  const stored = await readStore()
 
   return MANAGED_KEYS.map((key) => {
     const row = stored.get(key)
-    const current = process.env[key]
     const secret = isSecretShaped(key)
-    const set = Boolean(current)
+    const set = Boolean(row?.value)
     return {
       key,
       ...SETTING_META[key],
       secret,
       set,
-      value: secret ? null : (current ?? null),
+      value: secret ? null : row?.value || null,
       origin: row && set ? (row.updatedBy === FROM_ENVIRONMENT ? 'environment' : 'dashboard') : null,
       updatedAt: row?.updatedAt.toISOString() ?? null,
       updatedBy: row?.updatedBy ?? null,

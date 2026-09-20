@@ -12,6 +12,15 @@ const jar = vi.hoisted(() => {
   }
 })
 vi.mock('next/headers', () => ({ cookies: jar.cookies }))
+const { modelsList } = vi.hoisted(() => ({ modelsList: vi.fn() }))
+vi.mock('@typesafe-ai/sdk', async (orig) => {
+  const actual = await orig<typeof import('@typesafe-ai/sdk')>()
+  class TypeSafeClient {
+    models = { list: modelsList }
+    systemOne = vi.fn()
+  }
+  return { ...actual, TypeSafeClient }
+})
 vi.mock('@/lib/settings', async (orig) => ({
   ...(await orig<typeof import('@/lib/settings')>()),
   hydrateSecrets: async () => {},
@@ -26,9 +35,10 @@ beforeEach(async () => {
   vi.clearAllMocks()
   jar.store.clear()
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
-  for (const k of ['UP_API_TOKEN', 'POCKETSMITH_DEVELOPER_KEY', 'NOTION_TOKEN', 'JIRA_BASE_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN', 'OPENWEATHER_API_KEY']) {
+  for (const k of ['UP_API_TOKEN', 'POCKETSMITH_DEVELOPER_KEY', 'NOTION_TOKEN', 'JIRA_BASE_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN', 'OPENWEATHER_API_KEY', 'TYPESAFE_API_KEY']) {
     delete process.env[k]
   }
+  ;(await import('@/lib/jev')).resetJevClient()
   vi.stubGlobal('fetch', fetchMock)
   const weather = await import('@/lib/providers/weather')
   weather.clearWeatherCache()
@@ -60,5 +70,16 @@ describe('the health probe', () => {
     expect(String(by('Up Bank').error)).toContain('401')
     expect(by('OpenWeatherMap').ok).toBe(true)
     expect(by('Notion')).toBeUndefined()
+  })
+
+  it('proves a Jev key by listing the account models, and reports a refused one', async () => {
+    await createSession({ email: 'a@b.com', name: 'A', provider: 'google', role: 'admin' })
+    process.env.TYPESAFE_API_KEY = 'ts-key'
+    modelsList.mockResolvedValueOnce([{ id: 'jev-1.13.0' }])
+    let { items } = await (await GET()).json()
+    expect(items).toEqual([{ name: 'Jev', ok: true }])
+    modelsList.mockRejectedValueOnce(new Error('HTTP 401: invalid api key'))
+    ;({ items } = await (await GET()).json())
+    expect(items[0]).toMatchObject({ name: 'Jev', ok: false, error: expect.stringContaining('401') })
   })
 })

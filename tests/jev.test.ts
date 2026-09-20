@@ -3,11 +3,12 @@ import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import { chainHealth } from '@/lib/model-events'
 
-const { systemOne, construct } = vi.hoisted(() => ({ systemOne: vi.fn(), construct: vi.fn() }))
+const { systemOne, modelsList, construct } = vi.hoisted(() => ({ systemOne: vi.fn(), modelsList: vi.fn(), construct: vi.fn() }))
 vi.mock('@typesafe-ai/sdk', async (orig) => {
   const actual = await orig<typeof import('@typesafe-ai/sdk')>()
   class TypeSafeClient {
     systemOne = systemOne
+    models = { list: modelsList }
     constructor(config: unknown) {
       construct(config)
     }
@@ -16,7 +17,7 @@ vi.mock('@typesafe-ai/sdk', async (orig) => {
 })
 
 const { APIError } = await import('@typesafe-ai/sdk')
-const { jevConfigured, jevModel, jevSlot, resetJevClient, wantsAssistant, claimsChange, checkClaims, decidePost, THRESHOLDS } =
+const { jevConfigured, jevModel, jevSlot, resetJevClient, pingJev, wantsAssistant, claimsChange, checkClaims, decidePost, THRESHOLDS } =
   await import('@/lib/jev')
 
 let client: PGlite
@@ -75,6 +76,16 @@ describe('configuration', () => {
   it('refuses to call without a key, naming the setting', async () => {
     delete process.env.TYPESAFE_API_KEY
     await expect(wantsAssistant({ chatId: '-1', conversation: [], message: 'Ada: hi' })).rejects.toThrow(/TYPESAFE_API_KEY/)
+    expect(systemOne).not.toHaveBeenCalled()
+  })
+})
+
+describe('the health probe', () => {
+  it('lists the account models with the key: the cheapest call that proves it', async () => {
+    modelsList.mockResolvedValue([])
+    await pingJev()
+    expect(modelsList).toHaveBeenCalledTimes(1)
+    expect(construct).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'ts-test-key' }))
     expect(systemOne).not.toHaveBeenCalled()
   })
 })
