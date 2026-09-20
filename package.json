@@ -27,6 +27,7 @@
     "@modelcontextprotocol/server": "^2.0.0",
     "@neondatabase/serverless": "^1.1.0",
     "@opentelemetry/api": "^1.9.1",
+    "@typesafe-ai/sdk": "^0.6.0",
     "@upstash/qstash": "^2.11.3",
     "@vercel/functions": "^3.9.5",
     "@vercel/otel": "^2.1.3",

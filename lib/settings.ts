@@ -21,6 +21,7 @@ export const MANAGED_KEYS = [
   'LLM_BASE_URL',
   'LLM_API_KEY',
   'LLM_MODEL',
+  'TYPESAFE_API_KEY',
   'TAVILY_API_KEY',
   'OPENWEATHER_API_KEY',
   'UP_API_TOKEN',
@@ -52,6 +53,7 @@ const CREDENTIALS = new Set<string>([
   'GEMINI_API_KEY',
   'OPENROUTER_API_KEY',
   'LLM_API_KEY',
+  'TYPESAFE_API_KEY',
   'TAVILY_API_KEY',
   'OPENWEATHER_API_KEY',
   'UP_API_TOKEN',
@@ -220,6 +222,11 @@ export const SETTING_META: Record<
   },
   LLM_API_KEY: { group: 'Self-hosted LLM', label: 'API key', help: 'Leave empty if your server does not check one.' },
   LLM_MODEL: { group: 'Self-hosted LLM', label: 'Models', help: 'Must support tool calling.' },
+  TYPESAFE_API_KEY: {
+    group: 'TypeSafe Jev', label: 'API key',
+    help: 'Optional. With a key, the yes-or-no and pick-one questions behind the bot go to Jev; without one they go to the chain above.',
+    link: { href: 'https://console.typesafe.ai/settings/keys', text: 'console.typesafe.ai' },
+  },
   TAVILY_API_KEY: {
     group: 'Web search', label: 'Tavily key',
     link: { href: 'https://app.tavily.com', text: 'app.tavily.com' },
@@ -294,6 +301,7 @@ export const SETTING_GROUPS = [
   'Google Gemini',
   'OpenRouter',
   'Self-hosted LLM',
+  'TypeSafe Jev',
   'Money',
   'Tasks',
   'Notes',
@@ -313,6 +321,8 @@ export const GROUP_NOTES: Partial<Record<(typeof SETTING_GROUPS)[number], string
     'Whether a provider may train on your prompts is an account setting at openrouter.ai/settings/privacy, not a property of the model. With training off, OpenRouter only routes to providers that do not train, so a free model that answers has not trained on you, and one that cannot be reached is being refused rather than quietly used. Test below to see which is which.',
   'Self-hosted LLM':
     'The only tier where nothing leaves the house. Point this at a server you run and put it first, and the rest become the fallback.',
+  'TypeSafe Jev':
+    'Jev judges rather than writes: given a question with a yes or a name for an answer, it returns a probability in about a tenth of a second, for a fraction of a cent. With a key set it decides whether an unaddressed group message is for the bot, whether a reply claims a change no tool made, and whether each watcher post is true to its evidence; the chain above still writes every reply and post. System lists its calls under jev:.',
 }
 
 export type SettingView = {

@@ -62,14 +62,18 @@ chatter, so a fact from last week is still in reach without the transcript.
 Before anything a watcher wrote reaches the chat it passes two checks in fresh
 contexts: each checkable claim is tested against the evidence by a call that
 never sees the draft, and what fails is removed from the draft with the rest
-left as written; then a payoff-framed decision says post or skip with a
-confidence, judging only whether the draft is true to its evidence: what the
-writer chose to include is not re-judged. A draft held back at either step goes to an admin by DM with the
-reason and the draft, so a snapshot that should have posted is never merely
-quiet. Calls that want an object back rather than prose try first the models
-that have lately been returning one, whatever the chain order for chat. A chat
-also hears from its watchers at most six times an hour, with an admin told the
-first time the cap holds something back.
+left as written; then a decision says post or skip with a confidence, judging
+only whether the draft is true to its evidence: what the writer chose to
+include is not re-judged. With a TypeSafe key these judgements, the ambient
+gate and the check on a reply that reports a change no tool made are put to
+[Jev](https://typesafe.ai), a model that answers typed yes-or-no and pick-one
+questions with a probability rather than writing anything; without one they
+are structured calls to the chain, which then tries first the models that have
+lately been returning an object, whatever the chain order for chat. A draft
+held back at either step goes to an admin by DM with the reason and the draft,
+so a snapshot that should have posted is never merely quiet. A chat also hears
+from its watchers at most six times an hour, with an admin told the first time
+the cap holds something back.
 
 ## Layout
 
@@ -91,6 +95,7 @@ first time the cap holds something back.
 | `lib/watchers.ts` | The ready-made watchers: schedule, phrasing rules, context tools |
 | `lib/builtins.ts` | Installs the built-in watchers in every household group and keeps them in step with their definitions |
 | `lib/model.ts` | Tiered model chain: local, Gemini, OpenRouter |
+| `lib/jev.ts` | TypeSafe Jev: the typed judgements (gate, reply check, claim checks, post decision), their questions and thresholds |
 | `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations |
 | `lib/tools/router.ts` | Which tool groups a chat turn sees, and the `more_tools` escape hatch |
 | `app/api/mcp/route.ts` | The same tools over MCP, behind a per-member key |
@@ -193,6 +198,9 @@ Delegated permissions: `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`,
   [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
 - **OpenRouter** — [openrouter.ai/keys](https://openrouter.ai/keys). Free models
   are capped at 50 requests/day until you buy any credit, then 1000.
+- **TypeSafe** — optional; an API key from
+  [console.typesafe.ai](https://console.typesafe.ai/settings/keys) puts the
+  typed decisions to Jev instead of the chain. See [Typed decisions](#typed-decisions).
 - **Langfuse** — optional; a project's public and secret key from
   [langfuse.com](https://langfuse.com) turn on tracing of every model call.
   See [Observability](#observability).
@@ -244,6 +252,27 @@ calling.
 OpenAI-compatible layer ignores values it does not know and cannot switch
 thinking off on Gemini 3 models, so check token counts after changing it rather
 than assuming it took.
+
+### Typed decisions
+
+Beside the chain sits one optional judge. `TYPESAFE_API_KEY` (Settings →
+TypeSafe Jev) sends the typed decisions to TypeSafe's
+[Jev](https://docs.typesafe.ai): a System One model that does not write, only
+answers yes-or-no and pick-one questions with a calibrated probability, in
+about 100 ms, at $0.042 per million input tokens and nothing for output. Hearth
+asks it four things: whether an unaddressed group message is for the bot,
+whether a chat reply reports a change no tool made, whether each statement in
+a watcher draft is in its evidence, and whether the draft as a whole is. The
+chain still writes every reply, draft and edit.
+
+Every question and every threshold is in `lib/jev.ts`, so what the bot asks
+and where it draws each line is one file to read. Without the key those four
+go to the chain as structured outputs, as before; if Jev cannot answer, the
+same question goes to the chain, or falls the safe way (the gate stays quiet,
+a reply is left alone). `TYPESAFE_DEFAULT_MODEL` pins a version
+(`jev-1.13.0`) where `jev-latest` would move without notice. Its calls sit
+beside the chain's on **System** under `jev:`, and in Langfuse as generations
+named after the decision.
 
 ### 5. Deploy
 
@@ -367,9 +396,10 @@ its data in code first, so an hour with nothing new never reaches a model at
 all. When there is something, the model only phrases it, with a handful of
 context tools: a transaction arrives as payee, amount and date, with a purpose
 only when a household fact, calendar entry or email names one, and "purpose not
-recorded" otherwise. A second, tool-free call then decides post or skip against
-the evidence, on grounding alone, and gives a confidence; anything under 0.7 is held back, logged,
-and sent to an admin with the reason. The commands are registered with
+recorded" otherwise. Then post or skip is decided against the evidence, on
+grounding alone, with a confidence: by Jev when a TypeSafe key is set,
+otherwise by a second, tool-free call to the chain. Anything under 0.7 is held
+back, logged, and sent to an admin with the reason. The commands are registered with
 Telegram, so the `/` menu lists them; nothing to remember. Anything the
 templates don't cover is a sentence away:
 describe a schedule in plain words and it becomes a custom automation with
@@ -631,7 +661,9 @@ and its result, tokens, timing, and the watcher post decisions with their
 confidence. Traces are named by what the bot was doing (`hearth.chat`,
 `hearth.watcher`, `hearth.sweep`, `hearth.gate`, `hearth.decision`), grouped
 into a session per chat, and carry the member's Telegram id, so one bad reply
-can be followed back to the exact tool result it misread. Tracing is
+can be followed back to the exact tool result it misread. Jev's calls appear
+in the same traces as generations named after the decision, with the state
+and questions sent, the probabilities returned and the tokens spent. Tracing is
 registered once at server start from `instrumentation.ts` and is inert without
 the keys; the OpenTelemetry modules are not even loaded.
 
@@ -688,7 +720,10 @@ it is not from the family under test; `EVAL_JUDGE_MODEL=provider:model`
 overrides it. Judge scores are reported and only fail the run with
 `EVAL_STRICT=1`. The cases in `evals/` are the failures the family has actually
 seen; when a new one turns up, it belongs there before the prompt is touched.
-It spends quota, so it is not part of `npm test` or CI.
+It spends quota, so it is not part of `npm test` or CI. With `TYPESAFE_API_KEY`
+set, `evals/jev.eval.ts` puts the gate, the reply check, the claim checks and
+the post decision to Jev on the same fixtures, so a threshold in `lib/jev.ts`
+is judged on cases rather than by feel.
 
 ```bash
 npm run dev           # http://localhost:3000

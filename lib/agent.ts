@@ -9,6 +9,7 @@ import {
 } from 'ai'
 import { z } from 'zod'
 import { withModelFallback, structuredChain, type ModelSlot } from './model'
+import { jevConfigured, wantsAssistant, claimsChange, checkClaims, decidePost } from './jev'
 import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, WRITE_TOOLS, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
 import type { ToolContext } from './tools/context'
 import { recentMessages, listMemories, openQuestions, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals, chatSummary } from './db/queries'
@@ -411,9 +412,11 @@ const CLAIM_RULES = [
 /**
  * A typed judgement, like the ambient gate, rather than a list of verbs: the
  * household may have the bot speak any language, and a small model finds new
- * ways to say "done" faster than a pattern could be extended.
+ * ways to say "done" faster than a pattern could be extended. Jev answers it
+ * when a key is set; otherwise the slot that wrote the reply is asked.
  */
 async function reportsChange(slot: ModelSlot, reply: string, chatId: string): Promise<boolean> {
+  if (jevConfigured()) return claimsChange({ reply, chatId })
   const out = await traced(
     { traceName: 'hearth.claim', sessionId: chatId, tags: ['claim'], metadata: { model: slot.name } },
     () =>
@@ -662,13 +665,23 @@ const DECISION_PROMPT = [
  * Grounding is all it judges, too: which items belong was the writer's call
  * under the instruction, and a decision that also scored "what the household
  * would not need" once held a whole brief back over one mail item it took for
- * a promotion.
+ * a promotion. With a TypeSafe key the judgement is Jev's (lib/jev.ts): two
+ * probabilities combined in code, no object to parse. The prompt below is the
+ * chain's, asked when there is no key or Jev cannot answer, so a draft is
+ * never posted unchecked while any judge is up.
  */
 export async function decideWatcherPost(input: {
   label: string
   draft: string
   evidence: string
 }): Promise<PostDecision & { model: string }> {
+  if (jevConfigured()) {
+    try {
+      return await decidePost(input)
+    } catch (err) {
+      console.warn(`[agent] Jev could not decide on "${input.label}"; asking the chain:`, describeError(err))
+    }
+  }
   return withModelFallback(async (slot) => {
     const r = await traced({ traceName: 'hearth.decision', tags: ['decision'], metadata: { label: input.label, model: slot.name } }, () =>
       generateText({
@@ -737,6 +750,49 @@ const REWRITE_PROMPT = [
 export type DraftReview = { claims: string[]; unsupported: string[]; message: string | null }
 
 /**
+ * Whether the evidence supports each statement. Jev judges them all in one
+ * call when a key is set, the evidence sent once and the statements weighed
+ * in parallel; the chain is asked, one statement per call, when there is no
+ * key or Jev cannot answer. Either way the checker sees the evidence and one
+ * statement, never the draft.
+ */
+async function checkEach(
+  claims: string[],
+  evidence: string,
+  label: string,
+  chain: ModelSlot[],
+  meta: (step: string, model: string) => Parameters<typeof traced>[0],
+): Promise<boolean[]> {
+  if (jevConfigured()) {
+    try {
+      return (await checkClaims({ label, claims, evidence })).map((c) => c.supported)
+    } catch (err) {
+      console.warn(`[agent] Jev could not check the "${label}" draft; asking the chain:`, describeError(err))
+    }
+  }
+  return Promise.all(
+    claims.map((claim) =>
+      withModelFallback((slot) =>
+        traced(meta('check', slot.name), () =>
+          generateText({
+            model: slot.model,
+            system: CHECK_PROMPT,
+            prompt: `EVIDENCE:\n${evidence}\n\nSTATEMENT TO CHECK:\n${claim}`,
+            output: Output.object({ schema: checkSchema, name: 'check' }),
+            temperature: 0,
+            maxOutputTokens: 300,
+            timeout: { stepMs: 30_000 },
+            telemetry: callTelemetry('hearth.verify'),
+          }),
+        ).then((r) => r.output.supported),
+        chain,
+        'hearth.verify',
+      ),
+    ),
+  )
+}
+
+/**
  * Chain-of-Verification, factored: pull the checkable claims out of the draft,
  * ask about each one in a fresh context that sees only the evidence (never the
  * draft, so the checker cannot be talked into agreeing with it), then remove
@@ -770,32 +826,13 @@ export async function reviewDraft(input: { label: string; draft: string; evidenc
   ).slice(0, MAX_CLAIMS)
   if (claims.length === 0) return { claims, unsupported: [], message: input.draft }
 
-  const checks = await Promise.all(
-    claims.map((claim) =>
-      withModelFallback((slot) =>
-        traced(meta('check', slot.name), () =>
-          generateText({
-            model: slot.model,
-            system: CHECK_PROMPT,
-            prompt: `EVIDENCE:\n${evidence}\n\nSTATEMENT TO CHECK:\n${claim}`,
-            output: Output.object({ schema: checkSchema, name: 'check' }),
-            temperature: 0,
-            maxOutputTokens: 300,
-            timeout: { stepMs: 30_000 },
-            telemetry: callTelemetry('hearth.verify'),
-          }),
-        ).then((r) => r.output),
-        chain,
-        'hearth.verify',
-      ),
-    ),
-  )
-  const unsupported = claims.filter((_, i) => !checks[i].supported)
+  const checks = await checkEach(claims, evidence, input.label, chain, meta)
+  const unsupported = claims.filter((_, i) => !checks[i])
   if (unsupported.length === 0) return { claims, unsupported, message: input.draft }
 
   // Even when every listed claim fails the post is edited, not dropped: the
   // list may be the capped few, and what it left out is still the post.
-  const supported = claims.filter((_, i) => checks[i].supported)
+  const supported = claims.filter((_, i) => checks[i])
   const rewritten = await withModelFallback((slot) =>
     traced(meta('rewrite', slot.name), () =>
       generateText({
@@ -871,12 +908,19 @@ async function askGate(
   return picked
 }
 
+/** A history message as one line of transcript; user lines already carry the speaker's name. */
+function transcriptLine(m: ModelMessage): string {
+  const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+  return m.role === 'assistant' ? `Hearth: ${text}` : text
+}
+
 /**
  * Cheap gate for ambient group chatter: should the bot chime in at all?
- * Runs on one model only, fails closed (stay quiet) on any error, and
- * replies only when the question answered from both sides agrees. Most
- * chatter is settled by the first call; the second is only spent on a
- * message the first call wanted to answer.
+ * Fails closed (stay quiet) on any error. With a TypeSafe key the question
+ * goes to Jev once, as one probability with a line drawn on it. Otherwise it
+ * runs on one chain model only and replies only when the question answered
+ * from both sides agrees: most chatter is settled by the first call, and the
+ * second is only spent on a message the first call wanted to answer.
  */
 export async function shouldChimeIn(input: {
   chatId: string
@@ -886,6 +930,13 @@ export async function shouldChimeIn(input: {
 }): Promise<boolean> {
   const history = (await historyMessages(input.chatId, input.excludeMessageId)).slice(-6)
   try {
+    if (jevConfigured()) {
+      return await wantsAssistant({
+        chatId: input.chatId,
+        conversation: history.map(transcriptLine),
+        message: `${input.memberName}: ${input.text}`,
+      })
+    }
     return await withModelFallback(
       async (slot) => {
         const first = await askGate(slot, history, input, 'reply')

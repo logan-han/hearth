@@ -58,6 +58,36 @@ export async function traced<T>(attrs: PropagateAttributesParams, fn: () => Prom
   return propagateAttributes(attrs, fn)
 }
 
+/**
+ * Run `fn` as one generation observation of its own: the model, what went in,
+ * what came back and the tokens it cost. The AI SDK reports its own calls
+ * through the integration above; anything else that asks a model, Jev above
+ * all, reports through this so it sits in the same trace as the reply it
+ * shaped. Plain when tracing is off. Content is kept or dropped on the same
+ * switch as everything else.
+ */
+export async function observed<T>(
+  name: string,
+  attrs: { model: string; input: unknown },
+  fn: () => Promise<T>,
+  summarise: (out: T) => { output: unknown; usage?: Record<string, number> },
+): Promise<T> {
+  if (!processor()) return fn()
+  const { startActiveObservation } = await import('@langfuse/tracing')
+  const keep = recordContent()
+  return startActiveObservation(
+    name,
+    async (generation) => {
+      generation.update({ model: attrs.model, ...(keep ? { input: attrs.input } : {}) })
+      const out = await fn()
+      const s = summarise(out)
+      generation.update({ ...(keep ? { output: s.output } : {}), ...(s.usage ? { usageDetails: s.usage } : {}) })
+      return out
+    },
+    { asType: 'generation' },
+  )
+}
+
 /** Per-call settings for generateText: a name for the call, and whether content is kept. */
 export function callTelemetry(functionId: string) {
   const keep = recordContent()
