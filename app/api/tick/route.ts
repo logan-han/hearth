@@ -432,7 +432,8 @@ async function runDue(): Promise<{ ran: number; skipped: number }> {
   for (const a of due) {
     // Claim before running: an overlapping tick then finds nothing to do.
     const following = nextRun(a.cronExpr, new Date(now.getTime() + 1000))
-    if (!(await claimAutomation(a.id, a.nextRunAt, following))) {
+    if (!(await claimAutomation(a.id, now, following))) {
+      console.info(`[tick] ${a.label}: already claimed by another tick, skipped`)
       skipped++
       continue
     }

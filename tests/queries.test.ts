@@ -317,6 +317,20 @@ describe('automations', () => {
     expect(await q.claimAutomation(a.id, soon, next)).toBe(false)
   })
 
+  it('claims a row whose time carries microseconds, as one nudged by hand in SQL does', async () => {
+    const a = await make()
+    await client.query(`update automations set next_run_at = next_run_at + interval '861 microseconds' where id = $1`, [a.id])
+    expect(await q.claimAutomation(a.id, new Date(soon.getTime() + 1000), new Date('2026-09-08T00:00:00Z'))).toBe(true)
+    expect((await q.getAutomation(a.id))!.nextRunAt).toEqual(new Date('2026-09-08T00:00:00Z'))
+  })
+
+  it('does not claim a row that is not yet due, nor a paused one', async () => {
+    const a = await make()
+    expect(await q.claimAutomation(a.id, new Date(soon.getTime() - 1000), new Date('2026-09-08T00:00:00Z'))).toBe(false)
+    await q.setAutomationEnabled(a.id, false)
+    expect(await q.claimAutomation(a.id, new Date(soon.getTime() + 1000), new Date('2026-09-08T00:00:00Z'))).toBe(false)
+  })
+
   it('disables itself when there is no next run', async () => {
     const a = await make()
     await q.claimAutomation(a.id, soon, null)

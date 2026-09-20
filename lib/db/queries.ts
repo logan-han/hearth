@@ -517,10 +517,15 @@ export async function dueAutomations(now: Date) {
 }
 
 /**
- * Advance an automation's schedule. The `nextRunAt` predicate makes the update a
- * lock: two overlapping ticks cannot both claim the same due run.
+ * Advance an automation's schedule. The predicate makes the update a lock: the
+ * row is claimed only while it is still due as of `now`, and the first of two
+ * overlapping ticks moves it into the future, so the second finds nothing. It
+ * is "still due" rather than "exactly the time we read": Postgres keeps
+ * microseconds and a Date does not, so a row nudged by hand with `now()` in
+ * SQL never matched the equality this once used, and stayed due, unclaimed
+ * and silent, tick after tick.
  */
-export async function claimAutomation(id: number, expectedRun: Date, nextRunAt: Date | null) {
+export async function claimAutomation(id: number, now: Date, nextRunAt: Date | null) {
   const rows = await db()
     .update(automations)
     .set({
@@ -528,7 +533,7 @@ export async function claimAutomation(id: number, expectedRun: Date, nextRunAt: 
       nextRunAt: nextRunAt ?? new Date(8640000000000),
       enabled: nextRunAt !== null,
     })
-    .where(and(eq(automations.id, id), eq(automations.nextRunAt, expectedRun)))
+    .where(and(eq(automations.id, id), eq(automations.enabled, true), lte(automations.nextRunAt, now)))
     .returning()
   return rows.length > 0
 }

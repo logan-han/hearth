@@ -189,11 +189,12 @@ describe('running due automations', () => {
     expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
   })
 
-  it('schedules the following run strictly in the future', async () => {
+  it('claims as of now, and schedules the following run strictly in the future', async () => {
     dueAutomations.mockResolvedValue([automation()])
     await authed()
-    const [, expected, next] = claimAutomation.mock.calls[0]
-    expect(expected).toEqual(new Date('2026-09-07T09:00:00Z'))
+    const [, asOf, next] = claimAutomation.mock.calls[0]
+    expect(asOf.getTime()).toBeGreaterThan(Date.now() - 60_000)
+    expect(asOf.getTime()).toBeLessThanOrEqual(Date.now())
     expect(next!.getTime()).toBeGreaterThan(Date.now())
   })
 
