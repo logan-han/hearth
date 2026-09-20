@@ -7,9 +7,9 @@
  *
  * Telegram has no headings, rules, lists or tables, and since Bot API 7.0 it
  * has blockquotes, which fold once marked expandable. So headings become bold,
- * rules go, bullets become the bullet character, a pipe table becomes lines
- * of **label**: value, and a run of `>` lines becomes one quote, folded when
- * it is long enough to be worth folding.
+ * rules go, bullets become the bullet character, a pipe table becomes aligned
+ * monospace lines, and a run of `>` lines becomes one quote, folded when it
+ * is long enough to be worth folding.
  */
 
 function escapeHtml(s: string): string {
@@ -30,9 +30,8 @@ export function toTelegramHtml(text: string): string {
     park(`<pre>${escapeHtml(body.replace(/\n$/, ''))}</pre>`),
   )
   // Tables while their cells are still Markdown, and before inline code is
-  // parked, so a backtick in a cell is stripped rather than parked. The lines
-  // they become carry **bold** labels, which the emphasis pass below converts.
-  out = tablesToLines(out)
+  // parked, so a backtick in a cell is stripped rather than nested in a span.
+  out = replaceTables(out, (lines) => park(lines.map((line) => `<code>${escapeHtml(line)}</code>`).join('\n')))
   out = out.replace(/`([^`\n]+)`/g, (_, body: string) => park(`<code>${escapeHtml(body)}</code>`))
 
   out = escapeHtml(out)
@@ -77,12 +76,10 @@ export function toTelegramHtml(text: string): string {
 
 const ROW = /^\s*\|.*\|\s*$/
 const SEPARATOR = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$/
-/** A figure as a snapshot writes one: an optional sign, currency, thousands and a percent. */
-const FIGURE = /^[-+−]?\$?\d[\d,]*(?:\.\d+)?%?$/
-/** Between the figures of one row, once they share a line. */
-const BETWEEN = ' · '
+/** A cell that opens with a figure: a sign, a currency sign or a digit. "20 of 30 days" counts, a payee name does not. */
+const FIGURE = /^[-+−]?\$?\d/
 
-/** A cell's own emphasis is stripped: the label gets the bold, and a figure needs none. */
+/** A monospace span cannot hold other entities, so a cell's emphasis is stripped, not converted. */
 function plainCell(cell: string): string {
   return cell
     .trim()
@@ -98,37 +95,35 @@ function cells(line: string): string[] {
   return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(plainCell)
 }
 
-const bold = (s: string) => (s ? `**${s}**` : '')
-const labelled = (label: string, value: string) => (label && value ? `${bold(label)}: ${value}` : bold(label) || value)
-
 /**
- * A table as lines. Telegram has no table element, and the monospace block
- * that can hold columns arrives as a code box, grey with a copy button and
- * wider than a phone once the headers are words; so each row becomes one
- * line, its first cell the **bold** label and the rest its figures. A table
- * of one row of figures under several headers, the shape a model reaches for
- * to line up a few totals, is turned on its side: each header labels its own
- * figure. With three or more columns the headers ride along, or the figures
- * would lose their meaning once the columns are gone.
+ * Pad the columns square. Figures line up on the right, like a ledger; words
+ * on the left. A header row's words do not decide a column's alignment, and
+ * a table need not have one: an empty header row (| | |) is dropped, so a
+ * few totals can be laid out with nothing above them.
  */
-export function tableToLines(rows: string[][]): string[] {
-  const [header = [], ...body] = rows
-  if (body.length === 0) return [header.filter(Boolean).join(BETWEEN)].filter(Boolean)
-  if (body.length === 1 && FIGURE.test(body[0][0] ?? '')) {
-    return header.map((h, c) => labelled(h, body[0][c] ?? '')).filter(Boolean)
-  }
-  const wide = header.length > 2
-  return body.map(([first = '', ...rest]) => {
-    const figures = rest
-      .map((v, i) => (wide && header[i + 1] && v ? `${header[i + 1]} ${v}` : v))
-      .filter(Boolean)
-      .join(BETWEEN)
-    return labelled(first, figures)
-  })
+export function layoutTable(rows: string[][]): string[] {
+  const headed = !rows[0].every((c) => c === '')
+  const kept = headed ? rows : rows.slice(1)
+  if (kept.length === 0) return []
+  const width = Math.max(...kept.map((r) => r.length))
+  const grid = kept.map((r) => [...r, ...Array<string>(width - r.length).fill('')])
+  const len = (s: string) => [...s].length
+  const widths = grid[0].map((_, c) => Math.max(...grid.map((r) => len(r[c]))))
+  const body = headed ? grid.slice(1) : grid
+  const numeric = grid[0].map((_, c) => body.length > 0 && body.every((r) => r[c] === '' || FIGURE.test(r[c])))
+  return grid.map((r) => r.map((cell, c) => (numeric[c] ? cell.padStart(widths[c]) : cell.padEnd(widths[c]))).join('  ').trimEnd())
 }
 
-/** Each pipe table (a header row, a separator, then rows) becomes its lines, in place. */
-export function tablesToLines(text: string): string {
+/**
+ * Each pipe table (a header row, a separator, then rows) becomes whatever
+ * `render` makes of its aligned lines. Telegram has no table element, and a
+ * monospace font is the one way to line columns up; it comes in two forms. A
+ * <pre> block is what the apps draw as a code box, grey and padded with a
+ * copy button in its corner, and a money snapshot in one read as broken. A
+ * <code> span is the same font without the box, so each line goes out as its
+ * own span and the lines stack into a table.
+ */
+export function replaceTables(text: string, render: (lines: string[]) => string): string {
   const lines = text.split('\n')
   const out: string[] = []
   for (let i = 0; i < lines.length; ) {
@@ -136,7 +131,8 @@ export function tablesToLines(text: string): string {
       const rows = [cells(lines[i])]
       let j = i + 2
       while (j < lines.length && ROW.test(lines[j])) rows.push(cells(lines[j++]))
-      out.push(...tableToLines(rows))
+      const laid = layoutTable(rows)
+      if (laid.length) out.push(render(laid))
       i = j
     } else {
       out.push(lines[i++])

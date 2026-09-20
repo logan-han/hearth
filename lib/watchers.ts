@@ -51,8 +51,10 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
     builtin: true,
     instruction: [
       "The household's spending for the past week and for the month so far, and the month's budget where there is one, are under DATA. Post the weekly money snapshot.",
-      'Open with a **bold** title line naming the week. Then the figures, one per line as **label**: figure: spent this week, spent this month so far, and the budget used with how far through the month it is. Then **Largest payments**: the week\'s largest as bullets, each with payee, amount and category as given. Then **Over budget**: each category whose position says over, as a bullet with its position as given; leave out categories under or on budget and categories with no budget set.',
-      'Figures exactly as given, no arithmetic of your own, no advice. Say what a payment was for only when a Known household fact or a note on the transaction names it, and say which.',
+      'Open with a **bold** title line naming the week by its dates, in the form "Money snapshot, 7 to 13 Jun". Then a two-column pipe table with an empty header row (| | |) and four short rows: "This week" and its spend, "This month so far" and its spend, "Budget used" and its percentage, "Month elapsed" and the days as given, such as 20 of 30 days.',
+      'Then **Largest payments**: the week\'s largest as bullets, each payee, amount and category as given. Add what one was for only when a note on it or a Known household fact names it, and say which; otherwise say nothing about its purpose.',
+      'Then **Over budget**: a two-column pipe table with the header row | Category | Over by |, a row for each category whose position says over, giving the amount from its position; leave out categories under or on budget and categories with no budget set. If DATA lists rollover_used_up, end with one line, "Nothing left this month after rollover:" and those categories as given.',
+      'Figures exactly as given, no arithmetic of your own, no advice.',
     ].join(' '),
     tools: ['recall'],
   },

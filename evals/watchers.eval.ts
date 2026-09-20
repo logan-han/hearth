@@ -54,6 +54,7 @@ vi.mock('@/lib/tools', async (orig) => {
 const { runAgent, decideWatcherPost, reviewDraft } = await import('@/lib/agent')
 const { WATCHERS, watcherInstruction } = await import('@/lib/watchers')
 const { plainData } = await import('@/lib/plain-data')
+const { toTelegramHtml } = await import('@/lib/telegram-format')
 
 const LISBON = {
   transactions: {
@@ -90,10 +91,12 @@ const SNAPSHOT = {
     expenses: { actual: '-$6,210.55', forecast: '-$5,400.00', used: '115%' },
     budget_by_category: [
       { category: 'Kids', actual: '$2,119.47', forecast: '$1,500.00', budget_period: '2026-09-01 to 2026-09-30', position: 'over by $619.47' },
-      { category: 'Shopping', actual: '$177.43', forecast: '$0.00', budget_period: '2026-09-01 to 2026-09-30', position: 'over by $177.43 (nothing left this month after rollover)' },
+      { category: 'Shopping', actual: '$177.43', forecast: '$0.00', budget_period: '2026-09-01 to 2026-09-30', position: 'over by $177.43', note: 'nothing left this month after rollover' },
+      { category: 'Transport', actual: '$14.31', forecast: '$0.00', budget_period: '2026-09-01 to 2026-09-30', position: 'over by $14.31', note: 'nothing left this month after rollover' },
       { category: 'Groceries', actual: '$1,102.40', forecast: '$1,400.00', budget_period: '2026-09-01 to 2026-09-30', position: 'under by $297.60' },
       { category: 'Pets', actual: '$96.00', forecast: '$0.00', budget_period: '2026-09-01 to 2026-09-30', position: 'no budget set' },
     ],
+    rollover_used_up: ['Shopping', 'Transport'],
   },
 }
 const snapshotData = plainData(SNAPSHOT)
@@ -101,22 +104,24 @@ const snapshotData = plainData(SNAPSHOT)
 afterAll(() => printSummary('watchers'))
 
 describe.skipIf(!liveChainConfigured())('money snapshot', () => {
-  it('lays the week out as a title, label lines and bold parts, with no table and only the over-budget categories', async () => {
+  it('lays the week out as a title, two-column tables and bold parts, the rollover said once, no purpose line, over-budget only', async () => {
     calls.length = 0
     const r = await runAgent({ ...base, tools: WATCHERS.snapshot.tools, text: `Scheduled check "Money snapshot".\n\n${WATCHERS.snapshot.instruction}\n\nDATA (fetched just now):\n${snapshotData}` })
+    if (process.env.EVAL_PRINT) console.log(`\n----- snapshot draft -----\n${r.text}\n----- as Telegram HTML -----\n${toTelegramHtml(r.text)}\n-----`)
     const figures = figuresGrounded(r.text, snapshotData)
-    const noTable = !/^\s*\|/m.test(r.text)
-    const labelLines = (r.text.match(/^\s*(?:[-•]\s*)?\*\*[^*\n]+\*\*:\s*\S/gm) ?? []).length >= 3
+    const tables = (r.text.match(/^\s*\|\s*-{3,}/gm) ?? []).length
     const hasTitle = /^\*\*[^*\n]+\*\*\s*$/m.test(r.text)
+    const rolloverLines = (r.text.match(/rollover/gi) ?? []).length
     const overOnly = /Shopping/.test(r.text) && /Kids/.test(r.text) && !/Pets/.test(r.text) && !/under by/i.test(r.text)
-    const hard = figures.ok && noLeak(r.text) && noTable && labelLines && hasTitle && overOnly && /1,842\.10/.test(r.text) && /6,210\.55/.test(r.text) && /115%/.test(r.text)
+    const hard = figures.ok && noLeak(r.text) && tables >= 2 && hasTitle && rolloverLines === 1 && !/purpose not recorded/i.test(r.text) && overOnly && /1,842\.10/.test(r.text) && /6,210\.55/.test(r.text) && /115%/.test(r.text)
     const g = await judgeGroundedness({ answer: r.text, context: snapshotData })
-    record({ case: 'snapshot: label lines, no table, over-budget only', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
+    record({ case: 'snapshot: tables, rollover once, no purpose line, over-budget only', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
     expect(figures.missing).toEqual([])
-    expect(noTable).toBe(true)
-    expect(labelLines).toBe(true)
+    expect(tables).toBeGreaterThanOrEqual(2)
     expect(hasTitle).toBe(true)
-    expect(r.text).toMatch(/Shopping/)
+    expect(rolloverLines).toBe(1)
+    expect(r.text).toMatch(/Nothing left this month after rollover:.*Shopping/i)
+    expect(r.text).not.toMatch(/purpose not recorded/i)
     expect(r.text).not.toMatch(/Pets/)
     expect(r.text).not.toMatch(/under by/i)
     expect(noLeak(r.text)).toBe(true)

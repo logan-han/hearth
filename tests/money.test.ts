@@ -4,7 +4,7 @@ import { freshDb, closeDb } from './helpers/db'
 import { getSetting } from '@/lib/db/queries'
 import type { ToolContext } from '@/lib/tools/context'
 
-const { moneyTools, budgetPosition } = await import('@/lib/tools/money')
+const { moneyTools, budgetPosition, budgetNote } = await import('@/lib/tools/money')
 const up = await import('@/lib/providers/up')
 const ps = await import('@/lib/providers/pocketsmith')
 
@@ -406,16 +406,32 @@ describe('pocketsmith client', () => {
     expect(rows.map((x) => x.category)).not.toContain('Transfers')
   })
 
-  it('never calls a budgeted category unbudgeted: a zero allowance is rollover or cadence, said so beside the overspend', async () => {
+  it('never calls a budgeted category unbudgeted: a zero allowance is rollover or cadence, noted beside the overspend and named once together', async () => {
     const r = await call('budget_summary', {})
-    const rows = r.budget_by_category as { category: string; position: string; forecast: string }[]
+    const rows = r.budget_by_category as { category: string; position: string; forecast: string; note?: string }[]
     expect(rows.find((x) => x.category === 'Shopping')).toMatchObject({
       forecast: '$0.00',
-      position: 'over by $177.43 (nothing left this month after rollover)',
+      position: 'over by $177.43',
+      note: 'nothing left this month after rollover',
     })
-    expect(rows.find((x) => x.category === 'Car rego')?.position).toBe('over by $20.00 (nothing budgeted for this month)')
+    expect(rows.find((x) => x.category === 'Car rego')).toMatchObject({ position: 'over by $20.00', note: 'nothing budgeted for this month' })
+    expect(rows.find((x) => x.category === 'Pets')).toEqual(expect.not.objectContaining({ note: expect.anything() }))
     expect(rows.find((x) => x.category === 'Pets')?.position).toBe('no budget set')
+    expect(rows.find((x) => x.category === 'Medical')).not.toHaveProperty('note')
     expect(rows.map((x) => x.position).join(' ')).not.toContain('unbudgeted')
+    expect(r.rollover_used_up).toEqual(['Shopping'])
+  })
+
+  it('leaves the rollover list out when no category was used up by it', async () => {
+    fetchMock.mockImplementation(async (url: URL) =>
+      String(url).endsWith('/me')
+        ? json({ id: 42 })
+        : String(url).includes('/budget_summary')
+          ? json({})
+          : json([{ category: { title: 'Kids' }, is_budgeted: true, expense: { total_actual_amount: -10, total_forecast_amount: -100, total_over_by: 0, total_under_by: 90 } }]),
+    )
+    const r = await call('budget_summary', {})
+    expect(r).not.toHaveProperty('rollover_used_up')
   })
 
   it('lists budgeted categories first, most over budget at the top, and spending with no budget last', async () => {
@@ -425,12 +441,14 @@ describe('pocketsmith client', () => {
     expect(names.at(-1)).toBe('Pets')
   })
 
-  it('positions a budget line from its own fields', () => {
+  it('positions and annotates a budget line from its own fields', () => {
     const base = { budgeted: true, rollsOver: false, forecast: 100, overBy: 0, underBy: 0 }
     expect(budgetPosition(base, 'AUD')).toBe('on budget')
-    expect(budgetPosition({ ...base, forecast: 0, rollsOver: true, overBy: 0 }, 'AUD')).toBe('nothing left this month after rollover')
-    expect(budgetPosition({ ...base, forecast: 0, overBy: 0 }, 'AUD')).toBe('nothing budgeted for this month')
+    expect(budgetNote(base)).toBeUndefined()
+    expect(budgetNote({ ...base, forecast: 0, rollsOver: true })).toBe('nothing left this month after rollover')
+    expect(budgetNote({ ...base, forecast: 0 })).toBe('nothing budgeted for this month')
     expect(budgetPosition({ ...base, budgeted: false, forecast: 0, overBy: 50 }, 'AUD')).toBe('no budget set')
+    expect(budgetNote({ ...base, budgeted: false, forecast: 0 })).toBeUndefined()
   })
 
   it('copes with a budget response missing a side entirely', async () => {

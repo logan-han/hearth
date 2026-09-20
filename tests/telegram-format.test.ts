@@ -66,39 +66,40 @@ describe('toTelegramHtml', () => {
     expect(toTelegramHtml('5 > 3 and > so on')).toBe('5 &gt; 3 and &gt; so on')
   })
 
-  it('turns a pipe table into bold-label lines, never a code box', () => {
+  it('lays a pipe table out as aligned monospace lines, figures on the right, with no code box', () => {
     const md = ['| Category | Spend |', '|---|---:|', '| **Kids** | $42.75 |', '| Housing | $826.41 |'].join('\n')
-    expect(toTelegramHtml(md)).toBe('<b>Kids</b>: $42.75\n<b>Housing</b>: $826.41')
+    expect(toTelegramHtml(md)).toBe('<code>Category    Spend</code>\n<code>Kids       $42.75</code>\n<code>Housing   $826.41</code>')
     expect(toTelegramHtml(md)).not.toContain('<pre>')
   })
 
-  it('turns a one-row table of totals on its side, each header labelling its figure', () => {
-    const md = [
-      '| Spent this week | Spent this month so far | Budget used (20 of 30 days) |',
-      '| --- | --- | --- |',
-      '| $5,621.56 | $27,357.98 | 171% |',
-    ].join('\n')
-    expect(toTelegramHtml(md)).toBe(
-      '<b>Spent this week</b>: $5,621.56\n<b>Spent this month so far</b>: $27,357.98\n<b>Budget used (20 of 30 days)</b>: 171%',
-    )
-  })
-
-  it('keeps a one-row table whose first cell is a name the right way up', () => {
-    expect(toTelegramHtml('| Event | When |\n|---|---|\n| Term 3 concludes | All day (Thu, 17 Sept) |')).toBe(
-      '<b>Term 3 concludes</b>: All day (Thu, 17 Sept)',
-    )
-  })
-
-  it('carries the headers along when a table has three or more columns', () => {
-    const md = ['| Category | Actual | Budget |', '|---|---|---|', '| Kids | $5,619.47 | $3,500.00 |', '| Bills | $408.77 | $677.13 |'].join('\n')
-    expect(toTelegramHtml(md)).toBe('<b>Kids</b>: Actual $5,619.47 · Budget $3,500.00\n<b>Bills</b>: Actual $408.77 · Budget $677.13')
+  it('keeps a table of totals with one row as a table, its figures under their headers', () => {
+    const md = ['| Spent this week | Budget used |', '| --- | --- |', '| $5,621.56 | 171% |'].join('\n')
+    expect(toTelegramHtml(md)).toBe('<code>Spent this week  Budget used</code>\n<code>      $5,621.56         171%</code>')
   })
 
   it('escapes a table cell, strips code in one, and keeps the text around a table', () => {
-    expect(toTelegramHtml('Before\n| a<b | n |\n|---|---|\n| 1 | `2` |\nAfter')).toBe('Before\n<b>a&lt;b</b>: 1\n<b>n</b>: 2\nAfter')
+    expect(toTelegramHtml('Before\n| a<b | n |\n|---|---|\n| `x` | 1 |\nAfter')).toBe(
+      'Before\n<code>a&lt;b  n</code>\n<code>x    1</code>\nAfter',
+    )
   })
 
-  it('renders a header-only table as its headers on one line', () => {
-    expect(toTelegramHtml('| a | b |\n|---|---|')).toBe('a · b')
+  it('leaves the words in a table out of the emphasis and bullet passes', () => {
+    expect(toTelegramHtml('| Item | Amount |\n|---|---|\n| - a_b * c | 1 |')).toBe('<code>Item       Amount</code>\n<code>- a_b * c       1</code>')
+  })
+
+  it('renders a header-only table as one monospace line, and an empty table as nothing', () => {
+    expect(toTelegramHtml('| a | b |\n|---|---|')).toBe('<code>a  b</code>')
+    expect(toTelegramHtml('x\n| | |\n|---|---|\ny')).toBe('x\ny')
+  })
+
+  it('drops an empty header row and still lines a figures column up on the right', () => {
+    const md = ['| | |', '|---|---|', '| This week | $1,842.10 |', '| Budget used | 115% |', '| Month elapsed | 20 of 30 days |'].join('\n')
+    expect(toTelegramHtml(md)).toBe(
+      '<code>This week          $1,842.10</code>\n<code>Budget used             115%</code>\n<code>Month elapsed  20 of 30 days</code>',
+    )
+  })
+
+  it('does not right-align a column of names that happen to start with digits in the header', () => {
+    expect(toTelegramHtml('| 2Up | Amount |\n|---|---|\n| Costco | $5.00 |')).toBe('<code>2Up     Amount</code>\n<code>Costco   $5.00</code>')
   })
 })

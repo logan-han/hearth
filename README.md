@@ -388,14 +388,16 @@ worth saying**:
   weather alone is not news.
 - **Money snapshot**, Sunday at 6pm: the week's spending and the month so far,
   with the budget's pacing and the categories over it where PocketSmith is
-  connected, or the totals from the raw Up feed where it is not. The figures go
-  out as `**label**: figure` lines, never a table: Telegram has no tables, and
-  the monospace block that can fake one arrives as a code box with a copy
-  button. A budget position comes from PocketSmith's own analysis, in which a
-  month's allowance is the budget after rollover, so a category overspent
-  earlier in the year can be allowed nothing this month while still being
-  budgeted: that reads "over by $X (nothing left this month after rollover)",
-  and only a category with no budget at all is called "no budget set".
+  connected, or the totals from the raw Up feed where it is not. The figures
+  and the over-budget categories go out as two-column tables, which
+  `lib/telegram-format.ts` lays out as aligned monospace lines in inline
+  `code` spans: Telegram has no table element, and the `pre` block that could
+  hold one is drawn as a code box with a copy button. A budget position comes
+  from PocketSmith's own analysis, in which a month's allowance is the budget
+  after rollover, so a category overspent earlier in the year can be allowed
+  nothing this month while still being budgeted: it reads "over by $X", the
+  categories in that state are named together once under the table, and only
+  a category with no budget at all is called "no budget set".
 
 Home lists both under Reminders with a pause; neither can be deleted, since
 the next tick would only put it back. The tick also keeps them in step with
