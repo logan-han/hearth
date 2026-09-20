@@ -3,7 +3,7 @@ import { withRecorded, called, liveChainConfigured } from './harness'
 import { figuresGrounded, noLeak, TRIP_TALK, judgeGroundedness, record, printSummary, strict } from './scorers'
 
 const calls = vi.hoisted(() => [] as { tool: string; input: unknown }[])
-const { STUBS, BODIES, TRIAGE } = vi.hoisted(() => {
+const { STUBS, BODIES, TRIAGE, DAYS } = vi.hoisted(() => {
   const BODIES: Record<string, object> = {
     m1: {
       id: 'm1', from: 'office@riverbendcollege.example', subject: 'Athletics carnival', date: '2026-09-01T08:10:00+10:00',
@@ -37,6 +37,7 @@ const { STUBS, BODIES, TRIAGE } = vi.hoisted(() => {
     },
   ]
   for (const m of TRIAGE) BODIES[m.id] = { ...m, body: m.snippet }
+  const DAYS = { stale: longDay(yesterday), due: longDay(nextWeek) }
   const STUBS = {
     recall: () => ({ memories: [{ id: 3, fact: 'Juno goes to Riverbend College' }] }),
     list_family_events: () => ({ timezone: 'Australia/Melbourne', events: [] }),
@@ -44,7 +45,7 @@ const { STUBS, BODIES, TRIAGE } = vi.hoisted(() => {
     read_email: ({ id }: { id?: string } = {}) => BODIES[id ?? 'm1'] ?? { error: `No message ${id}.` },
     propose_family_event: (input: unknown) => ({ proposal_id: 7, proposed: input }),
   }
-  return { STUBS, BODIES, TRIAGE }
+  return { STUBS, BODIES, TRIAGE, DAYS }
 })
 vi.mock('@/lib/tools', async (orig) => {
   const actual = await orig<typeof import('@/lib/tools')>()
@@ -174,7 +175,7 @@ describe.skipIf(!liveChainConfigured())('money watcher', () => {
     let note = `review: ${review.unsupported.length}/${review.claims.length} cut`
     if (review.message !== null) {
       const d = await decideWatcherPost({ label: '2Up transactions', draft: review.message, evidence })
-      posted = d.decision === 'post' && d.confidence >= 0.7 ? review.message : ''
+      posted = d.decision === 'post' ? review.message : ''
       note += ` | ${d.decision}@${d.confidence}`
     }
     const hard = tripCut && (posted === '' || (!TRIP_TALK.test(posted) && figuresGrounded(posted, lisbonData).ok))
@@ -198,10 +199,9 @@ describe.skipIf(!liveChainConfigured())('money watcher', () => {
   it('lets a plain, grounded draft through', async () => {
     const draft = '2Up: **$389.60** FARESAVER LISBON, Tue 26 Aug. Purpose not recorded.'
     const d = await decideWatcherPost({ label: '2Up transactions', draft, evidence: `INSTRUCTION:\n${WATCHERS.money.instruction}\n\nDATA:\n${lisbonData}` })
-    const hard = d.decision === 'post' && d.confidence >= 0.7
+    const hard = d.decision === 'post'
     record({ case: 'decision: grounded draft posts', hard: hard ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}` })
     expect(d.decision).toBe('post')
-    expect(d.confidence).toBeGreaterThanOrEqual(0.7)
   })
 })
 
@@ -276,17 +276,35 @@ describe.skipIf(!liveChainConfigured())('morning brief, the post check', () => {
 
   it('does not hold a grounded brief back over an item it could read as a promotion', async () => {
     const d = await decideWatcherPost({ label: 'Morning brief', draft: briefDraft, evidence: briefEvidence })
-    const hard = d.decision === 'post' && d.confidence >= 0.7
+    const hard = d.decision === 'post'
     record({ case: 'decision: ticket item is no reason to skip', hard: hard ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}${d.reason ? ` ${d.reason}` : ''}` })
     expect(d.decision).toBe('post')
-    expect(d.confidence).toBeGreaterThanOrEqual(0.7)
   })
 
   it('still holds the same brief back when a figure is not in the evidence', async () => {
     const d = await decideWatcherPost({ label: 'Morning brief', draft: briefDraft.replace('$20', '$30'), evidence: briefEvidence })
-    const held = d.decision === 'skip' || d.confidence < 0.7
+    const held = d.decision === 'skip'
     record({ case: 'decision: invented price still skips', hard: held ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}${d.reason ? ` ${d.reason}` : ''}` })
     expect(held).toBe(true)
+  })
+
+  // A brief was held back at 1.00 because the writer kept a collection whose
+  // time had passed and the decision enforced the instruction's rule against
+  // it. The item was the writer's slip and everything it said was in the
+  // evidence: that is a post, stale bullet and all, never a lost brief.
+  it('does not hold a grounded brief back over a collection whose time has passed', async () => {
+    const data = plainData({ events: { timezone: 'Australia/Melbourne', events: [] }, mail: mailbox(TRIAGE) })
+    const draft = [
+      '**To do**',
+      `- In Rowan's Gmail, Sign Desk asks for a signature on the lease renewal for 12 Elm Street by ${DAYS.due}.`,
+      '**Heads up**',
+      "- In Rowan's Gmail, Northbank Broadband says the connection at 12 Elm Street is active and the plan has started.",
+      `- In Rowan's Gmail, Surplus Bites says the Mystery Box from Corner Bakery Hillside is ready for collection on ${DAYS.stale} between 6:00 pm and 6:30 pm at 18 Station Street, Hillside.`,
+    ].join('\n')
+    const d = await decideWatcherPost({ label: 'Morning brief', draft, evidence: `INSTRUCTION:\n${briefInstruction}\n\nDATA:\n${data}\n\nTOOL RESULTS:\n(none)` })
+    const hard = d.decision === 'post'
+    record({ case: 'decision: a stale collection is no reason to skip', hard: hard ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}${d.reason ? ` ${d.reason}` : ''}` })
+    expect(d.decision).toBe('post')
   })
 })
 

@@ -128,24 +128,35 @@ describe('findAccount', () => {
 })
 
 describe('spending_summary via PocketSmith', () => {
+  // Categories as PocketSmith marks them: an expense category's credits are
+  // refunds, an income category's debits are deductions.
+  const expense = (title: string) => ({ title, refund_behaviour: 'credits_are_refunds' })
+  const income = (title: string) => ({ title, refund_behaviour: 'debits_are_deductions' })
   const psTxns = [
-    { id: 1, date: '2026-08-02', payee: 'Coles', amount: -100, category: { title: 'Supermarket' }, is_transfer: false },
-    { id: 2, date: '2026-08-03', payee: 'Woolies', amount: -50, category: { title: 'Supermarket' }, is_transfer: false },
-    { id: 3, date: '2026-08-04', payee: 'Petrol', amount: -50, category: { title: 'Transport' }, is_transfer: false },
-    { id: 4, date: '2026-08-05', payee: 'Salary', amount: 1000, category: { title: 'Income' }, is_transfer: false },
+    { id: 1, date: '2026-08-02', payee: 'Coles', amount: -100, category: expense('Supermarket'), is_transfer: false },
+    { id: 2, date: '2026-08-03', payee: 'Woolies', amount: -50, category: expense('Supermarket'), is_transfer: false },
+    { id: 3, date: '2026-08-04', payee: 'Petrol', amount: -50, category: expense('Transport'), is_transfer: false },
+    { id: 4, date: '2026-08-05', payee: 'Salary', amount: 1000, category: income('Income'), is_transfer: false },
     { id: 5, date: '2026-08-06', payee: 'Move to savings', amount: -900, category: null, is_transfer: true },
     { id: 6, date: '2026-08-07', payee: 'Unknown', amount: -25, category: null, is_transfer: false },
     { id: 7, date: '2026-08-08', payee: 'Anz Cards', amount: -500, category: { title: 'Transfers', is_transfer: true }, is_transfer: false },
-    { id: 8, date: '2026-08-09', payee: 'ZIPPAY* P910', amount: -60, category: { title: 'Income' }, is_transfer: false, note: 'Card ending 7031 - BAS' },
+    // A tax payment the household files under income on purpose: off the income, not spend.
+    { id: 8, date: '2026-08-09', payee: 'ZIPPAY* P910', amount: -60, category: income('Income'), is_transfer: false, note: 'Card ending 7031 - BAS' },
+    // A rebate filed under the expense it refunds: off the spend, not income.
+    { id: 9, date: '2026-08-10', payee: 'Medicare rebate', amount: 40, category: expense('Medical'), is_transfer: false },
+    { id: 10, date: '2026-08-10', payee: 'Clinic', amount: -90, category: expense('Medical'), is_transfer: false },
   ]
 
-  beforeEach(() => {
+  const serve = (txns: unknown[]) =>
     fetchMock.mockImplementation(async (url: URL) => {
       const u = String(url)
       if (u.endsWith('/me')) return json({ id: 42 })
-      if (u.includes('/transactions')) return json(psTxns)
+      if (u.includes('/transactions')) return json(txns)
       return json([])
     })
+
+  beforeEach(() => {
+    serve(psTxns)
   })
 
   it('defaults to the current month in Melbourne', async () => {
@@ -156,10 +167,36 @@ describe('spending_summary via PocketSmith', () => {
 
   it('excludes transfers, which would otherwise double the total', async () => {
     const r = await call('spending_summary', { source: 'pocketsmith' })
-    expect(r.transactions).toBe(6)
-    expect(r.spent).toBe('$285.00')
+    expect(r.transactions).toBe(8)
+    expect(r.spent).toBe('$275.00')
     expect(r.received).toBe('$1,000.00')
-    expect(r.net).toBe('$715.00')
+    expect(r.net).toBe('$665.00')
+  })
+
+  it('keeps a debit filed under income out of the spend: a deduction from income, said as such', async () => {
+    const r = await call('spending_summary', { source: 'pocketsmith' })
+    expect(r.deductions).toBe('$60.00')
+    expect(r.net_income).toBe('$940.00')
+    const cats = r.by_category as { category: string }[]
+    expect(cats.map((c) => c.category)).not.toContain('Income')
+    const largest = r.largest as { payee: string; counts_as?: string }[]
+    expect(largest.find((t) => t.payee.startsWith('ZIPPAY'))?.counts_as).toBe('a deduction from income, not spend')
+    expect(largest.find((t) => t.payee === 'Coles')?.counts_as).toBeUndefined()
+  })
+
+  it('nets a refund against the expense it refunds rather than counting it as income', async () => {
+    const r = await call('spending_summary', { source: 'pocketsmith' })
+    const cats = r.by_category as { category: string; amount: string }[]
+    expect(cats.find((c) => c.category === 'Medical')).toMatchObject({ amount: '$50.00' })
+    expect(r.received).toBe('$1,000.00')
+  })
+
+  it('says nothing about deductions when there are none', async () => {
+    serve(psTxns.filter((t) => t.id !== 8))
+    const r = await call('spending_summary', { source: 'pocketsmith' })
+    expect(r.deductions).toBeUndefined()
+    expect(r.net_income).toBeUndefined()
+    expect(r.net).toBe('$725.00')
   })
 
   it('excludes transfer-category transactions without a trace, since their sum means nothing', async () => {
@@ -174,7 +211,8 @@ describe('spending_summary via PocketSmith', () => {
   it('breaks spending down by category, largest first', async () => {
     const r = await call('spending_summary', { source: 'pocketsmith' })
     const cats = r.by_category as { category: string; amount: string; share_of_spend: string }[]
-    expect(cats[0]).toEqual({ category: 'Supermarket', amount: '$150.00', share_of_spend: '53%' })
+    expect(cats[0]).toEqual({ category: 'Supermarket', amount: '$150.00', share_of_spend: '55%' })
+    // No category kind to go by: a debit is spend.
     expect(cats.map((c) => c.category)).toContain('Uncategorised')
   })
 
@@ -185,7 +223,8 @@ describe('spending_summary via PocketSmith', () => {
     const zip = largest.find((t) => t.payee.startsWith('ZIPPAY'))
     expect(zip).toMatchObject({ note: 'Card ending 7031 - BAS', category: 'Income' })
     const credits = r.largest_credits as { payee: string; amount: string }[]
-    expect(credits).toEqual([expect.objectContaining({ payee: 'Salary', amount: '$1,000.00' })])
+    expect(credits[0]).toMatchObject({ payee: 'Salary', amount: '$1,000.00' })
+    expect(credits.map((c) => c.payee)).toEqual(['Salary', 'Medicare rebate'])
   })
 
   it('honours an explicit range', async () => {

@@ -2,7 +2,7 @@ import { tool } from 'ai'
 import { z } from 'zod'
 import * as up from '../providers/up'
 import * as ps from '../providers/pocketsmith'
-import type { PsCategoryBudget } from '../providers/pocketsmith'
+import type { PsCategoryBudget, PsTransaction } from '../providers/pocketsmith'
 import { readCursor, writeCursor } from './cursor'
 import { flagTransactions, HISTORY_DAYS, type TransactionFlag } from '../money-flags'
 import { localToUtc, formatLocal, localDateKey } from '../cron'
@@ -120,7 +120,8 @@ export function moneyTools(ctx: ToolContext) {
 
     spending_summary: tool({
       description:
-        'Total money in and out over a period, broken down by category. Defaults to the current month. Use this for "how much have we spent this month".',
+        'Total money in and out over a period, broken down by category. Defaults to the current month. Use this for "how much have we spent this month". ' +
+        'Spend is what left the expense categories, net of refunds. A debit filed under an income category (a tax payment, a levy) is a deduction from income, not spend: it is reported under deductions and never in the category breakdown.',
       inputSchema: z.object({
         from: DATE.optional().describe('Defaults to the first of this month'),
         to: DATE.optional().describe('Defaults to the last day of this month'),
@@ -167,26 +168,40 @@ export function moneyTools(ctx: ToolContext) {
           // every summary wrong. PocketSmith marks them two ways: a flag on
           // the transaction, or the whole category being a transfer bucket.
           const real = txns.filter((t) => !t.isTransfer && !t.categoryIsTransfer)
-          const spent = real.filter((t) => t.amount < 0)
+          // Each side of the ledger is the category's, as PocketSmith keeps
+          // it, not the sign's: a tax payment filed under income is a
+          // deduction from income, a rebate filed under an expense comes off
+          // the spend. Only an uncategorised transaction goes by its sign.
+          // That is how PocketSmith's own totals are reckoned, so the figures
+          // here agree with the budget's.
+          const sideOf = (t: PsTransaction) => t.categoryKind ?? (t.amount < 0 ? 'expense' : 'income')
+          const expenses = real.filter((t) => sideOf(t) === 'expense')
+          const incomeSide = real.filter((t) => sideOf(t) === 'income')
           const byCategory = new Map<string, number>()
-          for (const t of spent) {
+          for (const t of expenses) {
             const key = t.category ?? 'Uncategorised'
-            byCategory.set(key, (byCategory.get(key) ?? 0) + Math.abs(t.amount))
+            byCategory.set(key, (byCategory.get(key) ?? 0) - t.amount)
           }
-          const total = spent.reduce((s, t) => s + Math.abs(t.amount), 0)
-          const received = real.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0)
+          const total = expenses.reduce((s, t) => s - t.amount, 0)
+          const received = incomeSide.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0)
+          const deductions = incomeSide.filter((t) => t.amount < 0).reduce((s, t) => s - t.amount, 0)
+          const isDeduction = (t: PsTransaction) => t.amount < 0 && sideOf(t) === 'income'
 
           return {
             source: 'pocketsmith', from: start, to: end, transactions: real.length,
-            spent: money(total), received: money(received), net: money(received - total),
+            spent: money(total), received: money(received),
+            ...(deductions > 0 ? { deductions: money(deductions), net_income: money(received - deductions) } : {}),
+            net: money(received - deductions - total),
             by_category: [...byCategory]
+              .filter(([, amount]) => amount > 0)
               .sort((a, b) => b[1] - a[1])
               .slice(0, 12)
               .map(([category, amount]) => ({
                 category, amount: money(amount), share_of_spend: `${Math.round((amount / total) * 100)}%`,
               })),
-            // The payee is what turns "$1,198 Medical" into "the AHM premium",
-            // and shows up a debit filed under an income category for what it is.
+            // The payee is what turns "$1,198 Medical" into "the AHM premium".
+            // A deduction is still a payment the household made, so it is
+            // listed among the largest, and says what it counts as.
             largest: real
               .filter((t) => t.amount < 0)
               .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))
@@ -197,6 +212,7 @@ export function moneyTools(ctx: ToolContext) {
                 category: t.category ?? 'Uncategorised',
                 date: t.date,
                 note: t.note ?? t.memo,
+                ...(isDeduction(t) ? { counts_as: 'a deduction from income, not spend' } : {}),
               })),
             // Salary credits are the income source, not news; this list exists
             // so a genuinely unusual credit (a refund, a payout) is visible.

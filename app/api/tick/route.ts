@@ -28,9 +28,6 @@ export const runtime = 'nodejs'
 export const maxDuration = 300
 export const dynamic = 'force-dynamic'
 
-/** A draft posts only when the decision is post and at least this sure. */
-const POST_CONFIDENCE = 0.7
-
 /**
  * QStash signs every delivery; without keys we only accept a manual admin
  * secret. Which one let the call in matters: only the scheduler's own calls
@@ -302,13 +299,16 @@ async function runCustom(a: Automation, member: Member | undefined): Promise<voi
 }
 
 /**
- * Post-or-skip is decided in a fresh context against the evidence, with
- * announced payoffs and a confidence, rather than left to the model that
- * wrote the draft. If the decision itself cannot be made (a provider that
- * will not return the structured object) the draft goes out as it always
- * did, and an admin hears that the safety net was down. A draft held back at
- * either step is reported to an admin with the reason: a run that wrote
- * something and posted nothing is not the quiet kind of quiet.
+ * Post-or-skip is decided in a fresh context against the evidence, by a
+ * judge that answers two questions and never sees the writer's draft as its
+ * own. Each judge draws its own line (Jev's in lib/jev.ts, the chain's in
+ * lib/agent.ts) and what comes back is honoured as decided: a second line
+ * here once stacked on Jev's and held back a grounded brief at 0.63. If the
+ * decision itself cannot be made (a provider that will not return the
+ * structured object) the draft goes out as it always did, and an admin hears
+ * that the safety net was down. A draft held back at either step is reported
+ * to an admin with the reason: a run that wrote something and posted nothing
+ * is not the quiet kind of quiet.
  *
  * What posts is the reviewed draft itself, never a retype from the decision:
  * the decision once offered its own wording, and that is what turned a
@@ -340,7 +340,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
       '[tick] decision',
       JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, model: d.model, reason: d.reason ?? null }),
     )
-    if (d.decision === 'post' && d.confidence >= POST_CONFIDENCE) return reviewed
+    if (d.decision === 'post') return reviewed
     const why = `the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}`
     console.warn(`[tick] ${a.label}: held back, ${why}`)
     await tellAdminQuietly(member, heldBack(a, why, reviewed))

@@ -269,7 +269,13 @@ Every question and every threshold is in `lib/jev.ts`, so what the bot asks
 and where it draws each line is one file to read. Without the key those four
 go to the chain as structured outputs, as before; if Jev cannot answer, the
 same question goes to the chain, or falls the safe way (the gate stays quiet,
-a reply is left alone). `TYPESAFE_DEFAULT_MODEL` pins a version
+a reply is left alone). The post decision is the same two questions whichever
+judge answers: is anything in the draft not in the evidence, and does the
+draft only say there is nothing new. Code turns the answers into post or skip,
+so neither judge is ever handed a verdict to reach, and neither is asked
+whether the writer obeyed its instruction: a judge that was once asked for a
+verdict held a whole brief back over a collection whose time had passed, which
+was the writer's selection to make and nothing the evidence lacked. `TYPESAFE_DEFAULT_MODEL` pins a version
 (`jev-1.13.0`) where `jev-latest` would move without notice. Its calls sit
 beside the chain's on **System** under `jev:`, and in Langfuse as generations
 named after the decision.
@@ -388,7 +394,11 @@ worth saying**:
   weather alone is not news.
 - **Money snapshot**, Sunday at 6pm: the week's spending and the month so far,
   with the budget's pacing and the categories over it where PocketSmith is
-  connected, or the totals from the raw Up feed where it is not. The figures
+  connected, or the totals from the raw Up feed where it is not. Spend is
+  reckoned the way PocketSmith reckons it, by the side of the ledger each
+  category keeps: a payment filed under an income category (a tax payment,
+  say) is a deduction from income, reported as one and never as spend, and a
+  rebate filed under the expense it refunds comes off that spend. The figures
   and the over-budget categories go out as two-column tables, which
   `lib/telegram-format.ts` lays out as aligned monospace lines in inline
   `code` spans: Telegram has no table element, and the `pre` block that could
@@ -419,8 +429,10 @@ context tools: a transaction arrives as payee, amount and date, with a purpose
 only when a household fact, calendar entry or email names one, and "purpose not
 recorded" otherwise. Then post or skip is decided against the evidence, on
 grounding alone, with a confidence: by Jev when a TypeSafe key is set,
-otherwise by a second, tool-free call to the chain. Anything under 0.7 is held
-back, logged, and sent to an admin with the reason. The commands are registered with
+otherwise by a second, tool-free call to the chain. Each judge draws its own
+line (Jev's in `lib/jev.ts`, the chain's at 0.7 of its own confidence in
+`lib/agent.ts`) and the tick posts what comes back as decided. A draft held
+back is logged and sent to an admin with the reason. The commands are registered with
 Telegram, so the `/` menu lists them; nothing to remember. Anything the
 templates don't cover is a sentence away:
 describe a schedule in plain words and it becomes a custom automation with

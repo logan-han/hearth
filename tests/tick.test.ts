@@ -435,11 +435,11 @@ describe('the post decision', () => {
     expect(text).toContain('Draft:\nBins out tonight.')
   })
 
-  it('holds a draft back when the decision is not confident enough', async () => {
-    decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.4, model: 'primary:test' })
+  it('posts what the judge decided: the line is the judge\'s own, never a second one here', async () => {
+    decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.63, model: 'jev:jev-latest' })
     await authed()
-    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
-    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('post at 0.40'))
+    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
+    expect(send).not.toHaveBeenCalledWith('900', expect.stringContaining('held back'))
   })
 
   it('posts the reviewed draft as written, never a retype from the decision', async () => {

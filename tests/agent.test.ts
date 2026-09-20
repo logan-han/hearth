@@ -701,7 +701,7 @@ describe('tool scoping by mode', () => {
     generateText.mockResolvedValue({ ...reply(''), output: 'stay_silent' })
     await shouldChimeIn({ chatId: '-100', text: 'hi', memberName: 'Ada' })
     expect(named().at(-1)).toBe('hearth.gate')
-    generateText.mockResolvedValue({ ...reply(''), output: { decision: 'skip', confidence: 1 } })
+    generateText.mockResolvedValue({ ...reply(''), output: { invented: false, nothing_new: true, confidence: 1 } })
     await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
     expect(named().at(-1)).toBe('hearth.decision')
   })
@@ -806,32 +806,57 @@ describe('collectEvidence', () => {
 })
 
 describe('decideWatcherPost', () => {
-  it('asks for a structured decision with no tools and returns it with the model', async () => {
-    generateText.mockResolvedValue({ ...reply(''), output: { decision: 'post', confidence: 0.9, message: 'Trimmed.' } })
+  const answers = (o: object) => ({ ...reply(''), output: { invented: false, nothing_new: false, confidence: 0.9, ...o } })
+
+  it('asks the chain the two questions with no tools, and posts when neither is a yes', async () => {
+    generateText.mockResolvedValue(answers({}))
     const d = await decideWatcherPost({ label: '2Up transactions', draft: 'draft', evidence: 'evidence' })
-    expect(d).toMatchObject({ decision: 'post', confidence: 0.9, message: 'Trimmed.', model: 'gemini:gemini-3.5-flash-lite' })
+    expect(d).toEqual({ decision: 'post', confidence: 0.9, model: 'gemini:gemini-3.5-flash-lite' })
     const call = generateText.mock.calls[0][0]
     expect(call.output).toBeDefined()
     expect(call.tools).toBeUndefined()
-    expect(String(call.system)).toContain('+0.4 if you choose skip')
+    expect(String(call.system)).toContain('invented: does the draft state anything')
+    expect(String(call.system)).toContain('nothing_new: does the draft only say')
     expect(String(call.prompt)).toContain('DRAFT:\ndraft')
   })
 
-  it('judges grounding only, and leaves what to include to the writer', async () => {
-    generateText.mockResolvedValue({ ...reply(''), output: { decision: 'post', confidence: 0.9 } })
+  it('skips an invented statement, quoting it, and a draft that only says there is nothing new', async () => {
+    generateText.mockResolvedValueOnce(answers({ invented: true, not_in_evidence: 'a time the evidence does not give', confidence: 0.8 }))
+    const invented = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
+    expect(invented).toEqual({
+      decision: 'skip', confidence: 0.8, model: 'gemini:gemini-3.5-flash-lite',
+      reason: 'the draft states something the evidence does not contain: a time the evidence does not give',
+    })
+    generateText.mockResolvedValueOnce(answers({ nothing_new: true, confidence: 1 }))
+    const quiet = await decideWatcherPost({ label: 'x', draft: 'Nothing new.', evidence: 'e' })
+    expect(quiet).toMatchObject({ decision: 'skip', confidence: 1, reason: 'the draft only says there is nothing new' })
+  })
+
+  it('skips when the chain is not sure enough of its answers, the grey zone being its own line', async () => {
+    generateText.mockResolvedValueOnce(answers({ confidence: 0.6 }))
+    const d = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
+    expect(d).toMatchObject({ decision: 'skip', confidence: 0.6, reason: 'the judge was not sure enough of its answers' })
+    generateText.mockResolvedValueOnce(answers({ confidence: 0.7 }))
+    expect((await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })).decision).toBe('post')
+  })
+
+  it('is never asked for a verdict, so the instruction cannot be enforced through it', async () => {
+    generateText.mockResolvedValue(answers({}))
     await decideWatcherPost({ label: 'Morning brief', draft: 'd', evidence: 'e' })
     const system = String(generateText.mock.calls[0][0].system)
-    expect(system).toContain("What to include was the writer's call")
-    expect(system).toContain('not a reason to skip while the evidence contains it')
-    expect(system).toContain('-1 if the post states anything the evidence does not contain')
-    expect(system).not.toMatch(/would not need|useful to the household/)
+    expect(system).toContain('whether the writer obeyed it is not asked')
+    expect(system).toContain("was the writer's call to make")
+    expect(system).toContain('a collection or event whose time has passed')
+    expect(system).not.toMatch(/would not need|useful to the household|choose skip|if you choose/)
+    const shape = generateText.mock.calls[0][0].output
+    expect(JSON.stringify(shape)).not.toContain('"post"')
   })
 
   it('moves to the next model when the first returns no object', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     generateText
       .mockRejectedValueOnce(new Error('No object generated'))
-      .mockResolvedValueOnce({ ...reply(''), output: { decision: 'skip', confidence: 0.8 } })
+      .mockResolvedValueOnce(answers({ invented: true, confidence: 0.8 }))
     const d = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
     expect(d.decision).toBe('skip')
     expect(d.model).toContain('openrouter')
@@ -840,7 +865,7 @@ describe('decideWatcherPost', () => {
   it('asks first the model that has been returning objects, whatever the chain order', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     await keepsAnsweringInProse('gemini:gemini-3.5-flash-lite')
-    generateText.mockResolvedValue({ ...reply(''), output: { decision: 'post', confidence: 0.9 } })
+    generateText.mockResolvedValue(answers({}))
     const d = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
     expect(d.model).toContain('openrouter')
     expect(generateText).toHaveBeenCalledTimes(1)
@@ -1027,11 +1052,11 @@ describe('with a TypeSafe key', () => {
     expect(systemOne.mock.calls[0][0].state).toEqual({ draft: 'draft', evidence: 'evidence' })
   })
 
-  it('falls back to the chain for the decision when Jev is down', async () => {
+  it('falls back to the chain for the decision when Jev is down, asked the same two questions', async () => {
     systemOne.mockRejectedValue(new Error('fetch failed'))
-    generateText.mockResolvedValue({ ...reply(''), output: { decision: 'skip', confidence: 0.8 } })
+    generateText.mockResolvedValue({ ...reply(''), output: { invented: true, nothing_new: false, confidence: 0.8 } })
     const d = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
-    expect(d).toMatchObject({ decision: 'skip', confidence: 0.8, model: 'gemini:gemini-3.5-flash-lite' })
+    expect(d).toMatchObject({ decision: 'skip', confidence: 0.8, model: 'gemini:gemini-3.5-flash-lite', reason: expect.stringContaining('evidence does not contain') })
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Jev could not decide'), 'fetch failed')
   })
 

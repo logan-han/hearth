@@ -30,6 +30,14 @@ export type PsTransaction = {
   isTransfer: boolean
   /** PocketSmith marks whole categories as transfer buckets (e.g. "Transfers"). */
   categoryIsTransfer: boolean
+  /**
+   * Which side of the ledger the category keeps, in PocketSmith's own terms.
+   * A category whose debits are deductions is income: a tax payment filed
+   * there comes off income, and is not spend. A category whose credits are
+   * refunds is expense: a rebate filed there comes off the spend. Null for a
+   * transaction with no category, or one whose category says neither.
+   */
+  categoryKind: 'income' | 'expense' | null
   needsReview: boolean
 }
 
@@ -113,8 +121,16 @@ export async function listTransactions(opts: {
     memo: t.memo ?? null,
     isTransfer: Boolean(t.is_transfer),
     categoryIsTransfer: Boolean(t.category?.is_transfer),
+    categoryKind: categoryKind(t.category?.refund_behaviour),
     needsReview: Boolean(t.needs_review),
   }))
+}
+
+/** PocketSmith's refund_behaviour, read as the side a category keeps. */
+function categoryKind(behaviour: unknown): PsTransaction['categoryKind'] {
+  if (behaviour === 'debits_are_deductions') return 'income'
+  if (behaviour === 'credits_are_refunds') return 'expense'
+  return null
 }
 
 export async function budgetSummary(opts: {

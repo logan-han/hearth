@@ -33,8 +33,17 @@ import { describeError } from './errors'
  * payment is worse than a figure cut from a post.
  */
 export const THRESHOLDS = {
-  /** p(the newest group message is for the assistant) at or above this replies. */
-  gateReply: 0.7,
+  /**
+   * p(the newest group message is for the assistant) at or above this replies.
+   * First live probe, with no conversation given: banter and a request to
+   * another person sit at 0.02 to 0.06; "can someone put swimming on the
+   * calendar" at 0.41, "someone" being the people in the chat; a plain
+   * question the bot can answer ("is it going to rain tomorrow", "how much
+   * did we spend on groceries this month") at 0.65 to 0.75; a bare imperative
+   * at 0.78, a reminder at 0.89, the bot's name at 0.97. The line sits under
+   * the questions and well above the ambiguity.
+   */
+  gateReply: 0.6,
   /** p(the reply reports a change as made) at or above this sends the reply back for the tool call. */
   claimsChange: 0.7,
   /** p(the evidence supports the statement) below this cuts the statement from the post. */
@@ -251,13 +260,23 @@ const NOTHING_NEW_QUESTION = noul('Does `draft` only say that there is nothing n
 
 export type JevPostDecision = { decision: 'post' | 'skip'; confidence: number; reason?: string; model: string }
 
+/** Why a draft is held back, in the same words whichever judge answered. */
+export const POST_REASONS = {
+  nothingNew: 'the draft only says there is nothing new',
+  invented: 'the draft states something the evidence does not contain',
+  unsure: 'the judge was not sure enough of its answers',
+} as const
+
 /**
- * Two absolute judgements combined in code, in place of the chain's
- * payoff-framed object: is anything in the draft not in the evidence, and does
- * the draft say only that there is nothing new. Post or skip is all it
- * decides, on grounding alone; what to include was the writer's call. The
- * confidence is the probability behind the decision, so the tick's line
- * (post at 0.7 or better) means the same as it did.
+ * Two absolute judgements combined in code, the same two the chain is asked
+ * in its place: is anything in the draft not in the evidence, and does the
+ * draft say only that there is nothing new. Post or skip is all it decides,
+ * on grounding alone; what to include was the writer's call. The lines are
+ * drawn here and nowhere else: the tick posts what comes back as decided, and
+ * the confidence is the probability behind the decision, for the log and the
+ * admin's note. The first live run put a grounded, paraphrased brief at
+ * p(invented) 0.37 and the same brief with one invented figure at 0.93, which
+ * is what the 0.5 line separates.
  */
 export async function decidePost(input: { label: string; draft: string; evidence: string }): Promise<JevPostDecision> {
   const { answers } = await askJev({
@@ -270,10 +289,10 @@ export async function decidePost(input: { label: string; draft: string; evidence
   const nothingNew = answers.nothingNew.noul
   const model = jevSlot()
   if (nothingNew >= THRESHOLDS.postNothingNew) {
-    return { decision: 'skip', confidence: round(nothingNew), reason: 'the draft only says there is nothing new', model }
+    return { decision: 'skip', confidence: round(nothingNew), reason: POST_REASONS.nothingNew, model }
   }
   if (invented >= THRESHOLDS.postInvented) {
-    return { decision: 'skip', confidence: round(invented), reason: 'the draft states something the evidence does not contain', model }
+    return { decision: 'skip', confidence: round(invented), reason: POST_REASONS.invented, model }
   }
   return { decision: 'post', confidence: round(1 - invented), model }
 }

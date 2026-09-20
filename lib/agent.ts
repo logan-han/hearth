@@ -9,7 +9,7 @@ import {
 } from 'ai'
 import { z } from 'zod'
 import { withModelFallback, structuredChain, type ModelSlot } from './model'
-import { jevConfigured, wantsAssistant, claimsChange, checkClaims, decidePost } from './jev'
+import { jevConfigured, wantsAssistant, claimsChange, checkClaims, decidePost, POST_REASONS } from './jev'
 import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, WRITE_TOOLS, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
 import type { ToolContext } from './tools/context'
 import { recentMessages, listMemories, openQuestions, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals, chatSummary } from './db/queries'
@@ -639,37 +639,42 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
 
 /* ------------------------------------------------------------ post decision */
 
-const postDecisionSchema = z.object({
-  decision: z.enum(['post', 'skip']),
-  confidence: z.number().min(0).max(1).describe('How sure you are that this decision is right, 0 to 1'),
-  reason: z.string().optional().describe('One line on why'),
+/** The two questions the post decision asks, whichever judge answers them. */
+const postAnswersSchema = z.object({
+  invented: z.boolean().describe('Whether the draft states anything about the world that the evidence does not contain'),
+  not_in_evidence: z.string().optional().describe('When invented: the statement in the draft that the evidence does not contain, quoted'),
+  nothing_new: z.boolean().describe('Whether the draft only says that there is nothing new, nothing to report or nothing worth posting'),
+  confidence: z.number().min(0).max(1).describe('How sure you are of both answers, 0 to 1'),
 })
 
-export type PostDecision = z.infer<typeof postDecisionSchema>
+export type PostDecision = { decision: 'post' | 'skip'; confidence: number; reason?: string }
 
 const DECISION_PROMPT = [
-  'You decide whether a scheduled family-assistant post goes to the family chat. The question is whether the post is true to its evidence, not whether you would have written it.',
-  'You receive +1 if the post is accurate, +0.4 if you choose skip, and -1 if the post states anything the evidence does not contain.',
-  'The evidence is the instruction that produced the draft, the household facts the writer was given and the results the tools returned. Every name, amount, date, place and stated purpose in the post must appear there; a claim the evidence does not make means skip. A post that only says there is nothing new is a skip too.',
-  "What to include was the writer's call, made under the instruction, and is not yours to remake: an item you would have left out, or that the instruction's guidance on what to leave out might cover, is not a reason to skip while the evidence contains it. A post is never held back for saying too much, only for saying what the evidence does not.",
-  'Statements of what is not known ("purpose not recorded") are accurate and welcome. A reminder whose wording comes from the instruction is grounded in the instruction.',
-  'Give your confidence from 0 to 1. Answer with the structured object only.',
+  'You answer two questions about a draft post from a scheduled family-assistant check, against the evidence it was written from. You do not decide whether it is posted; code does that from your answers.',
+  'invented: does the draft state anything about the world that the evidence does not contain? A name, amount, date, time, place, purpose, description or flag that no part of the evidence gives counts, and so does a guess made as a hedge or a question. Quote that statement in not_in_evidence.',
+  'nothing_new: does the draft only say that there is nothing new, nothing to report or nothing worth posting?',
+  'The evidence is the instruction the writer was given, the household facts it had, the data it was handed and what its tools returned. The instruction is there so that wording it asked for counts as in the evidence ("purpose not recorded", a closing line it dictates); whether the writer obeyed it is not asked. An item the instruction says to leave out, such as a promotion, a newsletter, or a collection or event whose time has passed, was the writer\'s call to make: while the evidence contains what the item says, it is not invented. Which items the draft mentions is never the question, only whether what it says of them is in the evidence.',
+  'Differences of form do not matter: case, punctuation, currency symbols, a name that is part of a longer string in the evidence. Differences of substance do: a purpose, place, trip, plan or cause is in the evidence only if the evidence names it. Saying that something is not known is not a claim.',
+  'Give your confidence in both answers from 0 to 1. Answer with the structured object only.',
 ].join('\n')
 
 /**
- * A payoff-framed, confidence-bearing decision in a fresh context, checking
- * the draft against what the tools actually said. A bare "reply SKIP if there
- * is nothing" leaves the choice to the model that wrote the draft, which is
- * the one least able to see its own embellishments. Post or skip is all it
- * decides: the draft it approves goes out as written, so a retype cannot
- * flatten the formatting or bring back a figure the claim check never saw.
- * Grounding is all it judges, too: which items belong was the writer's call
- * under the instruction, and a decision that also scored "what the household
- * would not need" once held a whole brief back over one mail item it took for
- * a promotion. With a TypeSafe key the judgement is Jev's (lib/jev.ts): two
- * probabilities combined in code, no object to parse. The prompt below is the
- * chain's, asked when there is no key or Jev cannot answer, so a draft is
- * never posted unchecked while any judge is up.
+ * Post or skip, decided in a fresh context against what the tools actually
+ * said. A bare "reply SKIP if there is nothing" leaves the choice to the
+ * model that wrote the draft, which is the one least able to see its own
+ * embellishments. Post or skip is all it decides: the draft it approves goes
+ * out as written, so a retype cannot flatten the formatting or bring back a
+ * figure the claim check never saw. Grounding is all it judges, too, and the
+ * judge is never asked to choose: it answers the two questions Jev is asked
+ * (lib/jev.ts), is anything in the draft not in the evidence and does the
+ * draft only say there is nothing new, and code turns the answers into post
+ * or skip. A judge asked for a verdict once held a whole brief back over a
+ * mail item it took for a promotion, and again over a collection whose time
+ * had passed: both were the writer's selection, neither was invented, and a
+ * verdict left room to enforce the instruction instead. With a TypeSafe key
+ * the answers are Jev's probabilities; the prompt below is the chain's, asked
+ * when there is no key or Jev cannot answer, so a draft is never posted
+ * unchecked while any judge is up.
  */
 export async function decideWatcherPost(input: {
   label: string
@@ -689,15 +694,34 @@ export async function decideWatcherPost(input: {
         model: slot.model,
         system: DECISION_PROMPT,
         prompt: `Watcher: ${input.label}\n\nDRAFT:\n${input.draft}\n\nEVIDENCE:\n${input.evidence || '(no tool results)'}`,
-        output: Output.object({ schema: postDecisionSchema, name: 'post_decision' }),
+        output: Output.object({ schema: postAnswersSchema, name: 'post_decision' }),
         temperature: 0.2,
         maxOutputTokens: 600,
         timeout: { stepMs: 30_000 },
         telemetry: callTelemetry('hearth.decision'),
       }),
     )
-    return { ...r.output, model: slot.name }
+    return { ...fromAnswers(r.output), model: slot.name }
   }, await structuredChain(), 'hearth.decision')
+}
+
+/**
+ * How sure the chain must be of its two answers before a post goes out on
+ * them. A chat model's confidence is its own estimate, not a calibrated
+ * probability, and one that admits doubt is usually right to: the grey zone
+ * is a skip. Jev's lines are its own, in lib/jev.ts.
+ */
+export const CHAIN_POST_CONFIDENCE = 0.7
+
+/** The chain's two answers combined the way lib/jev.ts combines Jev's: nothing new skips, invented skips, doubt skips, the rest posts. */
+function fromAnswers(o: z.infer<typeof postAnswersSchema>): PostDecision {
+  if (o.nothing_new) return { decision: 'skip', confidence: o.confidence, reason: POST_REASONS.nothingNew }
+  if (o.invented) {
+    const quoted = o.not_in_evidence?.trim()
+    return { decision: 'skip', confidence: o.confidence, reason: quoted ? `${POST_REASONS.invented}: ${quoted}` : POST_REASONS.invented }
+  }
+  if (o.confidence < CHAIN_POST_CONFIDENCE) return { decision: 'skip', confidence: o.confidence, reason: POST_REASONS.unsure }
+  return { decision: 'post', confidence: o.confidence }
 }
 
 /* -------------------------------------------------------------- draft review */

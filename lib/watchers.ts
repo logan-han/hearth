@@ -35,9 +35,9 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
     instruction: [
       "Today's family calendar, the mail that has arrived since the last brief, the household board and the weather are under DATA. Post one short brief for the day in named parts, each a **bold** line with its bullets under it; leave out a part with nothing in it.",
       '**Today**: what is on, with its time and place as given, and a flag only where the data supports one: an early start, rain in the forecast.',
+      'Mail: first set aside what gets no bullet: newsletters and promotions, the mail with nothing in it to attend, book, pay or reply to; and mail whose moment has passed by NOW, however recently it arrived: a collection, a booking or an event timed earlier than NOW, an order already delivered. Then sort the rest into two parts.',
       '**To do**: mail asking the household for something still open: a payment, a signature, a reply, a form, a booking to make, an appointment or a deadline still ahead, whoever sent it and however many people it went to.',
       '**Heads up**: mail that only tells the household something worth knowing: an order or a connection confirmed, a delivery on its way, a change to an account or a service.',
-      'Leave out newsletters and promotions, the mail with nothing in it to attend, book, pay or reply to; and leave out mail whose moment has passed by NOW: a collection, a booking or an event timed earlier than NOW, an order already delivered.',
       'One bullet per email, in your own words: who sent it and what it says or asks, with every date, time, amount and place exactly as given. Never paste the subject line or put it in quotes. Open an email with read_email when its snippet is not enough. Propose any calendar-worthy date still ahead with propose_family_event.',
       '**Overdue**: anything overdue on the board, as given.',
       'If DATA lists questions, end with "Not sure about:" and each question on its own line, worded as given, and say that anyone can answer here or on Home. Nothing under DATA answers them, so do not guess.',
