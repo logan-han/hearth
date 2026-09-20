@@ -3,6 +3,13 @@ import * as jira from '@/lib/providers/jira'
 import { jiraTools } from '@/lib/tools/jira'
 import type { ToolContext } from '@/lib/tools/context'
 
+// The mailbox behind jira_attach_email_file, answering with whatever a test sets.
+const readAttachment = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/providers', async (orig) => ({
+  ...(await orig<typeof import('@/lib/providers')>()),
+  clientFor: () => ({ readAttachment }),
+}))
+
 const fetchMock = vi.fn()
 let ctx: ToolContext
 
@@ -214,6 +221,64 @@ describe('jira_create_issue', () => {
     await call('jira_create_issue', { summary: 's', issue_type: 'Task' })
     expect(lastBody().fields).not.toHaveProperty('description')
     expect(lastBody().fields).not.toHaveProperty('duedate')
+  })
+})
+
+describe('jira_update_issue', () => {
+  it('puts only the given fields, the description as ADF', async () => {
+    fetchMock.mockResolvedValue(json({}, 204))
+    const r = await call('jira_update_issue', { key: 'HTL-352', description: 'Policy HOM 1\nDue 22/10/2026', due_date: '2026-10-22' })
+    expect(r).toEqual({ key: 'HTL-352', updated: ['description', 'due_date'] })
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://example.atlassian.net/rest/api/3/issue/HTL-352')
+    expect(init.method).toBe('PUT')
+    expect(lastBody().fields).toEqual({ description: jira.adf('Policy HOM 1\nDue 22/10/2026'), duedate: '2026-10-22' })
+  })
+
+  it('clears a due date on "none", and refuses an empty change without calling Jira', async () => {
+    fetchMock.mockResolvedValue(json({}, 204))
+    await call('jira_update_issue', { key: 'HTL-1', due_date: 'none' })
+    expect(lastBody().fields).toEqual({ duedate: null })
+    expect(String((await call('jira_update_issue', { key: 'HTL-1' })).error)).toContain('Nothing to change')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('jira_attach_email_file', () => {
+  const member = { id: 3, name: 'Rowan', telegramUserId: '111', allowed: true, isAdmin: false } as unknown as ToolContext['member']
+
+  it('fetches the attachment from the mailbox and uploads it as multipart with the XSRF opt-out header', async () => {
+    ctx = { ...ctx, member }
+    readAttachment.mockResolvedValue({ filename: 'Renewal.pdf', mimeType: 'application/pdf', size: 4, bytes: new TextEncoder().encode('%PDF') })
+    fetchMock.mockResolvedValue(json([{ id: '10001', filename: 'Renewal.pdf', size: 4 }]))
+    const r = await call('jira_attach_email_file', { key: 'HTL-352', email_id: 'm1', provider: 'google', filename: 'Renewal.pdf' })
+    expect(readAttachment).toHaveBeenCalledWith('m1', 'Renewal.pdf')
+    expect(r).toEqual({ key: 'HTL-352', attached: 'Renewal.pdf', size: 4 })
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://example.atlassian.net/rest/api/3/issue/HTL-352/attachments')
+    const headers = init.headers as Record<string, string>
+    expect(headers['X-Atlassian-Token']).toBe('no-check')
+    expect(headers['content-type']).toBeUndefined()
+    expect(init.body).toBeInstanceOf(FormData)
+    const file = (init.body as FormData).get('file') as File
+    expect(file.name).toBe('Renewal.pdf')
+    expect(file.type).toBe('application/pdf')
+    expect(await file.text()).toBe('%PDF')
+  })
+
+  it('needs a known member, and hands a mailbox error back rather than throwing', async () => {
+    await expect(call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })).rejects.toThrow(/direct message/)
+    ctx = { ...ctx, member }
+    readAttachment.mockRejectedValue(new Error('No attachment called "x.pdf" on that email.'))
+    expect(String((await call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })).error)).toContain('No attachment called')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a refused upload with its status', async () => {
+    ctx = { ...ctx, member }
+    readAttachment.mockResolvedValue({ filename: 'x.pdf', mimeType: 'application/pdf', size: 1, bytes: new Uint8Array([1]) })
+    fetchMock.mockResolvedValue(json({ errorMessages: ['too big'] }, 413))
+    expect(String((await call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })).error)).toContain('Jira API 413')
   })
 })
 

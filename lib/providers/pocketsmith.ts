@@ -138,11 +138,21 @@ export async function budgetSummary(opts: {
 export type PsCategoryBudget = {
   title: string
   actual: number
+  /**
+   * What PocketSmith allows for the period, which is the budget after any
+   * rollover: a category overspent in earlier months can be allowed nothing
+   * this month while still being budgeted, so a zero here never means
+   * unbudgeted on its own. `budgeted` says that.
+   */
   forecast: number
   overBy: number
   underBy: number
   from: string
   to: string
+  /** Whether the category has a budget at all, in PocketSmith's own words. */
+  budgeted: boolean
+  /** Whether the category rolls a period's over- or underspend into the next. */
+  rollsOver: boolean
 }
 
 /** Per-category budget analysis; PocketSmith precomputes over/under for us. */
@@ -155,13 +165,19 @@ export async function budgetByCategory(opts: { startDate: string; endDate: strin
   // The transfer marking lives on the category object here, not the entry.
   return (Array.isArray(raw) ? raw : [])
     .filter((e) => e?.expense && !e?.is_transfer && !e?.category?.is_transfer)
-    .map((e) => ({
-      title: e.category?.title ?? 'Uncategorised',
-      actual: Math.abs(e.expense.total_actual_amount ?? 0),
-      forecast: Math.abs(e.expense.total_forecast_amount ?? 0),
-      overBy: e.expense.total_over_by ?? 0,
-      underBy: e.expense.total_under_by ?? 0,
-      from: e.expense.start_date ?? opts.startDate,
-      to: e.expense.end_date ?? opts.endDate,
-    }))
+    .map((e) => {
+      const forecast = Math.abs(e.expense.total_forecast_amount ?? 0)
+      return {
+        title: e.category?.title ?? 'Uncategorised',
+        actual: Math.abs(e.expense.total_actual_amount ?? 0),
+        forecast,
+        overBy: e.expense.total_over_by ?? 0,
+        underBy: e.expense.total_under_by ?? 0,
+        from: e.expense.start_date ?? opts.startDate,
+        to: e.expense.end_date ?? opts.endDate,
+        // Absent only from a sparse reply; an allowance then means a budget.
+        budgeted: typeof e.is_budgeted === 'boolean' ? e.is_budgeted : forecast !== 0,
+        rollsOver: Boolean(e.category?.rollover_type),
+      }
+    })
 }

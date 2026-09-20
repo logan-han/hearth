@@ -124,6 +124,40 @@ describe('google mail', () => {
     expect((await googleClient(1).readMail('m1')).body).toBe('Hello there')
   })
 
+  const withPdf = {
+    ...message,
+    payload: {
+      ...message.payload,
+      mimeType: 'multipart/mixed',
+      parts: [
+        ...message.payload.parts,
+        { mimeType: 'image/png', filename: 'logo.png', headers: [{ name: 'Content-Disposition', value: 'inline; filename="logo.png"' }], body: { attachmentId: 'logo', size: 10 } },
+        { mimeType: 'application/pdf', filename: 'Renewal.pdf', headers: [{ name: 'Content-Disposition', value: 'attachment; filename="Renewal.pdf"' }], body: { attachmentId: 'ANGjdJ_long_id', size: 1234 } },
+      ],
+    },
+  }
+
+  it('lists the files attached to a message, leaving an inline logo out', async () => {
+    fetchMock.mockResolvedValueOnce(reply(withPdf))
+    const m = await googleClient(1).readMail('m1')
+    expect(m.attachments).toEqual([{ filename: 'Renewal.pdf', mimeType: 'application/pdf', size: 1234 }])
+    expect(m.body).toBe('Photos are on Tuesday.')
+  })
+
+  it('fetches an attachment by its filename, whatever its case, and decodes the web-safe base64', async () => {
+    fetchMock.mockResolvedValueOnce(reply(withPdf)).mockResolvedValueOnce(reply({ size: 4, data: b64url('%PDF') }))
+    const f = await googleClient(1).readAttachment('m1', 'renewal.PDF')
+    expect(String(lastCall(1)[0])).toBe('https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/attachments/ANGjdJ_long_id')
+    expect(f).toMatchObject({ filename: 'Renewal.pdf', mimeType: 'application/pdf', size: 4 })
+    expect(new TextDecoder().decode(f.bytes)).toBe('%PDF')
+  })
+
+  it('says when there is no attachment by that name, without fetching anything else', async () => {
+    fetchMock.mockResolvedValueOnce(reply(withPdf))
+    await expect(googleClient(1).readAttachment('m1', 'invoice.pdf')).rejects.toThrow(/No attachment called "invoice.pdf"/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('builds a valid RFC 822 message when sending', async () => {
     fetchMock.mockResolvedValueOnce(reply({}))
     await googleClient(1).sendMail({ to: ['a@b.com'], cc: ['c@d.com'], subject: 'Hi', body: 'Body' })
@@ -158,7 +192,7 @@ describe('google mail', () => {
   it('reads a bare message without inventing headers, and a body-less one as empty', async () => {
     fetchMock.mockResolvedValueOnce(reply({ id: 'bare' }))
     const m = await googleClient(1).readMail('bare')
-    expect(m).toEqual({ id: 'bare', from: '', to: '', subject: '(no subject)', snippet: '', date: '', unread: false, body: '' })
+    expect(m).toEqual({ id: 'bare', from: '', to: '', subject: '(no subject)', snippet: '', date: '', unread: false, body: '', attachments: [] })
   })
 
   it('skips parts with no data and decodes a lone html part', async () => {
@@ -278,6 +312,37 @@ describe('microsoft graph', () => {
     expect((await microsoftClient(1).readMail('g1')).body).toBe('plain')
   })
 
+  it('reads a message with no attachments in one call', async () => {
+    fetchMock.mockResolvedValueOnce(reply(graphMessage))
+    expect((await microsoftClient(1).readMail('g1')).attachments).toEqual([])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('lists attachments only when the message says it has some, leaving inline pictures and linked items out', async () => {
+    fetchMock.mockResolvedValueOnce(reply({ ...graphMessage, hasAttachments: true })).mockResolvedValueOnce(
+      reply({
+        value: [
+          { '@odata.type': '#microsoft.graph.fileAttachment', id: 'a1', name: 'Renewal.pdf', contentType: 'application/pdf', size: 1234, isInline: false },
+          { '@odata.type': '#microsoft.graph.fileAttachment', id: 'a2', name: 'logo.png', contentType: 'image/png', size: 10, isInline: true },
+          { '@odata.type': '#microsoft.graph.itemAttachment', id: 'a3', name: 'Fwd: a message', size: 99 },
+        ],
+      }),
+    )
+    const m = await microsoftClient(1).readMail('g1')
+    expect(m.attachments).toEqual([{ filename: 'Renewal.pdf', mimeType: 'application/pdf', size: 1234 }])
+    expect(decodeURIComponent(String(lastCall(1)[0]))).toContain('/messages/g1/attachments?$select=id,name,contentType,size,isInline')
+  })
+
+  it('fetches an attachment by name and decodes its bytes', async () => {
+    fetchMock
+      .mockResolvedValueOnce(reply({ value: [{ id: 'a1', name: 'Renewal.pdf', contentType: 'application/pdf', size: 4 }] }))
+      .mockResolvedValueOnce(reply({ id: 'a1', name: 'Renewal.pdf', contentType: 'application/pdf', size: 4, contentBytes: Buffer.from('%PDF').toString('base64') }))
+    const f = await microsoftClient(1).readAttachment('g1', 'renewal.pdf')
+    expect(String(lastCall(1)[0])).toBe('https://graph.microsoft.com/v1.0/me/messages/g1/attachments/a1')
+    expect(f).toMatchObject({ filename: 'Renewal.pdf', mimeType: 'application/pdf', size: 4 })
+    expect(new TextDecoder().decode(f.bytes)).toBe('%PDF')
+  })
+
   it('uses an address alone when there is no distinct name', async () => {
     fetchMock.mockResolvedValueOnce(
       reply({ value: [{ ...graphMessage, from: { emailAddress: { name: 'a@b.com', address: 'a@b.com' } } }] }),
@@ -324,7 +389,7 @@ describe('microsoft graph', () => {
   it('reads a bare message without inventing fields', async () => {
     fetchMock.mockResolvedValueOnce(reply({ id: 'bare' }))
     const m = await microsoftClient(1).readMail('bare')
-    expect(m).toEqual({ id: 'bare', from: '', to: '', subject: '(no subject)', snippet: '', date: '', unread: false, body: '' })
+    expect(m).toEqual({ id: 'bare', from: '', to: '', subject: '(no subject)', snippet: '', date: '', unread: false, body: '', attachments: [] })
   })
 
   it('shows a name alone when the address is missing, and drops recipients with neither', async () => {

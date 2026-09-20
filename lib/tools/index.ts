@@ -45,7 +45,7 @@ export type ToolName = keyof ReturnType<typeof buildTools>
  */
 export const CUSTOM_AUTOMATION_TOOLS: ToolName[] = [
   'web_search', 'read_url', 'weather', 'recall',
-  'list_email', 'new_mail', 'read_email',
+  'list_email', 'new_mail', 'read_email', 'read_attachment',
   'list_calendar', 'list_family_events', 'propose_family_event', 'list_event_proposals',
   'show_list', 'show_lists', 'add_to_list',
   'list_bank_accounts', 'list_transactions', 'spending_summary', 'new_transactions', 'budget_summary',
@@ -80,7 +80,7 @@ export const WRITE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   'add_to_list', 'check_off_list', 'remove_from_list', 'clear_list',
   'remember', 'forget', 'unsure', 'answer_question',
   'draft_email', 'send_email', 'cancel_draft', 'create_calendar_event',
-  'notion_append_to_page', 'jira_create_issue', 'jira_move_issue', 'jira_comment',
+  'notion_append_to_page', 'jira_create_issue', 'jira_update_issue', 'jira_move_issue', 'jira_comment', 'jira_attach_email_file',
   'create_automation', 'delete_automation', 'pause_automation',
 ])
 

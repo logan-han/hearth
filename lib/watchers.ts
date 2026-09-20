@@ -51,7 +51,7 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
     builtin: true,
     instruction: [
       "The household's spending for the past week and for the month so far, and the month's budget where there is one, are under DATA. Post the weekly money snapshot.",
-      'Open with a **bold** title line naming the week. Then a table of the figures: spent this week, spent this month so far, and the budget used with how far through the month it is. Then the week\'s largest payments as bullets, each with payee, amount and category as given. Then any category over budget, with its position as given.',
+      'Open with a **bold** title line naming the week. Then the figures, one per line as **label**: figure: spent this week, spent this month so far, and the budget used with how far through the month it is. Then **Largest payments**: the week\'s largest as bullets, each with payee, amount and category as given. Then **Over budget**: each category whose position says over, as a bullet with its position as given; leave out categories under or on budget and categories with no budget set.',
       'Figures exactly as given, no arithmetic of your own, no advice. Say what a payment was for only when a Known household fact or a note on the transaction names it, and say which.',
     ].join(' '),
     tools: ['recall'],

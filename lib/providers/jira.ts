@@ -33,15 +33,18 @@ function baseUrl(): string {
   return (process.env.JIRA_BASE_URL ?? '').replace(/\/$/, '')
 }
 
+function authHeader(): string {
+  return `Basic ${Buffer.from(`${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`).toString('base64')}`
+}
+
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!jiraConfigured()) {
     throw new Error('Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).')
   }
-  const auth = Buffer.from(`${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`).toString('base64')
   const res = await fetch(`${baseUrl()}${path}`, {
     ...init,
     headers: {
-      authorization: `Basic ${auth}`,
+      authorization: authHeader(),
       accept: 'application/json',
       'content-type': 'application/json',
       ...init.headers,
@@ -175,4 +178,43 @@ export async function addComment(key: string, text: string): Promise<void> {
     method: 'POST',
     body: JSON.stringify({ body: adf(text) }),
   })
+}
+
+/** Change what is given and nothing else; a null due date clears it. */
+export async function updateIssue(
+  key: string,
+  input: { summary?: string; description?: string; dueDate?: string | null },
+): Promise<void> {
+  const fields: Record<string, unknown> = {}
+  if (input.summary !== undefined) fields.summary = input.summary
+  if (input.description !== undefined) fields.description = adf(input.description)
+  if (input.dueDate !== undefined) fields.duedate = input.dueDate
+  await api(`/rest/api/3/issue/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ fields }) })
+}
+
+export type JiraAttachment = { id: string; filename: string; size: number }
+
+/**
+ * Attachments are the one upload: multipart rather than JSON, and Jira wants
+ * the XSRF opt-out header on it or answers 403 whatever the credentials.
+ */
+export async function attachFile(key: string, file: { filename: string; mimeType: string; bytes: Uint8Array }): Promise<JiraAttachment> {
+  if (!jiraConfigured()) {
+    throw new Error('Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).')
+  }
+  const form = new FormData()
+  const bytes = file.bytes.buffer.slice(file.bytes.byteOffset, file.bytes.byteOffset + file.bytes.byteLength) as ArrayBuffer
+  form.append('file', new Blob([bytes], { type: file.mimeType }), file.filename)
+  const path = `/rest/api/3/issue/${encodeURIComponent(key)}/attachments`
+  const res = await fetch(`${baseUrl()}${path}`, {
+    method: 'POST',
+    headers: { authorization: authHeader(), accept: 'application/json', 'X-Atlassian-Token': 'no-check' },
+    body: form,
+  })
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(`Jira API ${res.status} on ${path}: ${body.slice(0, 250)}`)
+  }
+  const [made] = ((await res.json()) as Partial<JiraAttachment>[] | undefined) ?? []
+  return { id: made?.id ?? '', filename: made?.filename ?? file.filename, size: made?.size ?? file.bytes.byteLength }
 }

@@ -349,6 +349,18 @@ calendar, duplicates skipped and repeating events reported rather than
 guessed at. A file is readable only in the message it arrives with, so send
 the request as the file's caption.
 
+A file attached to an **email** is a different path. `read_email` lists an
+email's attachments by filename, and `read_attachment` reads one: a PDF or a
+text file as its text (the PDF through the same extractor `read_url` uses), a
+calendar file as its parsed events. An image attached to an email cannot be
+read this way yet; the bot says so and asks for it as a photo in the chat.
+Something made from an email, a ticket above all, is made after the email and
+its attachments have been read, not from the inbox snippet: a renewal notice
+once became a board ticket with nothing in it but its subject line. The board
+tools can also change a ticket afterwards (`jira_update_issue`: title,
+description, due date) and copy an email's attachment onto it
+(`jira_attach_email_file`), so the notice sits with the job.
+
 **Saying a thing is done is not doing it.** A chat reply that reports a change
 (added, replaced, cancelled, sent) while no tool that changes anything ran is
 judged by a typed model call, the same shape as the ambient gate, and one
@@ -376,7 +388,14 @@ worth saying**:
   weather alone is not news.
 - **Money snapshot**, Sunday at 6pm: the week's spending and the month so far,
   with the budget's pacing and the categories over it where PocketSmith is
-  connected, or the totals from the raw Up feed where it is not.
+  connected, or the totals from the raw Up feed where it is not. The figures go
+  out as `**label**: figure` lines, never a table: Telegram has no tables, and
+  the monospace block that can fake one arrives as a code box with a copy
+  button. A budget position comes from PocketSmith's own analysis, in which a
+  month's allowance is the budget after rollover, so a category overspent
+  earlier in the year can be allowed nothing this month while still being
+  budgeted: that reads "over by $X (nothing left this month after rollover)",
+  and only a category with no budget at all is called "no budget set".
 
 Home lists both under Reminders with a pause; neither can be deleted, since
 the next tick would only put it back. The tick also keeps them in step with

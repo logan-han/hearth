@@ -1,4 +1,4 @@
-import type { AccountClient, CalendarEvent, MailSummary } from './types'
+import type { AccountClient, CalendarEvent, MailAttachment, MailSummary } from './types'
 import { accessTokenFor } from './token'
 import { timezone } from '../env'
 import { htmlToPlainText } from '../html'
@@ -28,6 +28,27 @@ type GraphMessage = {
   from?: GraphAddress
   toRecipients?: GraphAddress[]
   body?: { contentType?: string; content?: string }
+  hasAttachments?: boolean
+}
+
+type GraphAttachment = {
+  '@odata.type'?: string
+  id: string
+  name?: string
+  contentType?: string
+  size?: number
+  isInline?: boolean
+  /** Base64, present on a file attachment fetched on its own. */
+  contentBytes?: string
+}
+
+const FILE_ATTACHMENT = '#microsoft.graph.fileAttachment'
+
+/** A file someone attached, as opposed to an inline picture or a linked item. */
+const isFile = (a: GraphAttachment) => !a.isInline && (a['@odata.type'] ?? FILE_ATTACHMENT) === FILE_ATTACHMENT
+
+function toAttachment(a: GraphAttachment): MailAttachment {
+  return { filename: a.name ?? 'attachment', mimeType: a.contentType ?? 'application/octet-stream', size: a.size ?? 0 }
 }
 
 function addr(a?: GraphAddress): string {
@@ -81,6 +102,14 @@ function toEvent(e: GraphEvent): CalendarEvent {
   }
 }
 
+/** The attachments of one message, without their bytes. */
+async function fileAttachments(token: string, messageId: string): Promise<GraphAttachment[]> {
+  const url = new URL(`${GRAPH}/messages/${messageId}/attachments`)
+  url.searchParams.set('$select', 'id,name,contentType,size,isInline')
+  const res = await api<{ value?: GraphAttachment[] }>(token, url.toString())
+  return (res.value ?? []).filter(isFile)
+}
+
 export function microsoftClient(memberId: number): AccountClient {
   const token = () => accessTokenFor(memberId, 'microsoft')
 
@@ -108,7 +137,20 @@ export function microsoftClient(memberId: number): AccountClient {
     async readMail(id) {
       const t = await token()
       const m = await api<GraphMessage>(t, `${GRAPH}/messages/${id}`)
-      return { ...toSummary(m), body: plainText(m.body).slice(0, 6000) }
+      // The listing is a second call, so it is made only when the message says
+      // there is something to list.
+      const attachments = m.hasAttachments ? (await fileAttachments(t, id)).map(toAttachment) : []
+      return { ...toSummary(m), body: plainText(m.body).slice(0, 6000), attachments }
+    },
+
+    async readAttachment(messageId, filename) {
+      const t = await token()
+      const wanted = filename.trim().toLowerCase()
+      const found = (await fileAttachments(t, messageId)).find((a) => (a.name ?? '').toLowerCase() === wanted)
+      if (!found) throw new Error(`No attachment called "${filename}" on that email.`)
+      const full = await api<GraphAttachment>(t, `${GRAPH}/messages/${messageId}/attachments/${encodeURIComponent(found.id)}`)
+      const bytes = new Uint8Array(Buffer.from(full.contentBytes ?? '', 'base64'))
+      return { ...toAttachment({ ...found, ...full }), size: bytes.byteLength, bytes }
     },
 
     async sendMail(draft) {

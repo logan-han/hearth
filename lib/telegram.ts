@@ -1,6 +1,7 @@
 import { Bot } from 'grammy'
 import { required } from './env'
 import { toTelegramHtml } from './telegram-format'
+import { describeError } from './errors'
 
 const MAX_LEN = 4096
 
@@ -48,7 +49,10 @@ export async function send(chatId: string | number, text: string, replyTo?: numb
     const opts = i === 0 && replyTo ? { reply_parameters: { message_id: replyTo } } : {}
     try {
       await b.api.sendMessage(chatId, toTelegramHtml(part), { parse_mode: 'HTML', ...opts })
-    } catch {
+    } catch (err) {
+      // Said in the logs, or a reply that reaches the chat with its asterisks
+      // showing looks like a formatting choice rather than a rejected message.
+      console.warn('[telegram] HTML rejected, sent as plain text:', describeError(err))
       await b.api.sendMessage(chatId, part, opts)
     }
   }

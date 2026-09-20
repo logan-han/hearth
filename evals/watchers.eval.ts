@@ -66,7 +66,63 @@ const FLAGGED = { transactions: { ...LISBON.transactions, typical_debit: '$48.35
 const flaggedData = plainData(FLAGGED)
 const base = { chatId: '-100', chatType: 'group', member: null, memberName: 'the family', history: false as const, mode: 'watcher' as const }
 
+// A week as the tick fetches it: totals, the largest payments, and the budget positions as the money tool now words them.
+const SNAPSHOT = {
+  week: '2026-09-14 to 2026-09-20',
+  this_week: {
+    source: 'pocketsmith', from: '2026-09-14', to: '2026-09-20', transactions: 12, spent: '$1,842.10', received: '$3,200.00', net: '$1,357.90',
+    by_category: [{ category: 'Groceries', amount: '$612.40', share_of_spend: '33%' }, { category: 'Kids', amount: '$385.00', share_of_spend: '21%' }],
+    largest: [
+      { payee: 'Harbour Art School', amount: '$385.00', category: 'Kids', date: '2026-09-17', note: null },
+      { payee: 'FRESHMART 2041 HILLSIDE', amount: '$212.30', category: 'Groceries', date: '2026-09-19', note: null },
+    ],
+    largest_credits: [{ payee: 'SALARY ACME PTY LTD', amount: '$3,200.00', category: 'Income', date: '2026-09-15', note: null }],
+  },
+  month_so_far: {
+    source: 'pocketsmith', from: '2026-09-01', to: '2026-09-30', transactions: 40, spent: '$6,210.55', received: '$9,600.00', net: '$3,389.45',
+    by_category: [{ category: 'Kids', amount: '$2,119.47', share_of_spend: '34%' }, { category: 'Groceries', amount: '$1,102.40', share_of_spend: '18%' }],
+    largest: [{ payee: 'Harbour Art School', amount: '$1,200.00', category: 'Kids', date: '2026-09-03', note: 'Term 4 fees' }],
+    largest_credits: [{ payee: 'SALARY ACME PTY LTD', amount: '$3,200.00', category: 'Income', date: '2026-09-01', note: null }],
+  },
+  budget: {
+    from: '2026-09-01', to: '2026-09-30', period_progress: '20 of 30 days (67% of the month)',
+    income: { actual: '$9,600.00', forecast: '$9,600.00' },
+    expenses: { actual: '-$6,210.55', forecast: '-$5,400.00', used: '115%' },
+    budget_by_category: [
+      { category: 'Kids', actual: '$2,119.47', forecast: '$1,500.00', budget_period: '2026-09-01 to 2026-09-30', position: 'over by $619.47' },
+      { category: 'Shopping', actual: '$177.43', forecast: '$0.00', budget_period: '2026-09-01 to 2026-09-30', position: 'over by $177.43 (nothing left this month after rollover)' },
+      { category: 'Groceries', actual: '$1,102.40', forecast: '$1,400.00', budget_period: '2026-09-01 to 2026-09-30', position: 'under by $297.60' },
+      { category: 'Pets', actual: '$96.00', forecast: '$0.00', budget_period: '2026-09-01 to 2026-09-30', position: 'no budget set' },
+    ],
+  },
+}
+const snapshotData = plainData(SNAPSHOT)
+
 afterAll(() => printSummary('watchers'))
+
+describe.skipIf(!liveChainConfigured())('money snapshot', () => {
+  it('lays the week out as a title, label lines and bold parts, with no table and only the over-budget categories', async () => {
+    calls.length = 0
+    const r = await runAgent({ ...base, tools: WATCHERS.snapshot.tools, text: `Scheduled check "Money snapshot".\n\n${WATCHERS.snapshot.instruction}\n\nDATA (fetched just now):\n${snapshotData}` })
+    const figures = figuresGrounded(r.text, snapshotData)
+    const noTable = !/^\s*\|/m.test(r.text)
+    const labelLines = (r.text.match(/^\s*(?:[-•]\s*)?\*\*[^*\n]+\*\*:\s*\S/gm) ?? []).length >= 3
+    const hasTitle = /^\*\*[^*\n]+\*\*\s*$/m.test(r.text)
+    const overOnly = /Shopping/.test(r.text) && /Kids/.test(r.text) && !/Pets/.test(r.text) && !/under by/i.test(r.text)
+    const hard = figures.ok && noLeak(r.text) && noTable && labelLines && hasTitle && overOnly && /1,842\.10/.test(r.text) && /6,210\.55/.test(r.text) && /115%/.test(r.text)
+    const g = await judgeGroundedness({ answer: r.text, context: snapshotData })
+    record({ case: 'snapshot: label lines, no table, over-budget only', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
+    expect(figures.missing).toEqual([])
+    expect(noTable).toBe(true)
+    expect(labelLines).toBe(true)
+    expect(hasTitle).toBe(true)
+    expect(r.text).toMatch(/Shopping/)
+    expect(r.text).not.toMatch(/Pets/)
+    expect(r.text).not.toMatch(/under by/i)
+    expect(noLeak(r.text)).toBe(true)
+    if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
+  })
+})
 
 describe.skipIf(!liveChainConfigured())('money watcher', () => {
   it('phrases a payee string as a payee string, with no trip and no purpose', async () => {

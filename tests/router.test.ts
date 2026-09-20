@@ -36,6 +36,7 @@ describe('cues', () => {
 
   it('hears mail in email words and in a pending draft', () => {
     expect(routeGroups('did the school email say when athletics carnival is?')).toContain('mail')
+    expect(routeGroups('can you read the attached pdf and put it in the ticket?')).toEqual(expect.arrayContaining(['mail', 'jira']))
     expect(routeGroups('yes send it', { pendingDrafts: true })).toEqual(['mail'])
     expect(routeGroups('yes')).toEqual([])
   })

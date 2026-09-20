@@ -1,8 +1,10 @@
 import { tool } from 'ai'
 import { z } from 'zod'
 import * as jira from '../providers/jira'
+import { clientFor } from '../providers'
 import { localDateKey } from '../cron'
-import { announce, type ToolContext } from './context'
+import { announce, requireMember, type ToolContext } from './context'
+import { mailboxOwner, describeMailError } from './mail'
 import { describeError } from '../errors'
 
 const NOT_CONFIGURED = 'Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).'
@@ -119,6 +121,57 @@ export function jiraTools(ctx: ToolContext) {
           return { ...made, summary, due: due_date ?? null, ...announce(ctx, `Added to the board: **${made.key}** ${summary}`) }
         } catch (e) {
           return { error: describeError(e) }
+        }
+      },
+    }),
+
+    jira_update_issue: tool({
+      description:
+        "Change an issue's title, description or due date: for instance once an email or its attachment has said what the job is and when it is due. Give only what should change.",
+      inputSchema: z.object({
+        key: z.string().describe(`Issue key, e.g. ${defaultProject()}-346`),
+        summary: z.string().optional().describe('New title'),
+        description: z.string().optional().describe('New description, replacing the old one in full'),
+        due_date: z.string().optional().describe('YYYY-MM-DD, or "none" to clear the due date'),
+      }),
+      execute: async ({ key, summary, description, due_date }) => {
+        if (!jira.jiraConfigured()) return { error: NOT_CONFIGURED }
+        if (summary === undefined && description === undefined && due_date === undefined) {
+          return { error: 'Nothing to change: give a summary, a description or a due_date.' }
+        }
+        try {
+          const dueDate = due_date === undefined ? undefined : due_date.trim().toLowerCase() === 'none' ? null : due_date
+          await jira.updateIssue(key, { summary, description, dueDate })
+          const updated = (['summary', 'description', 'due_date'] as const).filter((f) => ({ summary, description, due_date })[f] !== undefined)
+          return { key, updated }
+        } catch (e) {
+          return { error: describeError(e) }
+        }
+      },
+    }),
+
+    jira_attach_email_file: tool({
+      description:
+        'Copy a file attached to an email onto an issue, so a renewal notice or an invoice sits with its job on the board. ' +
+        'Give the email id and provider from list_email and the filename as read_email lists it.',
+      inputSchema: z.object({
+        key: z.string().describe(`Issue key, e.g. ${defaultProject()}-346`),
+        email_id: z.string(),
+        provider: z.enum(['google', 'microsoft']),
+        filename: z.string().describe("The attachment's filename, exactly as read_email listed it"),
+        of: z.string().optional().describe("Family member the mailbox belongs to; omit for the asker's own"),
+      }),
+      execute: async ({ key, email_id, provider, filename, of }) => {
+        if (!jira.jiraConfigured()) return { error: NOT_CONFIGURED }
+        requireMember(ctx)
+        try {
+          const who = await mailboxOwner(ctx, of)
+          if ('error' in who) return who
+          const file = await clientFor(who.owner.id, provider).readAttachment(email_id, filename)
+          const made = await jira.attachFile(key, file)
+          return { key, attached: made.filename, size: made.size }
+        } catch (e) {
+          return { error: describeMailError(e) }
         }
       },
     }),

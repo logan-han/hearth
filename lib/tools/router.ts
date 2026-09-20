@@ -10,11 +10,11 @@ import type { ToolName } from './index'
  * Watchers and the sweep never route; they get an explicit list.
  */
 export const TOOL_GROUPS = {
-  mail: ['list_email', 'new_mail', 'read_email', 'draft_email', 'send_email', 'cancel_draft'],
+  mail: ['list_email', 'new_mail', 'read_email', 'read_attachment', 'draft_email', 'send_email', 'cancel_draft'],
   personal_calendar: ['list_calendar', 'create_calendar_event'],
   money: ['list_bank_accounts', 'list_transactions', 'spending_summary', 'new_transactions', 'budget_summary'],
   notion: ['notion_search', 'notion_read_page', 'notion_query_database', 'notion_append_to_page'],
-  jira: ['jira_search', 'jira_board_summary', 'jira_read_issue', 'jira_create_issue', 'jira_move_issue', 'jira_comment'],
+  jira: ['jira_search', 'jira_board_summary', 'jira_read_issue', 'jira_create_issue', 'jira_update_issue', 'jira_move_issue', 'jira_comment', 'jira_attach_email_file'],
   automations: ['create_automation', 'list_automations', 'delete_automation', 'pause_automation'],
 } as const
 
@@ -54,7 +54,7 @@ export const SITUATIONAL_TOOLS = ['import_calendar_file', 'unsure'] as const
  * generous. An issue key such as HTL-344 counts as a board cue.
  */
 const CUES: Record<ToolGroup, RegExp> = {
-  mail: /\b(e-?mails?|mail(?:box)?|inbox|gmail|outlook|drafts?|send (?:it|that|this|the)|reply(?:ing)? to|newsletters?|invoice|receipt)\b/i,
+  mail: /\b(e-?mails?|mail(?:box)?|inbox|gmail|outlook|drafts?|send (?:it|that|this|the)|reply(?:ing)? to|newsletters?|invoice|receipt|attach(?:ed|ment|ments)|pdf)\b/i,
   personal_calendar: /\b(my (?:calendar|day|week|schedule|diary)|appointments?|meetings?|calendar|am i (?:free|busy)|free (?:on|at|this|tomorrow)|busy)\b/i,
   money: /\b(spen[dt]|spending|transactions?|bank|2 ?up|budgets?|pocketsmith|paid|payments?|purchases?|bought|costs?|balance|money|refunds?|charge[sd]?|bills?)\b|\$\s?\d/i,
   notion: /\b(notion|reading list|travel plans?|wiki|notes? page)\b/i,

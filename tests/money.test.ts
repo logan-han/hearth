@@ -4,7 +4,7 @@ import { freshDb, closeDb } from './helpers/db'
 import { getSetting } from '@/lib/db/queries'
 import type { ToolContext } from '@/lib/tools/context'
 
-const { moneyTools } = await import('@/lib/tools/money')
+const { moneyTools, budgetPosition } = await import('@/lib/tools/money')
 const up = await import('@/lib/providers/up')
 const ps = await import('@/lib/providers/pocketsmith')
 
@@ -341,9 +341,15 @@ describe('pocketsmith client', () => {
       }
       if (u.includes('/budget')) {
         return json([
-          { category: { title: 'Medical' }, is_transfer: false, income: false, expense: { total_actual_amount: -300, total_forecast_amount: -100, total_over_by: 200, total_under_by: 0, start_date: '2026-08-01', end_date: '2026-08-31' } },
-          { category: { title: 'Supermarket' }, is_transfer: false, income: false, expense: { total_actual_amount: -200, total_forecast_amount: -500, total_over_by: 0, total_under_by: 300, start_date: '2026-08-01', end_date: '2026-08-31' } },
+          { category: { title: 'Medical' }, is_budgeted: true, is_transfer: false, income: false, expense: { total_actual_amount: -300, total_forecast_amount: -100, total_over_by: 200, total_under_by: 0, start_date: '2026-08-01', end_date: '2026-08-31' } },
+          { category: { title: 'Supermarket' }, is_budgeted: true, is_transfer: false, income: false, expense: { total_actual_amount: -200, total_forecast_amount: -500, total_over_by: 0, total_under_by: 300, start_date: '2026-08-01', end_date: '2026-08-31' } },
           { category: { title: 'Transfers', is_transfer: true }, is_transfer: false, income: false, expense: { total_actual_amount: -5000, total_forecast_amount: 0, total_over_by: 5000, total_under_by: 0, start_date: '2026-08-01', end_date: '2026-08-31' } },
+          // Budgeted with rollover, and overspent earlier in the year: PocketSmith allows nothing this month.
+          { category: { title: 'Shopping', rollover_type: 'above' }, is_budgeted: true, is_transfer: false, income: false, expense: { total_actual_amount: -177.43, total_forecast_amount: 0, total_over_by: 177.43, total_under_by: 0, start_date: '2026-08-01', end_date: '2026-08-31' } },
+          // Budgeted on another cadence, nothing falling in this month.
+          { category: { title: 'Car rego' }, is_budgeted: true, is_transfer: false, income: false, expense: { total_actual_amount: -20, total_forecast_amount: 0, total_over_by: 20, total_under_by: 0, start_date: '2026-08-01', end_date: '2026-08-31' } },
+          // No budget at all, but spending: listed last, and never "over".
+          { category: { title: 'Pets' }, is_budgeted: false, is_transfer: false, income: false, expense: { total_actual_amount: -900, total_forecast_amount: 0, total_over_by: 900, total_under_by: 0, start_date: '2026-08-01', end_date: '2026-08-31' } },
         ])
       }
       return json([])
@@ -396,8 +402,35 @@ describe('pocketsmith client', () => {
     const r = await call('budget_summary', {})
     const rows = r.budget_by_category as { category: string; position: string; budget_period: string }[]
     expect(rows[0]).toMatchObject({ category: 'Medical', position: 'over by $200.00', budget_period: '2026-08-01 to 2026-08-31' })
-    expect(rows[1]).toMatchObject({ category: 'Supermarket', position: 'under by $300.00' })
+    expect(rows.find((x) => x.category === 'Supermarket')).toMatchObject({ position: 'under by $300.00' })
     expect(rows.map((x) => x.category)).not.toContain('Transfers')
+  })
+
+  it('never calls a budgeted category unbudgeted: a zero allowance is rollover or cadence, said so beside the overspend', async () => {
+    const r = await call('budget_summary', {})
+    const rows = r.budget_by_category as { category: string; position: string; forecast: string }[]
+    expect(rows.find((x) => x.category === 'Shopping')).toMatchObject({
+      forecast: '$0.00',
+      position: 'over by $177.43 (nothing left this month after rollover)',
+    })
+    expect(rows.find((x) => x.category === 'Car rego')?.position).toBe('over by $20.00 (nothing budgeted for this month)')
+    expect(rows.find((x) => x.category === 'Pets')?.position).toBe('no budget set')
+    expect(rows.map((x) => x.position).join(' ')).not.toContain('unbudgeted')
+  })
+
+  it('lists budgeted categories first, most over budget at the top, and spending with no budget last', async () => {
+    const r = await call('budget_summary', {})
+    const names = (r.budget_by_category as { category: string }[]).map((x) => x.category)
+    expect(names.slice(0, 2)).toEqual(['Medical', 'Shopping'])
+    expect(names.at(-1)).toBe('Pets')
+  })
+
+  it('positions a budget line from its own fields', () => {
+    const base = { budgeted: true, rollsOver: false, forecast: 100, overBy: 0, underBy: 0 }
+    expect(budgetPosition(base, 'AUD')).toBe('on budget')
+    expect(budgetPosition({ ...base, forecast: 0, rollsOver: true, overBy: 0 }, 'AUD')).toBe('nothing left this month after rollover')
+    expect(budgetPosition({ ...base, forecast: 0, overBy: 0 }, 'AUD')).toBe('nothing budgeted for this month')
+    expect(budgetPosition({ ...base, budgeted: false, forecast: 0, overBy: 50 }, 'AUD')).toBe('no budget set')
   })
 
   it('copes with a budget response missing a side entirely', async () => {
@@ -413,7 +446,7 @@ describe('pocketsmith client', () => {
       String(url).endsWith('/me') ? json({ id: 42 }) : json([{ expense: {} }, { income: {} }]),
     )
     expect(await ps.budgetByCategory({ startDate: '2026-08-01', endDate: '2026-08-31' })).toEqual([
-      { title: 'Uncategorised', actual: 0, forecast: 0, overBy: 0, underBy: 0, from: '2026-08-01', to: '2026-08-31' },
+      { title: 'Uncategorised', actual: 0, forecast: 0, overBy: 0, underBy: 0, from: '2026-08-01', to: '2026-08-31', budgeted: false, rollsOver: false },
     ])
     fetchMock.mockImplementation(async (url: URL) => (String(url).endsWith('/me') ? json({ id: 42 }) : json({})))
     expect(await ps.budgetByCategory({ startDate: '2026-08-01', endDate: '2026-08-31' })).toEqual([])

@@ -6,6 +6,7 @@ import type { ToolContext } from '@/lib/tools/context'
 
 const listMail = vi.fn()
 const readMail = vi.fn()
+const readAttachment = vi.fn()
 const sendMail = vi.fn()
 const listEvents = vi.fn()
 const createEvent = vi.fn()
@@ -13,7 +14,7 @@ const createEvent = vi.fn()
 const clientForIds: number[] = []
 vi.mock('@/lib/providers', async (orig) => {
   const actual = await orig<typeof import('@/lib/providers')>()
-  const stub = (provider: string) => ({ provider, listMail, readMail, sendMail, listEvents, createEvent })
+  const stub = (provider: string) => ({ provider, listMail, readMail, readAttachment, sendMail, listEvents, createEvent })
   return {
     ...actual,
     clientFor: (id: number, p: string) => {
@@ -23,6 +24,11 @@ vi.mock('@/lib/providers', async (orig) => {
     clientsFor: async () => [stub('google')],
   }
 })
+
+// The PDF reader is a real dependency; here its answer is fixed so the test is about the tool.
+vi.mock('unpdf', () => ({
+  extractText: vi.fn(async () => ({ totalPages: 2, text: 'Policy number HOM 1\nAmount due $3,101.20\nDue 22/10/2026' })),
+}))
 
 const { mailTools } = await import('@/lib/tools/mail')
 const { calendarTools } = await import('@/lib/tools/calendar')
@@ -168,6 +174,53 @@ describe('read_email across the family', () => {
   it('knows nobody by a name that is not in the family', async () => {
     const r = await call(mailTools(ctx), 'read_email', { id: 'm1', provider: 'google', of: 'Nobody' })
     expect(String(r.error)).toContain('Nobody')
+  })
+})
+
+describe('read_attachment', () => {
+  const pdf = { filename: 'Renewal.pdf', mimeType: 'application/pdf', size: 4, bytes: new TextEncoder().encode('%PDF') }
+
+  it('reads a PDF attachment as its text', async () => {
+    readAttachment.mockResolvedValue(pdf)
+    const r = await call(mailTools(ctx), 'read_attachment', { email_id: 'm1', provider: 'google', filename: 'Renewal.pdf' })
+    expect(readAttachment).toHaveBeenCalledWith('m1', 'Renewal.pdf')
+    expect(r).toMatchObject({ filename: 'Renewal.pdf', type: 'pdf', pages: 2 })
+    expect(String(r.text)).toContain('$3,101.20')
+  })
+
+  it('reads a text file as text and a calendar file as its events', async () => {
+    readAttachment.mockResolvedValue({ filename: 'notes.txt', mimeType: 'text/plain', size: 5, bytes: new TextEncoder().encode('hello') })
+    expect(await call(mailTools(ctx), 'read_attachment', { email_id: 'm1', provider: 'google', filename: 'notes.txt' })).toMatchObject({ type: 'text', text: 'hello' })
+    const ics = 'BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:1\nSUMMARY:Sports day\nDTSTART;VALUE=DATE:20261015\nDTEND;VALUE=DATE:20261016\nEND:VEVENT\nEND:VCALENDAR'
+    readAttachment.mockResolvedValue({ filename: 'term.ics', mimeType: 'application/octet-stream', size: ics.length, bytes: new TextEncoder().encode(ics) })
+    const r = await call(mailTools(ctx), 'read_attachment', { email_id: 'm1', provider: 'google', filename: 'term.ics' })
+    expect(r.type).toBe('calendar')
+    expect(String(r.text)).toContain('Sports day')
+  })
+
+  it('says an image cannot be read from an email, and passes the mailbox\'s own error through', async () => {
+    readAttachment.mockResolvedValue({ filename: 'photo.jpg', mimeType: 'image/jpeg', size: 1, bytes: new Uint8Array([1]) })
+    expect(String((await call(mailTools(ctx), 'read_attachment', { email_id: 'm1', provider: 'google', filename: 'photo.jpg' })).error)).toContain('image')
+    readAttachment.mockRejectedValue(new Error('No attachment called "x.pdf" on that email.'))
+    expect(String((await call(mailTools(ctx), 'read_attachment', { email_id: 'm1', provider: 'google', filename: 'x.pdf' })).error)).toContain('No attachment called')
+  })
+
+  it('reads another member\'s attachment by name, and refuses one nobody has', async () => {
+    const ada = await q.upsertMember('222', 'Ada', { allowed: true })
+    readAttachment.mockResolvedValue(pdf)
+    clientForIds.length = 0
+    await call(mailTools(ctx), 'read_attachment', { email_id: 'm1', provider: 'google', filename: 'Renewal.pdf', of: 'ada' })
+    expect(clientForIds.at(-1)).toBe(ada.id)
+    const r = await call(mailTools(ctx), 'read_attachment', { email_id: 'm1', provider: 'google', filename: 'Renewal.pdf', of: 'Nobody' })
+    expect(String(r.error)).toContain('No family member called "Nobody"')
+  })
+
+  it('lists attachments on read_email with a pointer to read_attachment', async () => {
+    readMail.mockResolvedValue({ id: 'm1', body: 'see attached', attachments: [{ filename: 'Renewal.pdf', mimeType: 'application/pdf', size: 4 }] })
+    const r = await call(mailTools(ctx), 'read_email', { id: 'm1', provider: 'google' })
+    expect(String(r.note)).toContain('read_attachment')
+    readMail.mockResolvedValue({ id: 'm2', body: 'plain', attachments: [] })
+    expect((await call(mailTools(ctx), 'read_email', { id: 'm2', provider: 'google' })).note).toBeUndefined()
   })
 })
 

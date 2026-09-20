@@ -2,6 +2,7 @@ import { tool } from 'ai'
 import { z } from 'zod'
 import * as up from '../providers/up'
 import * as ps from '../providers/pocketsmith'
+import type { PsCategoryBudget } from '../providers/pocketsmith'
 import { readCursor, writeCursor } from './cursor'
 import { flagTransactions, HISTORY_DAYS, type TransactionFlag } from '../money-flags'
 import { localToUtc, formatLocal, localDateKey } from '../cron'
@@ -13,6 +14,25 @@ const money = (n: number, currency = 'AUD') =>
   new Intl.NumberFormat('en-AU', { style: 'currency', currency }).format(n)
 
 const DATE = z.string().describe(`Date as YYYY-MM-DD, in ${timezone()}`)
+
+/**
+ * Where a category stands, in PocketSmith's own reckoning. Its allowance for
+ * a month is the budget after rollover, so a category overspent in earlier
+ * months can be allowed nothing this month and still be budgeted: that is
+ * over by whatever was spent, with the reason beside it, and never
+ * "unbudgeted". Only a category with no budget at all is called that, and
+ * in words that say so.
+ */
+export function budgetPosition(c: Pick<PsCategoryBudget, 'budgeted' | 'rollsOver' | 'forecast' | 'overBy' | 'underBy'>, currency: string): string {
+  if (!c.budgeted) return 'no budget set'
+  if (c.forecast === 0) {
+    const why = c.rollsOver ? 'nothing left this month after rollover' : 'nothing budgeted for this month'
+    return c.overBy > 0 ? `over by ${money(c.overBy, currency)} (${why})` : why
+  }
+  if (c.overBy > 0) return `over by ${money(c.overBy, currency)}`
+  if (c.underBy > 0) return `under by ${money(c.underBy, currency)}`
+  return 'on budget'
+}
 
 /** First and last day of the month containing `now`, as local date keys. */
 function currentMonth(now: Date): { start: string; end: string } {
@@ -317,24 +337,19 @@ export function moneyTools(ctx: ToolContext) {
               ...(usedPct ? { used: usedPct } : {}),
             },
             // PocketSmith precomputes over/under per category; quote these
-            // positions verbatim rather than doing arithmetic in prose.
+            // positions verbatim rather than doing arithmetic in prose. The
+            // budgeted categories come first, most over budget at the top;
+            // spending with no budget behind it is listed after them.
             budget_by_category: perCategory
               .filter((c) => c.forecast !== 0 || c.actual !== 0)
-              .sort((a, b) => b.overBy - a.overBy)
+              .sort((a, b) => Number(b.budgeted) - Number(a.budgeted) || b.overBy - a.overBy)
               .slice(0, 12)
               .map((c) => ({
                 category: c.title,
                 actual: money(c.actual, cur),
                 forecast: money(c.forecast, cur),
                 budget_period: `${c.from} to ${c.to}`,
-                position:
-                  c.forecast === 0
-                    ? 'unbudgeted'
-                    : c.overBy > 0
-                      ? `over by ${money(c.overBy, cur)}`
-                      : c.underBy > 0
-                        ? `under by ${money(c.underBy, cur)}`
-                        : 'on budget',
+                position: budgetPosition(c, cur),
               })),
           }
         } catch (e) {

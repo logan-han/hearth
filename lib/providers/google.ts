@@ -1,4 +1,4 @@
-import type { AccountClient, CalendarEvent, DraftMail, MailSummary } from './types'
+import type { AccountClient, CalendarEvent, DraftMail, MailAttachment, MailSummary } from './types'
 import { accessTokenFor } from './token'
 import { timezone } from '../env'
 import { htmlToPlainText } from '../html'
@@ -19,7 +19,13 @@ async function api<T>(token: string, url: string, init: RequestInit = {}): Promi
 }
 
 type GmailHeader = { name: string; value: string }
-type GmailPart = { mimeType?: string; body?: { data?: string; size?: number }; parts?: GmailPart[] }
+type GmailPart = {
+  mimeType?: string
+  filename?: string
+  headers?: GmailHeader[]
+  body?: { data?: string; size?: number; attachmentId?: string }
+  parts?: GmailPart[]
+}
 type GmailMessage = {
   id: string
   snippet?: string
@@ -56,6 +62,25 @@ function extractBody(part?: GmailPart): string {
     return htmlToPlainText(Buffer.from(part.body.data, 'base64url').toString('utf8'))
   }
   return ''
+}
+
+type FilePart = GmailPart & { filename: string; body: { attachmentId: string } }
+
+/**
+ * The parts that are files: named, and stored apart from the message body.
+ * A picture the sender's mail client laid into the text (a logo, a signature)
+ * is marked inline, and is not something anyone means by "the attachment".
+ */
+function fileParts(part?: GmailPart): FilePart[] {
+  if (!part) return []
+  const disposition = part.headers?.find((h) => h.name.toLowerCase() === 'content-disposition')?.value ?? ''
+  const inlineImage = /^inline/i.test(disposition) && (part.mimeType ?? '').startsWith('image/')
+  const own = part.filename && part.body?.attachmentId && !inlineImage ? [part as FilePart] : []
+  return [...own, ...(part.parts ?? []).flatMap(fileParts)]
+}
+
+function toAttachment(part: FilePart): MailAttachment {
+  return { filename: part.filename, mimeType: part.mimeType ?? 'application/octet-stream', size: part.body.size ?? 0 }
 }
 
 function toSummary(msg: GmailMessage): MailSummary {
@@ -145,7 +170,23 @@ export function googleClient(memberId: number): AccountClient {
     async readMail(id) {
       const t = await token()
       const msg = await api<GmailMessage>(t, `${GMAIL}/messages/${id}?format=full`)
-      return { ...toSummary(msg), body: extractBody(msg.payload).slice(0, 6000) }
+      return { ...toSummary(msg), body: extractBody(msg.payload).slice(0, 6000), attachments: fileParts(msg.payload).map(toAttachment) }
+    },
+
+    async readAttachment(messageId, filename) {
+      const t = await token()
+      // The message again, for the part behind the name: its attachment id
+      // is what the attachments endpoint wants, and it is minted per read.
+      const msg = await api<GmailMessage>(t, `${GMAIL}/messages/${messageId}?format=full`)
+      const wanted = filename.trim().toLowerCase()
+      const part = fileParts(msg.payload).find((p) => p.filename.toLowerCase() === wanted)
+      if (!part) throw new Error(`No attachment called "${filename}" on that email.`)
+      const file = await api<{ data?: string; size?: number }>(
+        t,
+        `${GMAIL}/messages/${messageId}/attachments/${encodeURIComponent(part.body.attachmentId)}`,
+      )
+      const bytes = new Uint8Array(Buffer.from(file.data ?? '', 'base64url'))
+      return { ...toAttachment(part), size: bytes.byteLength, bytes }
     },
 
     async sendMail(draft) {
