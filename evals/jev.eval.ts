@@ -99,11 +99,71 @@ describe.skipIf(!jevConfigured())('the post decision on Jev', () => {
     expect(d.decision).toBe('post')
   })
 
-  it('holds the same draft back when a figure is not in the evidence', async () => {
-    const d = await decidePost({ label: 'Morning brief', draft: briefDraft.replace('$20', '$30'), evidence: briefEvidence })
+  it('holds the same draft back when a figure is not in the evidence, checked or not', async () => {
+    const invented = briefDraft.replace('$20', '$30')
+    const d = await decidePost({ label: 'Morning brief', draft: invented, evidence: briefEvidence })
     const held = d.decision === 'skip'
     record({ case: 'decision: invented price holds', hard: held ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}${d.reason ? ` ${d.reason}` : ''}` })
     expect(held).toBe(true)
+
+    // The higher line a checked draft is held to must still keep this out:
+    // what the claim check misses is exactly what it is there for.
+    const checked = await decidePost({ label: 'Morning brief', draft: invented, evidence: briefEvidence, verified: true })
+    const stillHeld = checked.decision === 'skip'
+    record({ case: 'decision: invented price holds even once checked', hard: stillHeld ? 'pass' : 'fail', model: checked.model, note: `${checked.decision}@${checked.confidence}` })
+    expect(stillHeld).toBe(true)
+  })
+
+  /**
+   * The brief of 22 Sep, in stand-in names: six bullets, nothing in any of
+   * them outside the data, and every statement passed by the claim check
+   * moments earlier at 0.99 and above. Asked of the whole draft at once this
+   * question answered 0.53 against the 0.5 line and the brief never reached
+   * the family. The line for a checked draft is what has to carry it.
+   */
+  it('does not hold a long brief back where every bullet is traceable to the mail it came from', async () => {
+    const data = plainData({
+      events: {
+        timezone: 'Australia/Melbourne',
+        events: [{ id: 13, title: 'Prep-6 $48 experience fee, vacation care', start_local: 'Tue 22 Sep 2026 00:00', end_local: 'Wed 23 Sep 2026 00:00', all_day: true, location: null }],
+      },
+      mail: {
+        accounts: [
+          { member: 'Rowan', mailbox: "Rowan's Gmail", provider: 'google', first_check: false, messages: [
+            { id: 'm1', from: 'Larkfield Cloud <alerts@larkfieldcloud.example>', subject: "You've used 90% of your monthly compute allowance", snippet: 'Your compute is approaching its limit.', date: '2026-09-21T16:18:55+10:00' },
+            { id: 'm2', from: 'Tidewater Goods <shipping@tidewatergoods.example>', subject: 'Shipped: laundry sheets', snippet: 'Your order has shipped and is on its way.', date: '2026-09-21T14:16:23+10:00' },
+          ] },
+          { member: 'Ada', mailbox: "Ada's Outlook", provider: 'microsoft', first_check: false, messages: [
+            { id: 'm3', from: 'Marrow Health <noreply@marrowhealth.example>', subject: 'Your Achieve Conversation is overdue', snippet: 'Dear Ada Quill, Marrow Health requires all employees to have an Achieve Conversation with their manager annually.', date: '2026-09-21T18:34:17+10:00' },
+            { id: 'm4', from: 'Meridian Air <news@meridianair.example>', subject: 'Mileage integration plan', snippet: 'On the full integration date of Dec 17, 2026, Coastal Air mileage will be automatically transferred to Meridian accounts.', date: '2026-09-21T00:17:12+10:00' },
+            { id: 'm5', from: 'Eastvale Swim <accounts@eastvaleswim.example>', subject: 'Transaction receipt', snippet: 'Dear Ada, thank you for your payment that has been processed for your current charges, as of 21/09/2026.', date: '2026-09-20T22:47:54+10:00' },
+          ] },
+        ],
+      },
+    })
+    const draft = [
+      '**Today**',
+      '- Prep-6 $48 experience fee, vacation care (all day)',
+      '**To do**',
+      "- In Ada's mailbox, Marrow Health sent an email stating that Ada Quill's Achieve Conversation is overdue.",
+      '**Heads up**',
+      "- In Rowan's Gmail, Larkfield Cloud sent a notice that Rowan has used 90% of the monthly compute allowance.",
+      "- In Rowan's Gmail, Tidewater Goods sent a shipment notice that the laundry sheets have shipped.",
+      "- In Ada's mailbox, Meridian Air sent a guide to the mileage integration plan, noting that on the full integration date of Dec 17, 2026, Coastal Air mileage will be automatically transferred to Meridian accounts.",
+      "- In Ada's mailbox, Eastvale Swim sent a transaction receipt confirming a payment processed for current charges as of 21/09/2026.",
+    ].join('\n')
+    const d = await decidePost({
+      label: 'Morning brief',
+      draft,
+      evidence: `INSTRUCTION:\n${briefInstruction}\n\nDATA:\n${data}\n\nTOOL RESULTS:\n(none)`,
+      verified: true,
+    })
+    const hard = d.decision === 'post'
+    // A post carries 1 - p(invented), so the note gives the number the line in
+    // lib/jev.ts has to sit above; a skip carries the probability it skipped on.
+    const note = hard ? `post, p(invented)=${Math.round((1 - d.confidence) * 100) / 100}` : `skip@${d.confidence}${d.reason ? ` ${d.reason}` : ''}`
+    record({ case: 'decision: a checked six-bullet brief posts', hard: hard ? 'pass' : 'fail', model: d.model, note })
+    expect(d.decision).toBe('post')
   })
 
   it('does not hold a grounded brief back over a collection whose time has passed', async () => {

@@ -50,6 +50,20 @@ export const THRESHOLDS = {
   claimSupported: 0.6,
   /** p(the draft says something the evidence does not) at or above this decides skip. */
   postInvented: 0.5,
+  /**
+   * The same line once the claim check has been through the draft: every
+   * statement it pulled out was put to the checker against this same evidence,
+   * one at a time, and every one came back supported. The question behind
+   * postInvented is asked of the whole draft at once, so it is a union over
+   * everything the draft says and drifts up with its length. A morning brief
+   * of six bullets, each traceable to the mail it came from, answered 0.53 and
+   * was held back while the claim check had just passed all six of its
+   * statements at 0.99 and above. The coarse question then overrides the fine
+   * one only when it is decisive, which is what it takes to keep out what the
+   * fine one missed: the brief with one invented figure answers 0.94, whether
+   * the claim check has been through it or not.
+   */
+  postInventedVerified: 0.8,
   /** p(the draft only says there is nothing new) at or above this decides skip. */
   postNothingNew: 0.7,
 } as const
@@ -281,9 +295,18 @@ export const POST_REASONS = {
  * the confidence is the probability behind the decision, for the log and the
  * admin's note. The first live run put a grounded, paraphrased brief at
  * p(invented) 0.37 and the same brief with one invented figure at 0.93, which
- * is what the 0.5 line separates.
+ * is what the 0.5 line separates. A draft the claim check has already been
+ * through statement by statement is held to the higher line above: this
+ * question is the coarser of the two, and overriding the one that passed takes
+ * a decisive answer rather than a marginal one.
  */
-export async function decidePost(input: { label: string; draft: string; evidence: string }): Promise<JevPostDecision> {
+export async function decidePost(input: {
+  label: string
+  draft: string
+  evidence: string
+  /** Every statement the claim check pulled out of this draft was checked against this evidence and supported. */
+  verified?: boolean
+}): Promise<JevPostDecision> {
   const { answers } = await askJev({
     purpose: 'hearth.decision',
     state: { draft: input.draft, evidence: input.evidence },
@@ -296,7 +319,7 @@ export async function decidePost(input: { label: string; draft: string; evidence
   if (nothingNew >= THRESHOLDS.postNothingNew) {
     return { decision: 'skip', confidence: round(nothingNew), reason: POST_REASONS.nothingNew, model }
   }
-  if (invented >= THRESHOLDS.postInvented) {
+  if (invented >= (input.verified ? THRESHOLDS.postInventedVerified : THRESHOLDS.postInvented)) {
     return { decision: 'skip', confidence: round(invented), reason: POST_REASONS.invented, model }
   }
   return { decision: 'post', confidence: round(1 - invented), model }

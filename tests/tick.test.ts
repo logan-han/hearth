@@ -465,6 +465,30 @@ describe('the post decision', () => {
     expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
   })
 
+  it('tells the decision when the check went through the draft and passed every statement', async () => {
+    reviewDraft.mockResolvedValue({ claims: ['bins tonight'], unsupported: [], message: 'Bins out tonight.' })
+    await authed()
+    expect(decideWatcherPost).toHaveBeenCalledWith(expect.objectContaining({ draft: 'Bins out tonight.', verified: true }))
+  })
+
+  it('leaves the full line standing when the check rewrote the draft, found nothing to check, or could not run', async () => {
+    // A rewrite nobody has checked since, and a draft with nothing checkable
+    // in it, are both drafts the finer check cannot vouch for.
+    reviewDraft.mockResolvedValue({ claims: ['bins tonight', 'recycling week'], unsupported: ['recycling week'], message: 'Bins out tonight.' })
+    await authed()
+    expect(decideWatcherPost).toHaveBeenCalledWith(expect.objectContaining({ verified: false }))
+
+    decideWatcherPost.mockClear()
+    reviewDraft.mockResolvedValue({ claims: [], unsupported: [], message: 'Bins out tonight.' })
+    await authed()
+    expect(decideWatcherPost).toHaveBeenCalledWith(expect.objectContaining({ verified: false }))
+
+    decideWatcherPost.mockClear()
+    reviewDraft.mockRejectedValue(new Error('No object generated'))
+    await authed()
+    expect(decideWatcherPost).toHaveBeenCalledWith(expect.objectContaining({ verified: false }))
+  })
+
   it('posts nothing when no claim survives the check, and tells an admin which failed', async () => {
     reviewDraft.mockResolvedValue({ claims: ['a trip to Lisbon'], unsupported: ['a trip to Lisbon'], message: null })
     await authed()

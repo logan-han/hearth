@@ -275,7 +275,18 @@ draft only say there is nothing new. Code turns the answers into post or skip,
 so neither judge is ever handed a verdict to reach, and neither is asked
 whether the writer obeyed its instruction: a judge that was once asked for a
 verdict held a whole brief back over a collection whose time had passed, which
-was the writer's selection to make and nothing the evidence lacked. `TYPESAFE_DEFAULT_MODEL` pins a version
+was the writer's selection to make and nothing the evidence lacked.
+
+The two grounding checks are not equals. The claim check asks about one
+statement at a time; the post decision asks about the whole draft at once,
+which makes it a union over everything the draft says and drifts up with the
+draft's length. A morning brief of six bullets, every one traceable to the
+mail it came from, answered 0.53 against the 0.5 line and never reached the
+family, while the claim check had just passed all six of its statements at
+0.99 and above. So a draft the claim check has been through and passed whole
+is held to a higher line (`postInventedVerified`): the coarser question
+overrides the finer one only when it is decisive, and the same brief with one
+invented figure answers 0.94 and is still held. `TYPESAFE_DEFAULT_MODEL` pins a version
 (`jev-1.13.0`) where `jev-latest` would move without notice. Its calls sit
 beside the chain's on **System** under `jev:`, and in Langfuse as generations
 named after the decision.

@@ -680,6 +680,8 @@ export async function decideWatcherPost(input: {
   label: string
   draft: string
   evidence: string
+  /** Every statement the claim check pulled out of this draft was checked against this evidence and supported. */
+  verified?: boolean
 }): Promise<PostDecision & { model: string }> {
   if (jevConfigured()) {
     try {
@@ -701,7 +703,7 @@ export async function decideWatcherPost(input: {
         telemetry: callTelemetry('hearth.decision'),
       }),
     )
-    return { ...fromAnswers(r.output), model: slot.name }
+    return { ...fromAnswers(r.output, input.verified ?? false), model: slot.name }
   }, await structuredChain(), 'hearth.decision')
 }
 
@@ -713,14 +715,23 @@ export async function decideWatcherPost(input: {
  */
 export const CHAIN_POST_CONFIDENCE = 0.7
 
-/** The chain's two answers combined the way lib/jev.ts combines Jev's: nothing new skips, invented skips, doubt skips, the rest posts. */
-function fromAnswers(o: z.infer<typeof postAnswersSchema>): PostDecision {
+/**
+ * The chain's two answers combined the way lib/jev.ts combines Jev's: nothing
+ * new skips, invented skips, doubt skips, the rest posts. `verified` says the
+ * claim check has already been through this draft statement by statement
+ * against the same evidence and passed every one, and it does here what the
+ * higher line does on Jev's side: this question is asked of the whole draft at
+ * once, so once the finer check has passed, only an answer the judge is sure
+ * of overrides it, and its doubt is no longer reason enough on its own.
+ */
+function fromAnswers(o: z.infer<typeof postAnswersSchema>, verified: boolean): PostDecision {
   if (o.nothing_new) return { decision: 'skip', confidence: o.confidence, reason: POST_REASONS.nothingNew }
-  if (o.invented) {
+  const sure = o.confidence >= CHAIN_POST_CONFIDENCE
+  if (o.invented && (sure || !verified)) {
     const quoted = o.not_in_evidence?.trim()
     return { decision: 'skip', confidence: o.confidence, reason: quoted ? `${POST_REASONS.invented}: ${quoted}` : POST_REASONS.invented }
   }
-  if (o.confidence < CHAIN_POST_CONFIDENCE) return { decision: 'skip', confidence: o.confidence, reason: POST_REASONS.unsure }
+  if (!sure && !verified) return { decision: 'skip', confidence: o.confidence, reason: POST_REASONS.unsure }
   return { decision: 'post', confidence: o.confidence }
 }
 

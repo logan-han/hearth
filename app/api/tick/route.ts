@@ -319,6 +319,15 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
   // First the factored check: each claim against the evidence, in a context
   // that never sees the draft. What fails is cut; if nothing survives, silence.
   let reviewed = draft
+  // Whether that check went through this draft and passed it whole: it pulled
+  // statements out, every one was put to the checker against this evidence,
+  // and every one came back supported. The decision below asks its own
+  // grounding question of the draft all at once, which is the coarser of the
+  // two and drifts up with the draft's length, so what it takes to override a
+  // check that has already passed is set where the lines are, in lib/jev.ts. A
+  // check that could not run, or one whose rewrite put back a draft nobody has
+  // checked since, leaves this false and the full line stands.
+  let verified = false
   try {
     const review = await reviewDraft({ label: a.label, draft, evidence })
     if (review.message === null) {
@@ -331,14 +340,15 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
       console.warn(`[tick] ${a.label}: cut ${review.unsupported.length} unsupported claim(s): ${review.unsupported.join(' | ')}`)
     }
     reviewed = review.message
+    verified = review.claims.length > 0 && review.unsupported.length === 0
   } catch (err) {
     console.error(`[tick] ${a.label}: claim check unavailable, deciding on the raw draft:`, describeError(err))
   }
   try {
-    const d = await decideWatcherPost({ label: a.label, draft: reviewed, evidence })
+    const d = await decideWatcherPost({ label: a.label, draft: reviewed, evidence, verified })
     console.info(
       '[tick] decision',
-      JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, model: d.model, reason: d.reason ?? null }),
+      JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, verified, model: d.model, reason: d.reason ?? null }),
     )
     if (d.decision === 'post') return reviewed
     const why = `the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}`

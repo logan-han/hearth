@@ -840,6 +840,19 @@ describe('decideWatcherPost', () => {
     expect((await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })).decision).toBe('post')
   })
 
+  it('lets a claim check that has passed every statement carry the chain\'s doubt and its unsure invention', async () => {
+    const checked = { label: 'x', draft: 'd', evidence: 'e', verified: true }
+    generateText.mockResolvedValueOnce(answers({ invented: true, confidence: 0.6 }))
+    expect((await decideWatcherPost(checked)).decision).toBe('post')
+    generateText.mockResolvedValueOnce(answers({ confidence: 0.5 }))
+    expect((await decideWatcherPost(checked)).decision).toBe('post')
+    // What it is sure of still overrides the check, and nothing new always skips.
+    generateText.mockResolvedValueOnce(answers({ invented: true, confidence: 0.9 }))
+    expect((await decideWatcherPost(checked)).decision).toBe('skip')
+    generateText.mockResolvedValueOnce(answers({ nothing_new: true, confidence: 0.5 }))
+    expect((await decideWatcherPost(checked)).decision).toBe('skip')
+  })
+
   it('is never asked for a verdict, so the instruction cannot be enforced through it', async () => {
     generateText.mockResolvedValue(answers({}))
     await decideWatcherPost({ label: 'Morning brief', draft: 'd', evidence: 'e' })

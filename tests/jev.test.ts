@@ -186,6 +186,24 @@ describe('the post decision', () => {
     expect(await decidePost(input)).toMatchObject({ decision: 'skip', confidence: 0.88, reason: expect.stringContaining('nothing new') })
   })
 
+  it('lets a claim check that has been through the draft carry a marginal answer', async () => {
+    // The brief of 22 Sep: six bullets, each traceable to the mail it came
+    // from, every statement passed by the claim check, and this question
+    // asked of the whole draft at once answering 0.53.
+    systemOne.mockResolvedValue(answer({ invented: noul(0.53), nothingNew: noul(0.01) }))
+    expect(await decidePost(input)).toMatchObject({ decision: 'skip', confidence: 0.53 })
+    expect(await decidePost({ ...input, verified: true })).toMatchObject({ decision: 'post', confidence: 0.47 })
+  })
+
+  it('still holds a checked draft back on a decisive answer, or on nothing new', async () => {
+    systemOne.mockResolvedValue(answer({ invented: noul(THRESHOLDS.postInventedVerified), nothingNew: noul(0.01) }))
+    const invented = await decidePost({ ...input, verified: true })
+    expect(invented).toMatchObject({ decision: 'skip', confidence: THRESHOLDS.postInventedVerified })
+    expect(invented.reason).toMatch(/evidence does not contain/)
+    systemOne.mockResolvedValue(answer({ invented: noul(0.1), nothingNew: noul(0.9) }))
+    expect(await decidePost({ ...input, verified: true })).toMatchObject({ decision: 'skip', reason: expect.stringContaining('nothing new') })
+  })
+
   it('leaves the grey zone to the caller: a post below the tick line is still a post, at its probability', async () => {
     systemOne.mockResolvedValue(answer({ invented: noul(0.4), nothingNew: noul(0.1) }))
     expect(await decidePost(input)).toMatchObject({ decision: 'post', confidence: 0.6 })
