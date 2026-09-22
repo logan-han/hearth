@@ -31,6 +31,8 @@ export async function POST(req: Request) {
 
   const target = endpointFor(provider ?? '')
   if (!target) return NextResponse.json({ error: `Unknown provider "${provider}".` }, { status: 400 })
+  // Without one the probe would ask a bare path, and report fetch's complaint about it.
+  if (!target.base) return NextResponse.json({ ok: false, reason: 'Add a self-hosted endpoint first.' })
   if (!target.key) return NextResponse.json({ ok: false, reason: 'No key set for that provider.' })
 
   try {
