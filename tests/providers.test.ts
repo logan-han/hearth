@@ -144,12 +144,47 @@ describe('google mail', () => {
     expect(m.body).toBe('Photos are on Tuesday.')
   })
 
+  it('keeps a part marked inline as a real attachment when its type is not declared, since it cannot be confirmed as a picture', async () => {
+    const withInlineUnknown = {
+      ...message,
+      payload: {
+        ...message.payload,
+        mimeType: 'multipart/mixed',
+        parts: [
+          ...message.payload.parts,
+          { filename: 'mystery', headers: [{ name: 'Content-Disposition', value: 'inline; filename="mystery"' }], body: { attachmentId: 'myst1' } },
+        ],
+      },
+    }
+    fetchMock.mockResolvedValueOnce(reply(withInlineUnknown))
+    const m = await googleClient(1).readMail('m1')
+    expect(m.attachments).toEqual([{ filename: 'mystery', mimeType: 'application/octet-stream', size: 0 }])
+  })
+
   it('fetches an attachment by its filename, whatever its case, and decodes the web-safe base64', async () => {
     fetchMock.mockResolvedValueOnce(reply(withPdf)).mockResolvedValueOnce(reply({ size: 4, data: b64url('%PDF') }))
     const f = await googleClient(1).readAttachment('m1', 'renewal.PDF')
     expect(String(lastCall(1)[0])).toBe('https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/attachments/ANGjdJ_long_id')
     expect(f).toMatchObject({ filename: 'Renewal.pdf', mimeType: 'application/pdf', size: 4 })
     expect(new TextDecoder().decode(f.bytes)).toBe('%PDF')
+  })
+
+  it('fills in sensible defaults for a sparse attachment with no disposition, type or size', async () => {
+    const sparse = {
+      ...message,
+      payload: {
+        ...message.payload,
+        mimeType: 'multipart/mixed',
+        parts: [...message.payload.parts, { filename: 'note.txt', body: { attachmentId: 'att1' } }],
+      },
+    }
+    fetchMock.mockResolvedValueOnce(reply(sparse))
+    const m = await googleClient(1).readMail('m1')
+    expect(m.attachments).toEqual([{ filename: 'note.txt', mimeType: 'application/octet-stream', size: 0 }])
+
+    fetchMock.mockResolvedValueOnce(reply(sparse)).mockResolvedValueOnce(reply({}))
+    const f = await googleClient(1).readAttachment('m1', 'note.txt')
+    expect(f.bytes).toHaveLength(0)
   })
 
   it('says when there is no attachment by that name, without fetching anything else', async () => {
@@ -343,6 +378,32 @@ describe('microsoft graph', () => {
     expect(new TextDecoder().decode(f.bytes)).toBe('%PDF')
   })
 
+  it('fills in sensible defaults for a sparse attachment with no name, type or size', async () => {
+    fetchMock
+      .mockResolvedValueOnce(reply({ ...graphMessage, hasAttachments: true }))
+      .mockResolvedValueOnce(reply({ value: [{ '@odata.type': '#microsoft.graph.fileAttachment', id: 'a1', isInline: false }] }))
+    const m = await microsoftClient(1).readMail('g1')
+    expect(m.attachments).toEqual([{ filename: 'attachment', mimeType: 'application/octet-stream', size: 0 }])
+  })
+
+  it('treats a listing with no value field as no attachments at all', async () => {
+    fetchMock.mockResolvedValueOnce(reply({ ...graphMessage, hasAttachments: true })).mockResolvedValueOnce(reply({}))
+    expect((await microsoftClient(1).readMail('g1')).attachments).toEqual([])
+  })
+
+  it('says when there is no attachment by that name, even one with no name of its own', async () => {
+    fetchMock.mockResolvedValueOnce(reply({ value: [{ '@odata.type': '#microsoft.graph.fileAttachment', id: 'a1', isInline: false }] }))
+    await expect(microsoftClient(1).readAttachment('g1', 'missing.pdf')).rejects.toThrow(/No attachment called "missing.pdf"/)
+  })
+
+  it('treats a fetched attachment with no content as empty bytes', async () => {
+    fetchMock
+      .mockResolvedValueOnce(reply({ value: [{ id: 'a1', name: 'blank.txt' }] }))
+      .mockResolvedValueOnce(reply({ id: 'a1', name: 'blank.txt' }))
+    const f = await microsoftClient(1).readAttachment('g1', 'blank.txt')
+    expect(f.bytes).toHaveLength(0)
+  })
+
   it('uses an address alone when there is no distinct name', async () => {
     fetchMock.mockResolvedValueOnce(
       reply({ value: [{ ...graphMessage, from: { emailAddress: { name: 'a@b.com', address: 'a@b.com' } } }] }),
@@ -430,5 +491,14 @@ describe('microsoft graph', () => {
     expect(sent.body).toEqual({ contentType: 'Text', content: 'Check-up' })
     expect(sent.location).toEqual({ displayName: 'Clinic' })
     expect(created).toMatchObject({ title: 'Dentist', location: 'Clinic' })
+  })
+
+  it('sends attendees as required participants', async () => {
+    fetchMock.mockResolvedValueOnce(reply({ id: 'e' }))
+    await microsoftClient(1).createEvent({
+      title: 'Trip', start: new Date('2026-09-01T09:00:00Z'), end: new Date('2026-09-01T10:00:00Z'), attendees: ['a@b.com'],
+    })
+    const sent = JSON.parse(String(lastCall()[1].body))
+    expect(sent.attendees).toEqual([{ emailAddress: { address: 'a@b.com' }, type: 'required' }])
   })
 })

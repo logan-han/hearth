@@ -126,6 +126,18 @@ describe('the family API', () => {
     expect((await post({ action: 'delete_automation', id: a.id })).status).toBe(404)
   })
 
+  it('reports a reminder that vanished between being found and being deleted', async () => {
+    await asMember()
+    const a = await q.addAutomation({
+      chatId: '-100', memberId: null, label: 'gone', cronExpr: '0 19 * * 1',
+      instruction: 'x', nextRunAt: new Date('2026-09-07T09:00:00Z'),
+    })
+    vi.spyOn(q, 'deleteAutomation').mockResolvedValueOnce(false)
+    const res = await post({ action: 'delete_automation', id: a.id })
+    expect(res.status).toBe(404)
+    expect((await res.json()).error).toBe(`No reminder ${a.id}.`)
+  })
+
   it('will not delete a built-in watcher, only pause it', async () => {
     await asMember()
     const a = await q.addAutomation({
@@ -176,6 +188,7 @@ describe('the family API', () => {
     expect((await q.listContents(list.id))[0].done).toBe(true)
     await post({ action: 'toggle_item', id: milk.id, done: false })
     expect((await q.listContents(list.id))[0].done).toBe(false)
+    expect((await post({ action: 'toggle_item', id: 999, done: true })).status).toBe(404)
 
     expect((await post({ action: 'delete_item', id: milk.id })).status).toBe(200)
     expect(await q.listContents(list.id)).toHaveLength(0)
@@ -193,5 +206,36 @@ describe('the family API', () => {
     expect((await q.listContents(made!.id)).map((i) => i.content)).toEqual(['tent pegs'])
     expect((await post({ action: 'add_item', list: '', content: 'x' })).status).toBe(400)
     expect((await post({ action: 'add_item', list: 'camping', content: '  ' })).status).toBe(400)
+  })
+
+  it('rejects an add_item call with no list or content field at all', async () => {
+    await asMember()
+    const res = await post({ action: 'add_item' })
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toBe('A list and an item are needed.')
+  })
+
+  it('keeps working when the accepter\'s own role cannot be resolved', async () => {
+    await asMember()
+    const p = await q.addProposal({
+      chatId: '-100', title: 'Trivia night', location: 'Corner Cafe',
+      startsAt: new Date('2030-09-03T03:30:00Z'), endsAt: new Date('2030-09-03T05:00:00Z'), allDay: false,
+    })
+    const authSession = await import('@/lib/auth/session')
+    vi.spyOn(authSession, 'resolveRole').mockRejectedValueOnce(new Error('members table locked'))
+    const res = await post({ action: 'accept_proposal', id: p.id })
+    expect(res.status).toBe(200)
+    const [event] = await q.listFamilyEvents(new Date('2030-09-01'), new Date('2030-09-30'))
+    expect(event).toMatchObject({ title: 'Trivia night', createdBy: null })
+  })
+
+  it('keeps working when the answerer\'s own role cannot be resolved', async () => {
+    await asMember()
+    const { row } = await q.askQuestion({ question: 'Who attends Riverbend College?', candidate: 'Juno attends Riverbend College' })
+    const authSession = await import('@/lib/auth/session')
+    vi.spyOn(authSession, 'resolveRole').mockRejectedValueOnce(new Error('members table locked'))
+    const res = await post({ action: 'answer_question', id: row.id, fact: 'Juno attends Riverbend College' })
+    expect(res.status).toBe(200)
+    expect((await res.json()).kept).toBe('Juno attends Riverbend College')
   })
 })

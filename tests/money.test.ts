@@ -72,6 +72,9 @@ describe('configuration', () => {
     expect(String((await call('list_bank_accounts', {})).error)).toContain('No bank integration')
     expect(String((await call('list_transactions', { limit: 5 })).error)).toContain('Up Bank')
     expect(String((await call('budget_summary', {})).error)).toContain('PocketSmith')
+    expect(String((await call('spending_summary', { source: 'up' })).error)).toContain('Up Bank')
+    expect(String((await call('spending_summary', { source: 'pocketsmith' })).error)).toContain('PocketSmith')
+    expect(String((await call('new_transactions', {})).error)).toContain('Up Bank')
   })
 })
 
@@ -102,6 +105,27 @@ describe('accounts', () => {
     fetchMock.mockImplementationOnce(async () => ({ ok: false, status: 401, text: async () => 'unauthorised' }))
     const r = await call('list_bank_accounts', {})
     expect(String((r.up as { error: string }).error)).toContain('401')
+  })
+
+  it('reports pocketsmith failing without losing up', async () => {
+    fetchMock.mockImplementation(async (url: URL) =>
+      String(url).includes('up.com.au') ? json(upAccounts) : { ok: false, status: 500, text: async () => 'ps down' },
+    )
+    const r = await call('list_bank_accounts', {})
+    expect(String((r.pocketsmith as { error: string }).error)).toContain('500')
+    expect((r.up as { name: string }[]).length).toBe(2)
+  })
+
+  it('reports a null pocketsmith balance as null, not a formatted currency string', async () => {
+    fetchMock.mockImplementation(async (url: URL) => {
+      const u = String(url)
+      if (u.includes('up.com.au')) return json(upAccounts)
+      if (u.endsWith('/me')) return json({ id: 42 })
+      return json([{ id: 1, title: 'Wise', type: 'bank', current_balance: null, currency_code: 'usd', current_balance_date: null }])
+    })
+    const r = await call('list_bank_accounts', {})
+    const accounts = r.pocketsmith as { name: string; balance: string | null }[]
+    expect(accounts[0]).toMatchObject({ name: 'Wise', balance: null })
   })
 })
 
@@ -246,6 +270,15 @@ describe('spending_summary via PocketSmith', () => {
     await call('spending_summary', { source: 'pocketsmith' })
     expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/me'))).toHaveLength(1)
   })
+
+  it('treats an uncategorised credit as income, not spend, and labels it Uncategorised among the largest credits', async () => {
+    serve([{ id: 20, date: '2026-08-11', payee: 'Refund misc', amount: 30, category: null, is_transfer: false }])
+    const r = await call('spending_summary', { source: 'pocketsmith' })
+    expect(r.received).toBe('$30.00')
+    expect(r.by_category).toEqual([])
+    const credits = r.largest_credits as { payee: string; category: string }[]
+    expect(credits[0]).toMatchObject({ payee: 'Refund misc', category: 'Uncategorised' })
+  })
 })
 
 describe('spending_summary via Up', () => {
@@ -257,6 +290,11 @@ describe('spending_summary via Up', () => {
     expect(r.spent).toBe('$100.00')
     expect(r.received).toBe('$250.00')
     expect(r.net).toBe('$150.00')
+  })
+
+  it('surfaces a provider error instead of throwing', async () => {
+    fetchMock.mockImplementation(async () => ({ ok: false, status: 500, text: async () => 'down' }))
+    expect(String((await call('spending_summary', { source: 'up' })).error)).toContain('500')
   })
 })
 
@@ -275,6 +313,26 @@ describe('list_transactions', () => {
   it('refuses an account it cannot find', async () => {
     fetchMock.mockImplementation(async () => json(upAccounts))
     expect(String((await call('list_transactions', { account: 'swiss', limit: 5 })).error)).toContain('No Up account')
+  })
+
+  it('lists across all accounts when none is named, honouring an explicit date range', async () => {
+    fetchMock.mockImplementation(async (url: URL) =>
+      String(url).includes('/transactions')
+        ? json({ data: [upTxn('a', '-5.00', '2026-08-02T10:00:00+10:00')], links: {} })
+        : json(upAccounts),
+    )
+    const r = await call('list_transactions', { from: '2026-08-01', to: '2026-08-05', limit: 5 })
+    expect(r.account).toBe('all accounts')
+    const url = new URL(String(fetchMock.mock.calls.find(([u]) => String(u).includes('/transactions'))![0]))
+    expect(url.searchParams.get('filter[since]')).toBeTruthy()
+    expect(url.searchParams.get('filter[until]')).toBeTruthy()
+  })
+
+  it('surfaces a provider error instead of throwing', async () => {
+    fetchMock.mockImplementation(async (url: URL) =>
+      String(url).includes('/transactions') ? { ok: false, status: 500, text: async () => 'boom' } : json(upAccounts),
+    )
+    expect(String((await call('list_transactions', { limit: 5 })).error)).toContain('500')
   })
 })
 
@@ -342,6 +400,25 @@ describe('new_transactions', () => {
     expect(rows.find((t) => t.description === 'Grocer 0812 Hillside')?.flags).toEqual([])
     expect(r.typical_debit).toBe('$48.35')
     expect(r.history_days).toBe(90)
+  })
+
+  it('refuses an account it cannot find', async () => {
+    wire([])
+    expect(String((await call('new_transactions', { account: 'swiss', limit: 10 })).error)).toContain('No Up account')
+  })
+
+  it('surfaces a provider error instead of throwing', async () => {
+    fetchMock.mockImplementation(async (url: URL) =>
+      String(url).includes('/transactions') ? { ok: false, status: 500, text: async () => 'boom' } : json(upAccounts),
+    )
+    expect(String((await call('new_transactions', { account: '2up', limit: 10 })).error)).toContain('500')
+  })
+
+  it('finds the newest transaction by timestamp even when it is not last in the feed', async () => {
+    wire([upTxn('newer', '-15.00', '2026-08-27T14:00:00+10:00'), upTxn('older', '-5.00', '2026-08-27T13:00:00+10:00')])
+    await call('new_transactions', { account: '2up', limit: 10 })
+    const cursor = JSON.parse((await getSetting('up_cursor:-100:joint'))!)
+    expect(new Date(cursor.at).toISOString()).toBe(new Date('2026-08-27T14:00:00+10:00').toISOString())
   })
 
   it('keeps the transactions when the history read fails', async () => {
@@ -429,6 +506,11 @@ describe('pocketsmith client', () => {
   it('caps elapsed days at the range end for a finished month', async () => {
     const r = await call('budget_summary', { from: '2026-07-01', to: '2026-07-31' })
     expect(r.period_progress).toBe('31 of 31 days (100% of the month)')
+  })
+
+  it('reports zero days elapsed for a month that has not started yet', async () => {
+    const r = await call('budget_summary', { from: '2026-09-01', to: '2026-09-30' })
+    expect(r.period_progress).toBe('0 of 30 days (0% of the month)')
   })
 
   it('skips month progress for a range spanning months, but still reports usage', async () => {
@@ -573,5 +655,32 @@ describe('up pagination', () => {
   it('refuses to run at all without a token', async () => {
     delete process.env.UP_API_TOKEN
     await expect(up.listAccounts()).rejects.toThrow(/UP_API_TOKEN/)
+  })
+})
+
+describe('toTransaction mapping', () => {
+  it('maps a sparse transaction with no relationships, settlement time or performing customer', async () => {
+    fetchMock.mockImplementation(async (url: URL) =>
+      String(url).includes('/transactions')
+        ? json({
+            data: [
+              {
+                id: 'sparse1',
+                attributes: {
+                  description: 'ATM Withdrawal',
+                  amount: { value: '-40.00', currencyCode: 'AUD' },
+                  status: 'HELD',
+                  createdAt: '2026-08-27T09:00:00+10:00',
+                },
+              },
+            ],
+            links: {},
+          })
+        : json(upAccounts),
+    )
+    const [t] = await up.listTransactions({})
+    expect(t).toMatchObject({
+      settledAt: null, performedBy: null, accountId: null, category: null, parentCategory: null,
+    })
   })
 })

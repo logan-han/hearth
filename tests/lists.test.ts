@@ -111,6 +111,11 @@ describe('check_off_list', () => {
     const r = await run('check_off_list', { items: ['milk', '2L'], list: 'shopping', undo: false })
     expect(r.ticked_off).toEqual(['2L milk'])
   })
+
+  it('says so for a list that does not exist', async () => {
+    const r = await run('check_off_list', { items: ['milk'], list: 'chores', undo: false })
+    expect(String(r.error)).toContain('no "chores" list')
+  })
 })
 
 describe('clear_list', () => {
@@ -127,6 +132,11 @@ describe('clear_list', () => {
     const r = await run('clear_list', { list: 'shopping', everything: true })
     expect(r.cleared).toBe(2)
     expect(store).toHaveLength(0)
+  })
+
+  it('says so for a list that does not exist', async () => {
+    const r = await run('clear_list', { list: 'chores', everything: false })
+    expect(String(r.error)).toContain('no "chores" list')
   })
 })
 

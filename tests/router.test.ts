@@ -71,6 +71,10 @@ describe('groupsAfter', () => {
   it('ignores a group it does not know', () => {
     expect(groupsAfter([], [{ toolCalls: [{ toolName: 'more_tools', input: { group: 'kitchen' } }] }])).toEqual([])
   })
+
+  it('copes with a step that recorded no tool calls at all', () => {
+    expect(groupsAfter(['money'], [{}])).toEqual(['money'])
+  })
 })
 
 describe('more_tools', () => {

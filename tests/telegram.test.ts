@@ -50,6 +50,11 @@ describe('chunk', () => {
     expect(parts.join('')).toBe('x'.repeat(250))
   })
 
+  it('drops a trailing chunk that is nothing but whitespace', () => {
+    const text = `${'x'.repeat(100)}${' '.repeat(10)}`
+    expect(chunk(text, 100)).toEqual(['x'.repeat(100)])
+  })
+
   it('preserves all content across chunks', () => {
     const words = Array.from({ length: 800 }, (_, i) => `w${i}`).join(' ')
     const parts = chunk(words, 200)
@@ -107,6 +112,13 @@ describe('downloadFile', () => {
     expect(out.path).toBe('photos/f.jpg')
     expect(out.bytes).toHaveLength(3)
     expect(String(fetchMock.mock.calls[0][0])).toBe('https://api.telegram.org/file/bottok/photos/f.jpg')
+  })
+
+  it('accepts a file whose size telegram did not report', async () => {
+    getFile.mockResolvedValue({ file_path: 'photos/f.jpg' })
+    fetchMock.mockResolvedValue({ ok: true, arrayBuffer: async () => new Uint8Array([9]).buffer })
+    const out = await downloadFile('fid')
+    expect(out.bytes).toEqual(new Uint8Array([9]))
   })
 
   it('refuses a file over the Bot API limit before downloading it', async () => {

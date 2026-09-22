@@ -18,7 +18,7 @@ vi.mock('@typesafe-ai/sdk', async (orig) => {
   return { ...actual, TypeSafeClient }
 })
 
-const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, isStructuredOutputError } = await import('@/lib/agent')
+const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, isStructuredOutputError, wroteSomething } = await import('@/lib/agent')
 
 let client: PGlite
 
@@ -183,6 +183,11 @@ describe('stripWorking', () => {
     expect(stripWorking(text)).toBe(text)
   })
 
+  it('stops after three paragraphs of working, so a long post is never eaten whole', () => {
+    const text = 'Let me check.\n\nI checked the calendar.\n\nI have what I need.\n\nLet me say it.\n\nBins out tonight.'
+    expect(stripWorking(text)).toBe('Let me say it.\n\nBins out tonight.')
+  })
+
   it('leaves a post alone that never talks about itself', () => {
     expect(stripWorking(post)).toBe(post)
   })
@@ -257,6 +262,16 @@ describe('runAgent', () => {
     expect(r.text).toBe('Hello anyway.')
   })
 
+  it('still answers in every mode, and for a known member, when the database is down', async () => {
+    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
+    const { __setDb } = await import('@/lib/db')
+    __setDb({ select: () => { throw new Error('db down') } })
+    generateText.mockResolvedValue(reply('Hello anyway.'))
+    for (const mode of ['chat', 'watcher', 'sweep'] as const) {
+      expect((await runAgent({ ...input, member: m, mode })).text).toBe('Hello anyway.')
+    }
+  })
+
   it('prefixes the speaker so a group transcript is attributable', async () => {
     generateText.mockResolvedValue(reply('ok'))
     await runAgent(input)
@@ -275,6 +290,13 @@ describe('runAgent', () => {
     expect(messages[1]).toEqual({ role: 'assistant', content: 'answered' })
   })
 
+  it('names a sender the history has no name for as Someone', async () => {
+    await q.recordMessage({ chatId: '-100', role: 'user', content: 'earlier' })
+    generateText.mockResolvedValue(reply('ok'))
+    await runAgent(input)
+    expect(generateText.mock.calls[0][0].messages[0]).toEqual({ role: 'user', content: 'Someone: earlier' })
+  })
+
   it('skips history entirely for a scheduled run', async () => {
     await q.recordMessage({ chatId: '-100', role: 'user', content: 'earlier' })
     generateText.mockResolvedValue(reply('ok'))
@@ -289,15 +311,20 @@ describe('runAgent', () => {
     expect(generateText.mock.calls[0][0].messages).toHaveLength(1)
   })
 
-  it('sends attachments as file parts beside the text', async () => {
+  it('sends attachments as file parts beside the text, named when they have a name', async () => {
     generateText.mockResolvedValue(reply('A school notice.'))
     await runAgent({
       ...input,
-      attachments: [{ bytes: new Uint8Array([1, 2]), mediaType: 'image/png', kind: 'photo' }],
+      attachments: [
+        { bytes: new Uint8Array([1, 2]), mediaType: 'image/png', kind: 'photo' },
+        { bytes: new Uint8Array([3]), mediaType: 'application/pdf', filename: 'policy.pdf', kind: 'document' },
+      ],
     })
     const content = generateText.mock.calls[0][0].messages.at(-1).content
     expect(content[0]).toEqual({ type: 'text', text: 'Rowan: hi' })
     expect(content[1]).toMatchObject({ type: 'file', mediaType: 'image/png' })
+    expect(content[1]).not.toHaveProperty('filename')
+    expect(content[2]).toMatchObject({ type: 'file', mediaType: 'application/pdf', filename: 'policy.pdf' })
   })
 
   it('describes a caption-less photo so the model has something to act on', async () => {
@@ -354,6 +381,34 @@ describe('runAgent', () => {
     const call = generateText.mock.calls[0][0]
     expect(call.messages.at(-1).content[1]).toEqual({ type: 'text', text: 'Attached file "list.txt" (text/plain):\nmilk\neggs' })
     expect(call.prepareStep({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools).not.toContain('import_calendar_file')
+  })
+
+  it('names unnamed calendar and text files for what they hold when they come with no message', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    const ics = 'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:Camp\r\nDTSTART;VALUE=DATE:20261003\r\nEND:VEVENT\r\nEND:VCALENDAR'
+    await runAgent({
+      ...input,
+      text: '',
+      attachments: [
+        { bytes: new TextEncoder().encode(ics), mediaType: 'text/calendar', kind: 'document' },
+        { bytes: new TextEncoder().encode('milk'), mediaType: 'text/plain', kind: 'document' },
+      ],
+    })
+    const content = generateText.mock.calls[0][0].messages.at(-1).content
+    expect(content[0].text).toBe('Rowan: [sent a calendar file and a text file with no message]')
+    expect(content[1].text).toContain('Calendar file "calendar.ics": 1 event')
+    expect(content[2].text).toBe('Attached file "file.txt" (text/plain):\nmilk')
+  })
+
+  it('cuts a very long text file off, and says where', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    await runAgent({
+      ...input,
+      attachments: [{ bytes: new TextEncoder().encode('a'.repeat(25_000)), mediaType: 'text/plain', filename: 'log.txt', kind: 'document' }],
+    })
+    const text: string = generateText.mock.calls[0][0].messages.at(-1).content[1].text
+    expect(text.endsWith(`${'a'.repeat(20_000)}\n[cut off here]`)).toBe(true)
+    expect(text).not.toContain('a'.repeat(20_001))
   })
 
   it('names a voice note and a PDF for what they are', async () => {
@@ -446,6 +501,29 @@ describe('runAgent', () => {
     expect(generateText.mock.calls[0][0].system).toContain('Rowan (google: a@b.com)')
   })
 
+  it('says an account is linked even when it carries no address', async () => {
+    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
+    await q.saveConnection({ memberId: m.id, provider: 'microsoft', email: null, refreshToken: 'r', scopes: null })
+    generateText.mockResolvedValue(reply('ok'))
+    await runAgent({ ...input, member: m })
+    expect(generateText.mock.calls[0][0].system).toContain('Rowan (microsoft: linked)')
+  })
+
+  it('passes the configured reasoning level to the model, and none when it is unset', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    process.env.LLM_REASONING = 'Low'
+    try {
+      await runAgent(input)
+    } finally {
+      delete process.env.LLM_REASONING
+    }
+    await runAgent(input)
+    const chats = generateText.mock.calls.map(([o]) => o).filter((o) => o.telemetry.functionId === 'hearth.chat')
+    expect(chats).toHaveLength(2)
+    expect(chats[0].reasoning).toBe('low')
+    expect(chats[1]).not.toHaveProperty('reasoning')
+  })
+
   it('puts household memories in front of the model', async () => {
     await q.addMemory('bin night is Monday')
     generateText.mockResolvedValue(reply('ok'))
@@ -492,6 +570,35 @@ describe('a reply that reports a change no tool made', () => {
       .mockResolvedValueOnce(judged('claims_change'))
     const r = await runAgent(input)
     expect(r.text).toBe('Yes, replaced.\n\nI did not change anything this turn. If that is not what you expected, tell me exactly what to change.')
+  })
+
+  it('keeps the first reply, marked unchanged, when the second try comes back empty', async () => {
+    generateText
+      .mockResolvedValueOnce(reply('Replaced it.'))
+      .mockResolvedValueOnce(judged('claims_change'))
+      .mockResolvedValueOnce(reply(''))
+      .mockResolvedValueOnce(judged('claims_change'))
+    expect((await runAgent(input)).text).toMatch(/^Replaced it\.\n\nI did not change anything this turn\./)
+  })
+
+  it('says plainly that nothing changed when the second try fails outright', async () => {
+    generateText
+      .mockResolvedValueOnce(reply('Replaced it.'))
+      .mockResolvedValueOnce(judged('claims_change'))
+      .mockRejectedValueOnce(new Error('429 quota'))
+    expect((await runAgent(input)).text).toMatch(/^Replaced it\.\n\nI did not change anything this turn\./)
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('retry after an untaken action failed'), expect.stringContaining('429'))
+  })
+
+  it('reads a verdict the judge wrote in prose, and fails open on a judge that says nothing', async () => {
+    // Neither the replies nor the verdicts carry steps or a typed output, as some providers answer.
+    generateText
+      .mockResolvedValueOnce({ text: 'Done. Replaced it.' })
+      .mockResolvedValueOnce({ text: 'That reply is claims_change.' })
+      .mockResolvedValueOnce({ text: 'Which one? That day has two events on the calendar.' })
+      .mockResolvedValueOnce({})
+    expect((await runAgent(input)).text).toBe('Which one? That day has two events on the calendar.')
+    expect(generateText).toHaveBeenCalledTimes(4)
   })
 
   it('trusts a report backed by a write tool call, without asking', async () => {
@@ -572,6 +679,12 @@ describe('shouldChimeIn', () => {
     generateText.mockResolvedValue({ ...reply('no idea'), output: 'reply' })
     expect(await shouldChimeIn(input)).toBe(true)
     expect(generateText.mock.calls[0][0].output).toBeDefined()
+  })
+
+  it('stays quiet, asking nobody, when no model is configured', async () => {
+    delete process.env.GEMINI_API_KEY
+    expect(await shouldChimeIn(input)).toBe(false)
+    expect(generateText).not.toHaveBeenCalled()
   })
 
   it('fails closed if the second framing errors', async () => {
@@ -761,6 +874,13 @@ describe('tool scoping by mode', () => {
     expect((await runAgent({ ...input, mode: 'chat' })).evidence).toBeUndefined()
   })
 
+  it('hands back empty evidence when a watcher run reports no steps at all', async () => {
+    generateText.mockResolvedValue({ text: 'Bins out tonight.' })
+    const r = await runAgent({ ...input, mode: 'watcher' })
+    expect(r.text).toBe('Bins out tonight.')
+    expect(r.evidence).toBe('')
+  })
+
   it('hands back the facts a watcher wrote with, so the post checks see the same sources', async () => {
     await q.addMemory('bin night is Monday')
     generateText.mockResolvedValue(reply('Bins out tonight.'))
@@ -803,6 +923,18 @@ describe('collectEvidence', () => {
     expect(out.length).toBeLessThanOrEqual(12_100)
     expect(out.split('\n').length).toBeLessThan(10)
   })
+
+  it('passes over a step that called no tools', () => {
+    const steps = [{}, { toolResults: [{ toolName: 'list_email', input: { limit: 1 }, output: [] }] }]
+    expect(collectEvidence(steps)).toBe('list_email({"limit":1}) -> []')
+  })
+})
+
+describe('wroteSomething', () => {
+  it('counts only a call to a tool that changes something, and a step with no calls as none', () => {
+    expect(wroteSomething([{}, { toolCalls: [{ toolName: 'list_family_events' }] }])).toBe(false)
+    expect(wroteSomething([{}, { toolCalls: [{ toolName: 'add_to_list' }] }])).toBe(true)
+  })
 })
 
 describe('decideWatcherPost', () => {
@@ -818,6 +950,12 @@ describe('decideWatcherPost', () => {
     expect(String(call.system)).toContain('invented: does the draft state anything')
     expect(String(call.system)).toContain('nothing_new: does the draft only say')
     expect(String(call.prompt)).toContain('DRAFT:\ndraft')
+  })
+
+  it('tells the chain plainly when no tool returned anything to check against', async () => {
+    generateText.mockResolvedValue(answers({}))
+    await decideWatcherPost({ label: 'x', draft: 'd', evidence: '' })
+    expect(String(generateText.mock.calls[0][0].prompt)).toContain('EVIDENCE:\n(no tool results)')
   })
 
   it('skips an invented statement, quoting it, and a draft that only says there is nothing new', async () => {

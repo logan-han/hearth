@@ -77,6 +77,7 @@ describe('readProperty', () => {
     // The API leaves a field out or null rather than sending an empty value,
     // so every reader has to cope with a sparse shape.
     ['rich_text without plain_text', { type: 'rich_text', rich_text: [{}] }, ''],
+    ['rich_text missing entirely', { type: 'rich_text' }, ''],
     ['status empty', { type: 'status', status: null }, ''],
     ['multi_select missing', { type: 'multi_select' }, ''],
     ['url missing', { type: 'url' }, ''],

@@ -96,6 +96,23 @@ describe('propose_family_event', () => {
     expect(rows).toHaveLength(2)
   })
 
+  it('honours an explicit end time instead of defaulting the duration', async () => {
+    await run('propose_family_event', { ...NOTICE, end: '2026-09-09T11:00', source: 'google:with-end' })
+    expect(rows[0].endsAt.toISOString()).toBe('2026-09-09T01:00:00.000Z')
+  })
+
+  it('records no member for both proposing and accepting when nobody is attributed', async () => {
+    const guestCtx = { ...ctx, member: null }
+    const guestTools = proposalTools(guestCtx as never)
+    const exec = (name: keyof ReturnType<typeof proposalTools>, args: unknown) =>
+      (guestTools[name].execute as unknown as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)(args, {})
+    await exec('propose_family_event', { ...NOTICE, source: 'google:guest' })
+    expect(rows[0].memberId).toBeNull()
+    const r = await exec('accept_event_proposal', { proposal_id: rows[0].id })
+    expect(r.added).toBe(true)
+    expect(addFamilyEvent).toHaveBeenCalledWith(expect.objectContaining({ createdBy: null }))
+  })
+
   it('hands the model whatever the calendar already holds that day', async () => {
     listFamilyEvents.mockResolvedValue([
       { id: 32, title: "Junior School Father's Day Breakfast", startsAt: new Date('2026-09-08T21:30:00Z'), cancelled: false, location: 'Junior Schools' },
@@ -145,6 +162,11 @@ describe('accepting and rejecting', () => {
     expect(addFamilyEvent).not.toHaveBeenCalled()
     const r = await run('accept_event_proposal', { proposal_id: 1, confirmed_distinct: true })
     expect(r.added).toBe(true)
+  })
+
+  it('says so when rejecting a proposal that is not pending', async () => {
+    const r = await run('reject_event_proposal', { proposal_id: 999 })
+    expect(String(r.error)).toContain('not pending')
   })
 
   it('lists only what is still waiting', async () => {

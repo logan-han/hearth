@@ -90,6 +90,20 @@ describe('the Telegram admin API', () => {
     expect(process.env.TELEGRAM_BOT_TOKEN).toBeUndefined()
   })
 
+  it('rejects a malformed body', async () => {
+    await signIn()
+    const res = await POST(new Request('https://hearth.example/api/admin/telegram', { method: 'POST', body: 'not json' }))
+    expect(res.status).toBe(400)
+  })
+
+  it('falls back to a generic reason when Telegram rejects a token without saying why', async () => {
+    await signIn()
+    telegramAnswers({ getMe: () => ({ ok: false }) })
+    const res = await post({ token: '123456:WRONG' })
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toContain('unknown error')
+  })
+
   it('saves a token Telegram vouches for and reports the bot', async () => {
     await signIn()
     telegramAnswers({
@@ -160,6 +174,31 @@ describe('the Telegram admin API', () => {
     expect((await res.json()).error).toContain('HTTPS')
   })
 
+  it('falls back to a generic reason when Telegram refuses the webhook without saying why', async () => {
+    await signIn()
+    process.env.TELEGRAM_BOT_TOKEN = '123456:GOOD-token'
+    process.env.TELEGRAM_WEBHOOK_SECRET = 's'
+    telegramAnswers({ setWebhook: () => ({ ok: false }) })
+    const res = await post({ register: true })
+    expect(res.status).toBe(502)
+    expect((await res.json()).error).toContain('unknown error')
+  })
+
+  it('warns but still succeeds when the command menu fails to register', async () => {
+    await signIn()
+    process.env.TELEGRAM_BOT_TOKEN = '123456:GOOD-token'
+    let hooked: Record<string, unknown> = {}
+    telegramAnswers({
+      getMe: () => ({ ok: true, result: { username: 'hearth_bot' } }),
+      setWebhook: (body) => { hooked = body; return { ok: true } },
+      setMyCommands: () => ({ ok: false, description: 'Forbidden' }),
+      getWebhookInfo: () => ({ ok: true, result: { url: hooked.url ?? '' } }),
+    })
+    const res = await post({ register: true })
+    expect(res.status).toBe(200)
+    expect(console.warn).toHaveBeenCalledWith('[telegram] setMyCommands failed; the webhook itself is registered')
+  })
+
   it('reports Telegram being unreachable rather than pretending', async () => {
     await signIn()
     process.env.TELEGRAM_BOT_TOKEN = '123456:GOOD-token'
@@ -169,6 +208,18 @@ describe('the Telegram admin API', () => {
     expect(String(body.error)).toContain('ECONNREFUSED')
     expect(body.webhook).toBeNull()
     expect(body.connected).toBe(false)
+  })
+
+  it('reports no username when Telegram answers ok without one', async () => {
+    await signIn()
+    process.env.TELEGRAM_BOT_TOKEN = '123456:GOOD-token'
+    telegramAnswers({
+      getMe: () => ({ ok: true, result: {} }),
+      getWebhookInfo: () => ({ ok: true, result: { url: '' } }),
+    })
+    const body = await (await GET()).json()
+    expect(body.ok).toBe(true)
+    expect(body.username).toBeNull()
   })
 
   it('flags a webhook that points somewhere else as not connected', async () => {

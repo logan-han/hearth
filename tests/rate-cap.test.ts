@@ -11,6 +11,10 @@ describe('proactive post cap', () => {
     expect(parseLog(JSON.stringify({ posts: [ago(5)], cappedAt: ago(50) }))).toEqual({ posts: [ago(5)], cappedAt: ago(50) })
   })
 
+  it('treats a non-array posts field as empty rather than throwing', () => {
+    expect(parseLog(JSON.stringify({ posts: 'not-an-array' }))).toEqual({ posts: [] })
+  })
+
   it('forgets posts older than an hour', () => {
     const log = prune({ posts: [ago(90), ago(59), ago(1)] }, now)
     expect(log.posts).toEqual([ago(59), ago(1)])

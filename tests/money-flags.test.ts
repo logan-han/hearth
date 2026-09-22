@@ -21,6 +21,9 @@ describe('payeeKey', () => {
     expect(payeeKey('SQ *Little Cafe')).toBe('sq little')
     expect(payeeKey('PP*Uber')).toBe('pp uber')
   })
+  it('falls back to the trimmed description when nothing in it looks like a word', () => {
+    expect(payeeKey('12345')).toBe('12345')
+  })
 })
 
 describe('flagTransactions', () => {

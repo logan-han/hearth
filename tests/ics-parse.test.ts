@@ -107,6 +107,39 @@ describe('parseIcs', () => {
     expect(events.map((e) => e.title)).toEqual(['Sooner', 'Later'])
     expect(parseIcs('not a calendar at all', MEL)).toEqual({ name: null, events: [], skipped: 0 })
   })
+
+  it('drops an event with an unparseable start, and defaults a sparse one that has an unparseable end', () => {
+    const { events, skipped } = parseIcs(
+      wrap(
+        vevent('SUMMARY:No good start', 'DTSTART:not-a-date'),
+        vevent('DTSTART:20260930T090000Z', 'DTEND:not-a-date'),
+      ),
+      MEL,
+    )
+    expect(skipped).toBe(1)
+    expect(events).toHaveLength(1)
+    // No SUMMARY at all falls back to a title, and an unreadable DTEND falls back to an hour.
+    expect(events[0].title).toBe('(untitled)')
+    expect(events[0].endsAt.getTime() - events[0].startsAt.getTime()).toBe(3_600_000)
+  })
+
+  it('ignores a parameter with no value, and reads an empty calendar name as none', () => {
+    const ics = [
+      'BEGIN:VCALENDAR', 'X-WR-CALNAME:', 'BEGIN:VEVENT', 'SUMMARY;WEIRD:Odd params', 'DTSTART;VALUE=DATE:20260930', 'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n')
+    const { name, events } = parseIcs(ics, MEL)
+    expect(name).toBeNull()
+    expect(events[0].title).toBe('Odd params')
+  })
+
+  it('stops adding events past the cap and counts the rest as skipped', () => {
+    const many = Array.from({ length: 205 }, (_, i) =>
+      vevent(`SUMMARY:Event ${i}`, `DTSTART:202609${String(1 + (i % 28)).padStart(2, '0')}T090000Z`),
+    )
+    const { events, skipped } = parseIcs(wrap(...many), MEL)
+    expect(events).toHaveLength(200)
+    expect(skipped).toBe(5)
+  })
 })
 
 describe('parseDuration', () => {
@@ -136,5 +169,18 @@ describe('describeIcs', () => {
 
   it('says so when there is nothing in it', () => {
     expect(describeIcs(parseIcs('', MEL), 'empty.ics', MEL)).toBe('Calendar file "empty.ics": 0 events.')
+  })
+
+  it('mentions unreadable entries left out, and a note from the description', () => {
+    const parsed = parseIcs(
+      wrap(
+        vevent('SUMMARY:Pack night', 'DTSTART:20260928T080000Z', 'DTEND:20260928T090000Z', 'DESCRIPTION:Bring your own snacks'),
+        vevent('SUMMARY:Gone', 'DTSTART:20260928T080000Z', 'STATUS:CANCELLED'),
+      ),
+      MEL,
+    )
+    const text = describeIcs(parsed, 'term.ics', MEL)
+    expect(text).toContain('1 unreadable or cancelled entries left out')
+    expect(text).toContain('note: Bring your own snacks')
   })
 })

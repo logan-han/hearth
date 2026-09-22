@@ -52,6 +52,11 @@ describe('htmlToText', () => {
   it('decodes entities once, so escaped markup stays escaped', () => {
     expect(htmlToText('<p>Tom &amp;amp; Jerry &amp;lt;script&amp;gt;</p>')).toBe('Tom &amp; Jerry &lt;script&gt;')
   })
+
+  it('keeps a bare link even when its label is empty', () => {
+    const text = htmlToText('<p>Look <a href="https://x.test/blank"></a> there</p>')
+    expect(text).toContain('[https://x.test/blank]')
+  })
 })
 
 describe('read_url', () => {
@@ -91,6 +96,12 @@ describe('read_url', () => {
     expect(looksLikeShell(raw, strip(raw))).toBe(true)
   })
 
+  it('flags a shell by its scaffolding id even when the visible text is long enough on its own', async () => {
+    const { looksLikeShell } = await import('@/lib/tools/browse')
+    const raw = `<div id="root">${'<p>Plenty of real looking paragraph text goes here to pad things out nicely.</p>'.repeat(10)}</div>`
+    expect(looksLikeShell(raw, htmlToText(raw))).toBe(true)
+  })
+
   it('flags a JavaScript shell instead of pretending it read it', async () => {
     fetchMock.mockResolvedValue(page('<div id="app"><script>boot()</script></div>'))
     const r = await read('https://spa.example/r/abc')
@@ -110,8 +121,74 @@ describe('read_url', () => {
     expect(String(r.text)).toContain('Junior Schools')
   })
 
+  it('falls back to the shell note when the renderer itself fails', async () => {
+    process.env.TAVILY_API_KEY = 'tvly'
+    fetchMock.mockImplementation(async (u: unknown) =>
+      String(u).includes('tavily')
+        ? { ok: false, status: 500, text: async () => 'tavily down' }
+        : page('<div id="app"></div>', 'text/html', 'https://spa.example/r/abc'),
+    )
+    const r = await read('https://spa.example/r/abc')
+    expect(r.rendered).toBeUndefined()
+    expect(String(r.note)).toContain('builds its content in the browser')
+  })
+
+  it('falls back to the shell note when the renderer returns nothing usable', async () => {
+    process.env.TAVILY_API_KEY = 'tvly'
+    fetchMock.mockImplementation(async (u: unknown) =>
+      String(u).includes('tavily')
+        ? { ok: true, status: 200, json: async () => ({ results: [] }) }
+        : page('<div id="app"></div>', 'text/html', 'https://spa.example/r/abc'),
+    )
+    const r = await read('https://spa.example/r/abc')
+    expect(r.rendered).toBeUndefined()
+    expect(String(r.note)).toContain('builds its content in the browser')
+  })
+
   it('reports an http failure as such', async () => {
     fetchMock.mockResolvedValue({ ...page(''), ok: false, status: 404 })
     expect(String((await read('https://school.example/gone')).error)).toContain('404')
+  })
+
+  it('refuses a malformed address before attempting a fetch', async () => {
+    expect(String((await read('not a url at all')).error)).toContain('not a valid address')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('falls back to a generic file kind, naming it from the content type when there is one', async () => {
+    fetchMock.mockResolvedValueOnce(page('a,b,c', 'text/csv', 'https://example.com/data.csv'))
+    const withType = await read('https://example.com/data.csv')
+    expect(withType.kind).toBe('text/csv')
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      url: 'https://example.com/data',
+      headers: new Headers(),
+      arrayBuffer: async () => new TextEncoder().encode('a,b,c').buffer,
+    })
+    const noType = await read('https://example.com/data')
+    expect(noType.kind).toBe('file')
+  })
+
+  it('refuses a file bigger than the read limit', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      url: 'https://example.com/huge.bin',
+      headers: new Headers({ 'content-type': 'application/octet-stream' }),
+      arrayBuffer: async () => new ArrayBuffer(3 * 1024 * 1024 + 1),
+    })
+    expect(String((await read('https://example.com/huge.bin')).error)).toContain('too large')
+  })
+
+  it('reports a timeout in plain language', async () => {
+    fetchMock.mockRejectedValue(new Error('The operation was aborted due to timeout'))
+    expect(String((await read('https://slow.example/x')).error)).toBe('The page took too long to answer.')
+  })
+
+  it('passes through any other fetch failure as is', async () => {
+    fetchMock.mockRejectedValue(new TypeError('fetch failed'))
+    expect(String((await read('https://down.example/x')).error)).toBe('fetch failed')
   })
 })

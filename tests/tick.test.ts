@@ -16,10 +16,23 @@ const budgetSummary = vi.fn()
 const strangersIn = vi.fn<(chatId: string) => Promise<{ id: string; name: string }[]>>()
 const unaskedQuestions = vi.fn<() => Promise<{ id: number; question: string }[]>>()
 const markQuestionsAsked = vi.fn<(ids: number[]) => Promise<void>>()
+const allowedMembers = vi.fn<() => Promise<{ id: number; telegramUserId: string; name: string; isAdmin: boolean; allowed: boolean }[]>>()
 const installBuiltins = vi.fn(async (_now?: Date) => ({ installed: [] as string[], converted: 0, retired: 0, synced: 0 }))
 const send = vi.fn<(chatId: string, text: string) => Promise<void>>()
 const verify = vi.fn<() => Promise<boolean>>()
 const insertValues = vi.fn()
+const buildTools = vi.fn(
+  () =>
+    ({
+      new_transactions: { execute: newTransactions },
+      new_mail: { execute: newMail },
+      list_family_events: { execute: listEvents },
+      jira_board_summary: { execute: boardSummary },
+      weather: { execute: weatherTool },
+      spending_summary: { execute: spendingSummary },
+      budget_summary: { execute: budgetSummary },
+    }) as Record<string, { execute?: (...args: unknown[]) => unknown }>,
+)
 
 const { recordMessage, messagesSince, getSetting, setSetting, recordTick, retireStaleProposals } = vi.hoisted(() => ({
   recordMessage: vi.fn(async () => 1),
@@ -41,23 +54,11 @@ vi.mock('@/lib/db/queries', () => ({
   strangersIn,
   unaskedQuestions,
   markQuestionsAsked,
-  allowedMembers: vi.fn(async () => [
-    { id: 9, telegramUserId: '900', name: 'Boss', isAdmin: true, allowed: true },
-  ]),
+  allowedMembers,
 }))
 vi.mock('@/lib/builtins', () => ({ installBuiltins }))
 vi.mock('@/lib/agent', () => ({ runAgent, decideWatcherPost, reviewDraft }))
-vi.mock('@/lib/tools', () => ({
-  buildTools: () => ({
-    new_transactions: { execute: newTransactions },
-    new_mail: { execute: newMail },
-    list_family_events: { execute: listEvents },
-    jira_board_summary: { execute: boardSummary },
-    weather: { execute: weatherTool },
-    spending_summary: { execute: spendingSummary },
-    budget_summary: { execute: budgetSummary },
-  }),
-}))
+vi.mock('@/lib/tools', () => ({ buildTools }))
 vi.mock('@/lib/telegram', () => ({ send }))
 vi.mock('@upstash/qstash', () => ({ Receiver: class { verify = verify } }))
 vi.mock('@/lib/db', () => ({
@@ -115,6 +116,7 @@ beforeEach(() => {
   strangersIn.mockResolvedValue([])
   unaskedQuestions.mockResolvedValue([])
   markQuestionsAsked.mockResolvedValue(undefined)
+  allowedMembers.mockResolvedValue([{ id: 9, telegramUserId: '900', name: 'Boss', isAdmin: true, allowed: true }])
   // The nightly memory pass reports done-for-today by default, so ordinary
   // tests never depend on what the wall clock says.
   messagesSince.mockResolvedValue([])
@@ -147,6 +149,15 @@ describe('POST /api/tick authorisation', () => {
     const [at] = recordTick.mock.calls.at(-1) ?? []
     expect(at?.getTime()).toBeGreaterThan(Date.now() - 60_000)
     expect(retireStaleProposals).toHaveBeenCalled()
+  })
+
+  it('logs when recording the tick itself fails, without failing the request', async () => {
+    process.env.QSTASH_CURRENT_SIGNING_KEY = 'sig_current'
+    verify.mockResolvedValue(true)
+    recordTick.mockRejectedValueOnce(new Error('db unreachable'))
+    const res = await tick({ 'upstash-signature': 'v1=abc' })
+    expect(res.status).toBe(200)
+    expect(console.error).toHaveBeenCalledWith('[tick] could not record the tick:', expect.any(Error))
   })
 
   it('records nothing for a tick it refuses', async () => {
@@ -218,6 +229,15 @@ describe('running due automations', () => {
     await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
   })
 
+  it('logs when the built-in watchers changed something', async () => {
+    installBuiltins.mockResolvedValueOnce({ installed: ['Morning brief in Family'], converted: 0, retired: 0, synced: 0 })
+    await authed()
+    expect(console.info).toHaveBeenCalledWith(
+      '[tick] built-in watchers:',
+      JSON.stringify({ installed: ['Morning brief in Family'], converted: 0, retired: 0, synced: 0 }),
+    )
+  })
+
   it('claims a group run but posts nothing while someone unrecognised is in the room', async () => {
     dueAutomations.mockResolvedValue([automation(), automation({ id: 2, chatId: '111' })])
     strangersIn.mockImplementation(async (chatId: string) => (chatId === '-100999' ? [{ id: '555', name: 'Someone' }] : []))
@@ -233,6 +253,15 @@ describe('running due automations', () => {
     await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
     expect(send).toHaveBeenCalledWith('900', expect.stringContaining('model exploded'))
     expect(send).not.toHaveBeenCalledWith('-100999', expect.stringContaining('model exploded'))
+  })
+
+  it('treats a failed admin lookup as no admins, and still logs that nobody could be told', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    runAgent.mockRejectedValueOnce(new Error('model exploded'))
+    allowedMembers.mockRejectedValueOnce(new Error('members table locked'))
+    await authed()
+    expect(send).not.toHaveBeenCalled()
+    expect(console.error).toHaveBeenCalledWith('[tick] no admin reachable by DM:', expect.stringContaining('model exploded'))
   })
 
   it('routes a marked problem attached to SKIP to the admins, not the chat', async () => {
@@ -372,6 +401,23 @@ describe('running due automations', () => {
       messagesSince.mockResolvedValue([{ chatId: 'x', authorName: 'L', role: 'user', content: 'hi' }] as never)
       await authed()
       expect(runAgent).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('logs when the nightly memory pass itself fails, without failing the tick', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-30T18:30:00Z')) // 4:30am in Melbourne
+    try {
+      getSetting.mockImplementation(async () => null)
+      messagesSince.mockResolvedValue([
+        { chatId: '-100999', authorName: 'Rowan', role: 'user', content: 'Bin night is Monday by the way' },
+      ] as never)
+      runAgent.mockRejectedValueOnce(new Error('model down'))
+      const res = await authed()
+      expect(res.status).toBe(200)
+      expect(console.error).toHaveBeenCalledWith('[tick] memory pass failed:', expect.any(Error))
     } finally {
       vi.useRealTimers()
     }
@@ -678,6 +724,15 @@ describe('ready-made watchers', () => {
     expect(markQuestionsAsked).not.toHaveBeenCalled()
   })
 
+  it('treats a failed lookup of open questions as none, rather than failing the brief', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    listEvents.mockResolvedValue({ events: [{ id: 1, title: 'Swimming', start_local: 'Wed 3 Sep 2026, 09:00' }] })
+    unaskedQuestions.mockRejectedValueOnce(new Error('questions table locked'))
+    await authed()
+    expect(runAgent).toHaveBeenCalled()
+    expect(markQuestionsAsked).not.toHaveBeenCalled()
+  })
+
   it('posts the money snapshot from PocketSmith, the week and the month so far with the budget', async () => {
     dueAutomations.mockResolvedValue([snapshot()])
     spendingSummary.mockImplementation(async ({ from, source }: { from?: string; source: string }) =>
@@ -820,6 +875,13 @@ describe('the corners of a run', () => {
     expect(send).not.toHaveBeenCalled()
   })
 
+  it('refuses to run a tool with no execute callback, and reports the failure', async () => {
+    dueAutomations.mockResolvedValue([automation({ kind: 'money', label: '2Up transactions' })])
+    buildTools.mockReturnValueOnce({ new_transactions: {} })
+    await authed()
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('new_transactions cannot run outside a model turn'))
+  })
+
   it('phrases for a private chat when the automation lives in one', async () => {
     dueAutomations.mockResolvedValue([
       automation({ id: 1, chatId: '111' }),
@@ -849,6 +911,13 @@ describe('the corners of a run', () => {
     retireStaleProposals.mockResolvedValue({ expired: 2, superseded: 1 })
     await authed()
     expect(console.info).toHaveBeenCalledWith(expect.stringContaining('proposals retired: 2 expired, 1 already on the calendar'))
+  })
+
+  it('logs when retiring stale proposals fails, without failing the tick', async () => {
+    retireStaleProposals.mockRejectedValueOnce(new Error('proposals table locked'))
+    const res = await authed()
+    expect(res.status).toBe(200)
+    expect(console.error).toHaveBeenCalledWith('[tick] could not retire stale proposals:', expect.any(Error))
   })
 
   it('writes the nightly transcript with the bot as you and a nameless sender as someone', async () => {

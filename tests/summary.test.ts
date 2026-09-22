@@ -53,6 +53,17 @@ describe('maybeSummarise', () => {
     expect(stored.through).toBe(ids[SUMMARISE_BATCH - 1])
   })
 
+  it("labels the bot's own lines as Hearth, and a sender with no name as Someone", async () => {
+    await q.recordMessage({ chatId: '-100', role: 'assistant', content: 'bins are Monday' })
+    await q.recordMessage({ chatId: '-100', role: 'user', content: 'who asked?' })
+    await talk(q.CONTEXT_WINDOW + SUMMARISE_BATCH - 2, 3)
+    generateText.mockResolvedValue(reply('Hearth said bins are Monday.'))
+    expect(await maybeSummarise('-100')).toBe(true)
+    const prompt = String(generateText.mock.calls[0][0].prompt)
+    expect(prompt).toContain('Hearth: bins are Monday')
+    expect(prompt).toContain('Someone: who asked?')
+  })
+
   it('folds later talk into the existing summary rather than starting over', async () => {
     await talk(q.CONTEXT_WINDOW + SUMMARISE_BATCH)
     generateText.mockResolvedValue(reply('First pass.'))

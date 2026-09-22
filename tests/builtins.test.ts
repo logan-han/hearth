@@ -3,7 +3,7 @@ import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
 import { installBuiltins } from '@/lib/builtins'
-import { WATCHERS } from '@/lib/watchers'
+import { WATCHERS, BUILTIN_WATCHERS, type Watcher } from '@/lib/watchers'
 
 let client: PGlite
 /** Tuesday 15 September 2026, 10:30am in Melbourne. */
@@ -34,6 +34,27 @@ describe('the built-in watchers', () => {
     const again = await installBuiltins(now)
     expect(again).toEqual({ installed: [], converted: 0, retired: 0, synced: 0 })
     expect(await q.listAutomations()).toHaveLength(2)
+  })
+
+  it('falls back to the chat id when a group has no title', async () => {
+    await q.rememberChat('-100', 'group', null)
+    const report = await installBuiltins(now)
+    expect(report.installed).toEqual(['Morning brief in -100', 'Money snapshot in -100'])
+  })
+
+  it('skips installing a watcher whose cron can never fire, rather than crashing', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    const impossible: Watcher = {
+      kind: 'money', label: 'Impossible watcher', cron: '0 0 30 2 *', builtin: true, instruction: 'x', tools: [],
+    }
+    BUILTIN_WATCHERS.push(impossible)
+    try {
+      const report = await installBuiltins(now)
+      expect(report.installed).toEqual(['Morning brief in Family', 'Money snapshot in Family'])
+      expect((await q.listAutomations('-100')).map((a) => a.kind).sort()).toEqual(['morning', 'snapshot'])
+    } finally {
+      BUILTIN_WATCHERS.pop()
+    }
   })
 
   it('leave a paused one paused', async () => {
@@ -67,6 +88,20 @@ describe('the built-in watchers', () => {
     const snapshot = (await q.getAutomation(worded.id))!
     expect(snapshot.label).toBe('Money snapshot')
     expect(snapshot.nextRunAt.toISOString()).toBe('2026-09-20T08:00:00.000Z')
+  })
+
+  it('converts a legacy watcher that was paused without giving it a fresh run time', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    const legacy = await q.addAutomation({
+      chatId: '-100', label: "Ada's inbox", cronExpr: '0 8 * * *', instruction: 'mail', kind: 'inbox',
+      nextRunAt: new Date('2026-09-10T22:00:00Z'),
+    })
+    await q.setAutomationEnabled(legacy.id, false)
+    await installBuiltins(now)
+    const converted = (await q.getAutomation(legacy.id))!
+    expect(converted.kind).toBe('morning')
+    expect(converted.enabled).toBe(false)
+    expect(converted.nextRunAt.toISOString()).toBe('2026-09-10T22:00:00.000Z')
   })
 
   it('turn a legacy inbox sweep into the brief, owner and all, or retire it beside a brief the chat already has', async () => {

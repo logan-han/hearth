@@ -6,6 +6,20 @@ import * as q from '@/lib/db/queries'
 const send = vi.hoisted(() => vi.fn(async () => {}))
 vi.mock('@/lib/telegram', () => ({ send, typing: vi.fn(), bot: vi.fn() }))
 
+/** The signin branch signs a session cookie; give it somewhere to put one. */
+const jar = vi.hoisted(() => {
+  const store = new Map<string, string>()
+  return {
+    store,
+    cookies: async () => ({
+      get: (k: string) => (store.has(k) ? { value: store.get(k) } : undefined),
+      set: (k: string, v: string) => void store.set(k, v),
+      delete: (k: string) => void store.delete(k),
+    }),
+  }
+})
+vi.mock('next/headers', () => ({ cookies: jar.cookies }))
+
 const { startAuth, completeAuth } = await import('@/lib/oauth/flow')
 const { signState } = await import('@/lib/oauth/state')
 const { accessTokenFor, clearTokenCache, NotConnectedError } = await import('@/lib/providers/token')
@@ -20,6 +34,7 @@ const idToken = (claims: object) => `x.${Buffer.from(JSON.stringify(claims)).toS
 beforeEach(async () => {
   vi.clearAllMocks()
   vi.spyOn(console, 'error').mockImplementation(() => {})
+  jar.store.clear()
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
   process.env.APP_URL = 'https://hearth.example'
   process.env.GOOGLE_CLIENT_ID = 'gid'
@@ -117,6 +132,83 @@ describe('completeAuth', () => {
     const body = await res.text()
     expect(body).not.toContain('<script>')
   })
+
+  it('records the confirmation into the chat history once telegram has accepted it', async () => {
+    fetchMock.mockResolvedValueOnce(
+      tokenReply({ access_token: 'a', refresh_token: 'r3fr3sh', scope: 's', id_token: idToken({ email: 'a@b.com' }) }),
+    )
+    await completeAuth(req(await callbackUrl()), 'google')
+    await vi.waitFor(async () => {
+      const history = await q.messagesAfter('111', 0)
+      expect(history.map((h) => h.content)).toEqual([expect.stringContaining('linked')])
+    })
+  })
+
+  it('does not let a failed confirmation message affect the redirect', async () => {
+    fetchMock.mockResolvedValueOnce(
+      tokenReply({ access_token: 'a', refresh_token: 'r3fr3sh', scope: 's', id_token: idToken({ email: 'a@b.com' }) }),
+    )
+    send.mockRejectedValueOnce(new Error('telegram unreachable'))
+    const res = await completeAuth(req(await callbackUrl()), 'google')
+    expect(res.status).toBe(307)
+    expect(res.headers.get('location')).toContain('linked=google')
+    // Telegram never took it, so nothing goes into the history either.
+    expect(await q.messagesAfter('111', 0)).toEqual([])
+  })
+
+  it('links without a scope on record when the provider does not return one', async () => {
+    fetchMock.mockResolvedValueOnce(
+      tokenReply({ access_token: 'a', refresh_token: 'r3fr3sh', id_token: idToken({ email: 'a@b.com' }) }),
+    )
+    await completeAuth(req(await callbackUrl()), 'google')
+    const member = await q.memberByTelegramId('111')
+    const conn = await q.connectionFor(member!.id, 'google')
+    expect(conn!.scopes).toBeNull()
+  })
+
+  describe('signing in, which can also link a mailbox', () => {
+    const signinUrl = async () => {
+      const state = await signState({ tg: '', name: '', chat: '', purpose: 'signin' })
+      return `https://hearth.example/api/oauth/google/callback?code=abc&state=${encodeURIComponent(state)}`
+    }
+
+    it('signs in and links in one step when nothing is linked yet, with no scope on record', async () => {
+      await q.saveMember({ telegramUserId: '777', name: 'Sam', email: 'sam@hearth.example', allowed: true, isAdmin: false })
+      fetchMock.mockResolvedValueOnce(
+        tokenReply({ access_token: 'a', refresh_token: 'r', id_token: idToken({ email: 'sam@hearth.example' }) }),
+      )
+      const res = await completeAuth(req(await signinUrl()), 'google')
+      expect(res.status).toBe(307)
+      const member = await q.memberByTelegramId('777')
+      const conn = await q.connectionFor(member!.id, 'google')
+      expect(conn!.scopes).toBeNull()
+    })
+
+    it('never adopts an existing connection that has no email recorded against it', async () => {
+      const m = await q.saveMember({ telegramUserId: '888', name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
+      await q.saveConnection({ memberId: m.id, provider: 'google', email: null, refreshToken: 'old', scopes: null })
+      fetchMock.mockResolvedValueOnce(
+        tokenReply({ access_token: 'a', refresh_token: 'new', id_token: idToken({ email: 'ada@hearth.example' }) }),
+      )
+      await completeAuth(req(await signinUrl()), 'google')
+      const conn = await q.connectionFor(m.id, 'google')
+      expect(await q.decryptRefreshToken(conn!)).toBe('old')
+    })
+
+    it('keeps the session even when the mailbox link cannot be stored', async () => {
+      await q.saveMember({ telegramUserId: '999', name: 'Juno', email: 'juno@hearth.example', allowed: true, isAdmin: false })
+      const { db } = await import('@/lib/db')
+      const { sql } = await import('drizzle-orm')
+      await db().execute(sql`alter table connections add constraint block_insert_for_test check (false)`)
+      fetchMock.mockResolvedValueOnce(
+        tokenReply({ access_token: 'a', refresh_token: 'r', id_token: idToken({ email: 'juno@hearth.example' }) }),
+      )
+      const res = await completeAuth(req(await signinUrl()), 'google')
+      expect(res.status).toBe(307)
+      expect(res.headers.get('location')).toBe('https://hearth.example/')
+      expect(console.error).toHaveBeenCalledWith('[oauth] sign-in could not store the connection:', expect.anything())
+    })
+  })
 })
 
 describe('access tokens', () => {
@@ -142,6 +234,14 @@ describe('access tokens', () => {
     const m = await linkGoogle()
     fetchMock.mockResolvedValue(tokenReply({ access_token: 'fresh', expires_in: 3600 }))
     await accessTokenFor(m.id, 'google')
+    await accessTokenFor(m.id, 'google')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('assumes an hour when the provider does not say how long the token lasts', async () => {
+    const m = await linkGoogle()
+    fetchMock.mockResolvedValueOnce(tokenReply({ access_token: 'fresh' }))
+    expect(await accessTokenFor(m.id, 'google')).toBe('fresh')
     await accessTokenFor(m.id, 'google')
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })

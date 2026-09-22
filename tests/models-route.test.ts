@@ -267,6 +267,13 @@ describe('testing one model', () => {
     expect(res.status).toBe(400)
   })
 
+  it('reports the failure when self-hosted is probed with no endpoint set', async () => {
+    // What fetch does with a path and no host.
+    fetchMock.mockRejectedValue(new TypeError('Failed to parse URL from /chat/completions'))
+    const d = await (await probe({ provider: 'self-hosted', model: 'qwen3' })).json()
+    expect(d).toEqual({ ok: false, reason: 'Failed to parse URL from /chat/completions' })
+  })
+
   it('probes a self-hosted server at its own base url', async () => {
     process.env.LLM_BASE_URL = 'http://127.0.0.1:11434/v1/'
     fetchMock.mockResolvedValue(json({ choices: [] }))

@@ -220,6 +220,26 @@ describe('hydration is resilient', () => {
     resetHydration()
     await expect(hydrateSecrets()).resolves.toBeUndefined()
   })
+
+  it('reads back the row another instance wrote while it was importing the same key, rather than its own', async () => {
+    process.env.GEMINI_MODEL = 'from-env'
+    const { db } = await import('@/lib/db')
+    const { secrets } = await import('@/lib/db/schema')
+    const crypto = await import('@/lib/crypto')
+    const encrypt = crypto.encrypt
+    const elsewhere = { key: 'GEMINI_MODEL', value: await encrypt('claimed-elsewhere'), updatedBy: 'other-instance' }
+    // The other instance's row lands while this one is still encrypting its import.
+    vi.spyOn(crypto, 'encrypt').mockImplementationOnce(async (plain: string) => {
+      await db().insert(secrets).values(elsewhere)
+      return encrypt(plain)
+    })
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+    await hydrateSecrets()
+    expect(info).not.toHaveBeenCalledWith(expect.stringContaining('GEMINI_MODEL imported'))
+    expect(process.env.GEMINI_MODEL).toBe('claimed-elsewhere')
+    const shown = (await listSettings()).find((s) => s.key === 'GEMINI_MODEL')!
+    expect(shown).toMatchObject({ set: true, origin: 'dashboard', updatedBy: 'other-instance' })
+  })
 })
 
 describe('admin sessions', () => {
@@ -249,6 +269,24 @@ describe('admin sessions', () => {
   it('stores the cookie as httpOnly is expected by the browser, not readable here', async () => {
     await createSession({ email: 'rowan@hearth.example', name: 'Rowan', provider: 'google', role: 'admin' })
     expect(jar.store.get('hearth_session')?.split('.')).toHaveLength(3)
+  })
+
+  const signRaw = async (claims: Record<string, unknown>) => {
+    const { SignJWT } = await import('jose')
+    return new SignJWT(claims)
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime('1h')
+      .sign(new TextEncoder().encode(process.env.TOKEN_ENC_KEY!))
+  }
+
+  it('refuses a token with no email claim', async () => {
+    jar.store.set('hearth_session', await signRaw({ name: 'X', provider: 'google', role: 'admin' }))
+    expect(await readSession()).toBeNull()
+  })
+
+  it('falls back to the email for the name, and calls the provider unknown, when the token lacks them', async () => {
+    jar.store.set('hearth_session', await signRaw({ email: 'ada@hearth.example' }))
+    expect(await readSession()).toEqual({ email: 'ada@hearth.example', name: 'ada@hearth.example', provider: 'unknown', role: 'member' })
   })
 })
 

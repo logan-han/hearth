@@ -64,6 +64,15 @@ describe('oauth state', () => {
     await expect(verifyState(token)).rejects.toThrow(/telegram id/)
   })
 
+  it('defaults a missing telegram id on a sign-in, which needs none', async () => {
+    const { SignJWT } = await import('jose')
+    const token = await new SignJWT({ purpose: 'signin' })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime('5m')
+      .sign(new TextEncoder().encode(process.env.TOKEN_ENC_KEY!))
+    expect(await verifyState(token)).toEqual({ tg: '', name: 'Family member', chat: '', purpose: 'signin' })
+  })
+
   it('defaults a missing name rather than failing', async () => {
     const { SignJWT } = await import('jose')
     const token = await new SignJWT({ tg: '111' })

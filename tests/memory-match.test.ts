@@ -6,6 +6,10 @@ describe('memory likeness', () => {
     expect([...tokens('The bins go out on Mondays, by the way')]).toEqual(['bin', 'go', 'out', 'monday'])
   })
 
+  it('stems a plural ending in ies back to y', () => {
+    expect([...tokens('families')]).toEqual(['family'])
+  })
+
   it('calls a reworded fact a duplicate', () => {
     expect(similarity('bin night is Monday', 'Bin night is Monday by the way')).toBeGreaterThanOrEqual(DUPLICATE)
     expect(similarity('Ada is allergic to peanuts', 'Ada allergic to peanuts.')).toBeGreaterThanOrEqual(DUPLICATE)

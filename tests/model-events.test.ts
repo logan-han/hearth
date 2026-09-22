@@ -100,6 +100,12 @@ describe('structured record', () => {
     expect(record.get('b')).toEqual({ attempts: 1, noObject: 0 })
   })
 
+  it('does not count a failed structured call with no error message as a no-object failure', async () => {
+    await recordModelEvent({ slot: 'a', purpose: 'hearth.verify', outcome: 'failed' })
+    const record = await structuredRecord(1)
+    expect(record.get('a')).toBeUndefined()
+  })
+
   it('is empty when it cannot be read, so the chain runs as configured', async () => {
     await db().execute(sql`drop table model_events`)
     expect((await structuredRecord(1)).size).toBe(0)

@@ -12,16 +12,20 @@ const listEvents = vi.fn()
 const createEvent = vi.fn()
 
 const clientForIds: number[] = []
+const stubClient = (provider: string) => ({ provider, listMail, readMail, readAttachment, sendMail, listEvents, createEvent })
+// A vi.fn so a test can override it (e.g. mockResolvedValueOnce([])) for the "nobody
+// linked" arms; vi.clearAllMocks() in beforeEach clears call history but keeps this
+// default implementation, so every other test sees the same one linked account as before.
+const clientsForMock = vi.fn(async (_memberId: number) => [stubClient('google')])
 vi.mock('@/lib/providers', async (orig) => {
   const actual = await orig<typeof import('@/lib/providers')>()
-  const stub = (provider: string) => ({ provider, listMail, readMail, readAttachment, sendMail, listEvents, createEvent })
   return {
     ...actual,
     clientFor: (id: number, p: string) => {
       clientForIds.push(id)
-      return stub(p)
+      return stubClient(p)
     },
-    clientsFor: async () => [stub('google')],
+    clientsFor: (id: number) => clientsForMock(id),
   }
 })
 
@@ -30,6 +34,7 @@ vi.mock('unpdf', () => ({
   extractText: vi.fn(async () => ({ totalPages: 2, text: 'Policy number HOM 1\nAmount due $3,101.20\nDue 22/10/2026' })),
 }))
 
+const { extractText } = await import('unpdf')
 const { mailTools } = await import('@/lib/tools/mail')
 const { calendarTools } = await import('@/lib/tools/calendar')
 const { familyCalendarTools } = await import('@/lib/tools/familycal')
@@ -73,6 +78,24 @@ describe('mail tools', () => {
     listMail.mockRejectedValue(new Error('Google API 429'))
     const r = await call(mailTools(ctx), 'list_email', { limit: 5 })
     expect(String((r.accounts as { error: string }[])[0].error)).toContain('429')
+  })
+
+  it('restricts the search to the named provider when one is given', async () => {
+    listMail.mockResolvedValue([])
+    const r = await call(mailTools(ctx), 'list_email', { limit: 5, provider: 'microsoft' })
+    expect((r.accounts as { provider: string }[])[0].provider).toBe('microsoft')
+  })
+
+  it('searches beyond the inbox whenever a query is given', async () => {
+    listMail.mockResolvedValue([])
+    await call(mailTools(ctx), 'list_email', { limit: 5, query: 'school notice' })
+    expect(listMail).toHaveBeenCalledWith(expect.objectContaining({ scope: 'all' }))
+  })
+
+  it('says so when nobody has a mailbox linked', async () => {
+    clientsForMock.mockResolvedValueOnce([])
+    const r = await call(mailTools(ctx), 'list_email', { limit: 5 })
+    expect(String(r.error)).toContain('No email account linked')
   })
 
   it('turns a missing link into advice, not an error', async () => {
@@ -131,6 +154,39 @@ describe('mail tools', () => {
     expect((await call(mailTools(ctx), 'cancel_draft', { draft_id: d.draft_id })).cancelled).toBe(true)
     expect((await call(mailTools(ctx), 'cancel_draft', { draft_id: d.draft_id })).error).toBeDefined()
   })
+
+  it('sends the cc list along with the recipients', async () => {
+    sendMail.mockResolvedValue({ ok: true })
+    const d = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com'], cc: ['x@y.com', 'z@y.com'], subject: 's', body: 'b' })
+    await call(mailTools(ctx), 'send_email', { draft_id: d.draft_id, confirmed: true })
+    expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({ cc: ['x@y.com', 'z@y.com'] }))
+  })
+
+  it('when two confirmations race for the same draft, only one actually sends', async () => {
+    sendMail.mockResolvedValue({ ok: true })
+    const d = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com'], subject: 's', body: 'b' })
+    const [first, second] = await Promise.all([
+      call(mailTools(ctx), 'send_email', { draft_id: d.draft_id, confirmed: true }),
+      call(mailTools(ctx), 'send_email', { draft_id: d.draft_id, confirmed: true }),
+    ])
+    const results = [first, second]
+    expect(results.filter((r) => r.sent === true)).toHaveLength(1)
+    const failed = results.find((r) => r.error)
+    expect(String(failed?.error)).toContain('already handled')
+    expect(sendMail).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends from the requested provider rather than the first linked one', async () => {
+    await q.saveConnection({ memberId: ctx.member!.id, provider: 'microsoft', email: 'a@b.com', refreshToken: 'r', scopes: null })
+    const r = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com'], subject: 's', body: 'b', provider: 'microsoft' })
+    expect(r.from).toBe('microsoft')
+  })
+
+  it('says so when the asker has no mailbox linked at all', async () => {
+    const noConn = await q.upsertMember('333', 'Sam', { allowed: true })
+    const r = await call(mailTools({ ...ctx, member: noConn }), 'draft_email', { to: ['a@b.com'], subject: 's', body: 'b' })
+    expect(String(r.error)).toContain('No email account linked')
+  })
 })
 
 describe('draft_email supersedes its own revisions', () => {
@@ -150,6 +206,16 @@ describe('draft_email supersedes its own revisions', () => {
     const other = await draft(['b@y.com'], 'two')
     expect(other.superseded).toBeUndefined()
     expect((await q.getDraft(first.draft_id as number))!.status).toBe('pending')
+  })
+
+  it('when two revisions race to supersede the same draft, only the first actually cancels it', async () => {
+    const first = await draft(['a@x.com'], 'v1')
+    const [second, third] = await Promise.all([draft(['a@x.com'], 'v2'), draft(['a@x.com'], 'v3')])
+    const bothAttempts = [second, third]
+    const wonTheRace = bothAttempts.filter((r) => r.superseded !== undefined)
+    expect(wonTheRace).toHaveLength(1)
+    expect(wonTheRace[0].superseded).toEqual([first.draft_id])
+    expect((await q.getDraft(first.draft_id as number))!.status).toBe('cancelled')
   })
 })
 
@@ -222,6 +288,33 @@ describe('read_attachment', () => {
     readMail.mockResolvedValue({ id: 'm2', body: 'plain', attachments: [] })
     expect((await call(mailTools(ctx), 'read_email', { id: 'm2', provider: 'google' })).note).toBeUndefined()
   })
+
+  it('refuses a file too large to read here', async () => {
+    readAttachment.mockResolvedValue({ filename: 'huge.pdf', mimeType: 'application/pdf', size: 0, bytes: new Uint8Array(10 * 1024 * 1024 + 1) })
+    const r = await call(mailTools(ctx), 'read_attachment', { email_id: 'm1', provider: 'google', filename: 'huge.pdf' })
+    expect(String(r.error)).toContain('too large to read here')
+    expect(String(r.error)).toContain('MB')
+  })
+
+  it('says so when a PDF has no text layer, and clips text past the length cap', async () => {
+    readAttachment.mockResolvedValue(pdf)
+    vi.mocked(extractText).mockResolvedValueOnce({ totalPages: 3, text: '   ' })
+    const scanned = await call(mailTools(ctx), 'read_attachment', { email_id: 'm1', provider: 'google', filename: 'scan.pdf' })
+    expect(scanned).toMatchObject({ type: 'pdf', pages: 3, text: '' })
+    expect(String(scanned.note)).toContain('no text layer')
+
+    readAttachment.mockResolvedValue({ filename: 'long.txt', mimeType: 'text/plain', size: 12050, bytes: new TextEncoder().encode('x'.repeat(12050)) })
+    const long = await call(mailTools(ctx), 'read_attachment', { email_id: 'm1', provider: 'google', filename: 'long.txt' })
+    expect(String(long.text)).toHaveLength(12_000 + '\n[cut off here]'.length)
+    expect(String(long.text)).toContain('[cut off here]')
+  })
+
+  it('says an unsupported file type cannot be read here', async () => {
+    readAttachment.mockResolvedValue({ filename: 'archive.zip', mimeType: 'application/zip', size: 10, bytes: new Uint8Array([1, 2, 3]) })
+    const r = await call(mailTools(ctx), 'read_attachment', { email_id: 'm1', provider: 'google', filename: 'archive.zip' })
+    expect(String(r.error)).toContain('archive.zip')
+    expect(String(r.error)).toContain('not a kind of file that can be read here')
+  })
 })
 
 describe('new_mail', () => {
@@ -279,6 +372,42 @@ describe('new_mail', () => {
     await q.noteStranger('-100', { id: '9', name: 'Guest' })
     const r = await call(mailTools(ctx), 'new_mail', { limit: 10, everyone: true })
     expect(String(r.error)).toContain('unrecognised')
+  })
+
+  it('defaults the per mailbox limit when the caller omits it', async () => {
+    listMail.mockResolvedValue([mail('a', 2)])
+    await call(mailTools(ctx), 'new_mail', {})
+    expect(listMail.mock.calls[0][0]).toMatchObject({ limit: 20 })
+  })
+
+  it('marks the cursor on an empty first look, so the count is not replayed forever', async () => {
+    listMail.mockResolvedValue([mail('old', 20)])
+    const r = await call(mailTools(ctx), 'new_mail', { limit: 10 })
+    const acct = (r.accounts as { first_check: boolean; messages: unknown[] }[])[0]
+    expect(acct.first_check).toBe(true)
+    expect(acct.messages).toEqual([])
+    // A cursor was written despite nothing fresh, so a second look is not a first look again.
+    listMail.mockResolvedValue([mail('old', 20), mail('fresh', -1)])
+    const again = await call(mailTools(ctx), 'new_mail', { limit: 10 })
+    const acctAgain = (again.accounts as { first_check: boolean; messages: { id: string }[] }[])[0]
+    expect(acctAgain.first_check).toBe(false)
+    expect(acctAgain.messages.map((m) => m.id)).toEqual(['fresh'])
+  })
+
+  it('reports one mailbox failing without sinking the sweep', async () => {
+    listMail.mockRejectedValue(new Error('Google API 429'))
+    const r = await call(mailTools(ctx), 'new_mail', { limit: 10 })
+    expect(String((r.accounts as { error: string }[])[0].error)).toContain('429')
+  })
+
+  it('says so when nobody in the chat has a mailbox linked', async () => {
+    clientsForMock.mockResolvedValueOnce([])
+    const solo = await call(mailTools(ctx), 'new_mail', { limit: 10 })
+    expect(String(solo.error)).toContain('No email account linked')
+
+    clientsForMock.mockResolvedValueOnce([])
+    const sweep = await call(mailTools(ctx), 'new_mail', { limit: 10, everyone: true })
+    expect(String(sweep.error)).toContain('Nobody has linked a mailbox yet')
   })
 })
 
@@ -338,6 +467,22 @@ describe('calendar tools', () => {
     const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27T00:00', to: '2026-08-28T00:00' })
     expect((r.accounts as { events: { start_local: string }[] }[])[0].events[0].start_local).toBe('')
   })
+
+  it('restricts the listing to the named provider when one is given', async () => {
+    listEvents.mockResolvedValue([])
+    const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27T00:00', to: '2026-08-28T00:00', provider: 'microsoft' })
+    expect((r.accounts as { provider: string }[])[0].provider).toBe('microsoft')
+  })
+
+  it('says so when no calendar is linked', async () => {
+    clientsForMock.mockResolvedValueOnce([])
+    const listing = await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27T00:00', to: '2026-08-28T00:00' })
+    expect(String(listing.error)).toContain('No calendar linked')
+
+    clientsForMock.mockResolvedValueOnce([])
+    const creating = await call(calendarTools(ctx), 'create_calendar_event', { title: 'T', start: '2026-08-27T09:00', all_day: false })
+    expect(String(creating.error)).toContain('No calendar linked')
+  })
 })
 
 describe('family calendar tools', () => {
@@ -352,6 +497,12 @@ describe('family calendar tools', () => {
     await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Trip', start: '2026-08-29', all_day: true })
     const [e] = await q.listFamilyEvents(new Date('2026-01-01'), new Date('2027-01-01'))
     expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(86_400_000)
+  })
+
+  it('spans several days when an all-day event is given an explicit later end', async () => {
+    await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Cuboree', start: '2026-08-29', end: '2026-09-01', all_day: true })
+    const [e] = await q.listFamilyEvents(new Date('2026-08-28'), new Date('2026-09-03'))
+    expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(3 * 86_400_000)
   })
 
   it('treats a date with no time as all-day, never a midnight event', async () => {
@@ -456,6 +607,57 @@ describe('family calendar tools', () => {
     expect(String((await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, title: 'Back' })).error)).toContain('No live family event')
     expect((await call(familyCalendarTools(ctx), 'update_family_event', { id: 999, title: 'x' })).error).toBeDefined()
   })
+
+  it('patches location and description on their own, clearing either with null', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', {
+      title: 'Swim', start: '2026-09-01T09:00', all_day: false, location: 'Pool', description: 'Bring togs',
+    })
+    const r = await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, location: 'Beach', description: null })
+    expect(r.changed).toEqual(['location', 'description'])
+    const [e] = await q.listFamilyEvents(new Date('2026-08-30'), new Date('2026-09-05'))
+    expect(e.location).toBe('Beach')
+    expect(e.description).toBeNull()
+  })
+
+  it('changes only the end of an all-day event, keeping it all-day', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Camp', start: '2026-09-10', all_day: true })
+    const r = await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, end: '2026-09-13' })
+    expect(r.all_day).toBe(true)
+    const [e] = await q.listFamilyEvents(new Date('2026-09-09'), new Date('2026-09-15'))
+    expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(3 * 86_400_000)
+  })
+
+  it('keeps the times when all_day is restated unchanged beside another edit', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Swim', start: '2026-09-01T09:00', end: '2026-09-01T10:30', all_day: false })
+    const r = await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, title: 'Swim squad', all_day: false })
+    expect(r.title).toBe('Swim squad')
+    const [e] = await q.listFamilyEvents(new Date('2026-08-30'), new Date('2026-09-05'))
+    expect(e).toMatchObject({ allDay: false, startsAt: new Date('2026-08-31T23:00:00Z'), endsAt: new Date('2026-09-01T00:30:00Z') })
+  })
+
+  it('falls back to a default length when a new end is not after the start', async () => {
+    const timed = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Swim', start: '2026-09-01T09:00', end: '2026-09-01T10:00', all_day: false })
+    await call(familyCalendarTools(ctx), 'update_family_event', { id: timed.id, end: '2026-09-01T08:00' })
+    let rows = await q.listFamilyEvents(new Date('2026-08-30'), new Date('2026-09-05'))
+    let e = rows.find((x) => x.id === timed.id)!
+    expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(3_600_000)
+
+    const allDay = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Trip', start: '2026-09-05', all_day: true })
+    await call(familyCalendarTools(ctx), 'update_family_event', { id: allDay.id, end: '2026-09-05' })
+    rows = await q.listFamilyEvents(new Date('2026-09-03'), new Date('2026-09-08'))
+    e = rows.find((x) => x.id === allDay.id)!
+    expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(86_400_000)
+  })
+
+  it('finds nothing left to update when a cancellation won the race first', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Swim', start: '2026-09-01T09:00', all_day: false })
+    const [updated, cancelled] = await Promise.all([
+      call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, title: 'Renamed' }),
+      call(familyCalendarTools(ctx), 'cancel_family_event', { id: a.id }),
+    ])
+    expect(cancelled.cancelled).toBe(true)
+    expect(String(updated.error)).toContain(`No live family event ${a.id}`)
+  })
 })
 
 describe('import_calendar_file', () => {
@@ -538,6 +740,16 @@ describe('memory tools', () => {
     const left = (await call(memoryTools(ctx), 'recall', {})).memories as { id: number }[]
     expect(left.map((m) => m.id)).toEqual([fresh.id])
   })
+
+  it('stores a fact with no member on the context, and settles a question the same way', async () => {
+    const noMember = { ...ctx, member: null }
+    const stored = await call(memoryTools(noMember), 'remember', { fact: 'bin night is Monday' })
+    expect(stored.id).toBeDefined()
+
+    const asked = await call(memoryTools(ctx), 'unsure', { question: 'Who is at Hillside Grammar?', fact: 'Juno attends Hillside Grammar' })
+    const settled = await call(memoryTools(noMember), 'answer_question', { id: asked.question_id, fact: 'Juno attends Hillside Grammar' })
+    expect(settled.kept).toBe('Juno attends Hillside Grammar')
+  })
 })
 
 describe('memory questions', () => {
@@ -595,6 +807,9 @@ describe('automation tools', () => {
 
     const paused = await call(automationTools(ctx), 'pause_automation', { id: a.id, enabled: false })
     expect(paused.next_run_local).toBeNull()
+    const listedPaused = (await call(automationTools(ctx), 'list_automations', {})).automations as { enabled: boolean; next_run_local: string | null }[]
+    expect(listedPaused[0]).toMatchObject({ enabled: false, next_run_local: null })
+
     const resumed = await call(automationTools(ctx), 'pause_automation', { id: a.id, enabled: true })
     expect(resumed.next_run_local).not.toBeNull()
     expect((await q.getAutomation(Number(a.id)))!.enabled).toBe(true)
@@ -608,6 +823,54 @@ describe('automation tools', () => {
   it('deletes', async () => {
     const a = await call(automationTools(ctx), 'create_automation', { label: 'bins', cron: '0 19 * * 1', instruction: 'i' })
     expect((await call(automationTools(ctx), 'delete_automation', { id: a.id })).deleted).toBe(a.id)
+  })
+
+  it('creates with no member on the context', async () => {
+    const r = await call(automationTools({ ...ctx, member: null }), 'create_automation', { label: 'bins', cron: '0 19 * * 1', instruction: 'i' })
+    expect(r.id).toBeDefined()
+    expect((await q.getAutomation(Number(r.id)))!.memberId).toBeNull()
+  })
+
+  it('refuses to delete a built-in watcher, only a pause', async () => {
+    const built = await q.addAutomation({
+      chatId: ctx.chatId, label: 'Morning brief', cronExpr: '0 7 * * *', instruction: 'i', kind: 'morning', nextRunAt: new Date('2026-08-28T00:00:00Z'),
+    })
+    const r = await call(automationTools(ctx), 'delete_automation', { id: built.id })
+    expect(String(r.error)).toContain('built in and cannot be deleted')
+    expect(String(r.error)).toContain('pause_automation')
+    expect(await q.getAutomation(built.id)).toBeDefined()
+  })
+
+  it('when two deletes race for the same automation, only the first actually deletes it', async () => {
+    const a = await call(automationTools(ctx), 'create_automation', { label: 'bins', cron: '0 19 * * 1', instruction: 'i' })
+    const [first, second] = await Promise.all([
+      call(automationTools(ctx), 'delete_automation', { id: a.id }),
+      call(automationTools(ctx), 'delete_automation', { id: a.id }),
+    ])
+    const results = [first, second]
+    expect(results.filter((r) => r.deleted === a.id)).toHaveLength(1)
+    expect(results.filter((r) => r.error)).toHaveLength(1)
+  })
+
+  it('finds nothing left to pause when a delete won the race first', async () => {
+    const a = await call(automationTools(ctx), 'create_automation', { label: 'bins', cron: '0 19 * * 1', instruction: 'i' })
+    const [deleted, paused] = await Promise.all([
+      call(automationTools(ctx), 'delete_automation', { id: a.id }),
+      call(automationTools(ctx), 'pause_automation', { id: a.id, enabled: true }),
+    ])
+    expect(deleted.deleted).toBe(a.id)
+    expect(String(paused.error)).toContain(`No automation ${a.id}`)
+  })
+
+  it('gives up on a suggestion when the tick grid does not divide the hour', async () => {
+    // Ticks 22 minutes apart never land on a fixed minute of every hour.
+    await q.recordTick(new Date('2026-08-26T22:00:00Z'))
+    await q.recordTick(new Date('2026-08-26T22:22:00Z'))
+    const r = await call(automationTools(ctx), 'create_automation', { label: 'sweep', cron: '0 19 * * 1', instruction: 'i' })
+    expect(String(r.error)).toContain('every 22 minutes')
+    expect(String(r.error)).toContain('Ask for a time on a tick.')
+    expect(r.suggestion).toBeUndefined()
+    expect(await q.listAutomations('-100')).toHaveLength(0)
   })
 
   it('refuses a schedule the ticks cannot land on, and offers the nearest they can', async () => {
@@ -659,5 +922,13 @@ describe('web search', () => {
     process.env.TAVILY_API_KEY = 'tvly'
     fetchMock.mockResolvedValue({ ok: false, status: 401, text: async () => 'bad key' })
     expect(String((await call(searchTools, 'web_search', { query: 'x', depth: 'basic' })).error)).toContain('401')
+  })
+
+  it('copes with a response that has no answer or results', async () => {
+    process.env.TAVILY_API_KEY = 'tvly'
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({}) })
+    const r = await call(searchTools, 'web_search', { query: 'x', depth: 'basic' })
+    expect(r.answer).toBeNull()
+    expect(r.results).toEqual([])
   })
 })

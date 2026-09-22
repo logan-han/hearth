@@ -17,6 +17,7 @@ const { callTool, descriptors, mcpChat, CONTEXT_TOOL } = await import('@/lib/mcp
 
 let client: PGlite
 let member: Member
+let realDb: unknown
 
 beforeEach(async () => {
   vi.clearAllMocks()
@@ -25,7 +26,9 @@ beforeEach(async () => {
   process.env.TIMEZONE = 'Australia/Melbourne'
   const { resetKeyCache } = await import('@/lib/crypto')
   resetKeyCache()
-  client = (await freshDb()).client
+  const fresh = await freshDb()
+  client = fresh.client
+  realDb = fresh.db
   member = await q.upsertMember('111', 'Rowan', { allowed: true })
 })
 afterEach(async () => closeDb(client))
@@ -78,6 +81,16 @@ describe('the room a call acts in', () => {
 
   it("falls back to the member's own chat when there is no group at all", async () => {
     expect(await mcpChat(member)).toBe('111')
+  })
+
+  it('treats a failed room lookup as no rooms, falling back to the caller\'s own chat', async () => {
+    const { __setDb } = await import('@/lib/db')
+    __setDb({ select: () => { throw new Error('chats table locked') } })
+    try {
+      expect(await mcpChat(member)).toBe(member.telegramUserId)
+    } finally {
+      __setDb(realDb)
+    }
   })
 })
 

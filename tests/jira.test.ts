@@ -10,6 +10,17 @@ vi.mock('@/lib/providers', async (orig) => ({
   clientFor: () => ({ readAttachment }),
 }))
 
+// Whose mailbox a request reads: defaults to the asker, same as the real
+// lib/tools/mail.ts does when `of` is not given. A test overrides it to check
+// how jira_attach_email_file handles a mailbox it could not resolve.
+const mailboxOwnerMock = vi.hoisted(() =>
+  vi.fn(async (ctx: { member: unknown }): Promise<{ owner: unknown } | { error: string }> => ({ owner: ctx.member })),
+)
+vi.mock('@/lib/tools/mail', async (orig) => ({
+  ...(await orig<typeof import('@/lib/tools/mail')>()),
+  mailboxOwner: mailboxOwnerMock,
+}))
+
 const fetchMock = vi.fn()
 let ctx: ToolContext
 
@@ -133,6 +144,11 @@ describe('jira_search', () => {
     expect(String(r.jql)).not.toContain('statusCategory')
   })
 
+  it('leaves off the open-only filter when asked for everything', async () => {
+    const r = await call('jira_search', { open_only: false, limit: 20 })
+    expect(r.jql).toBe('project = HTL ORDER BY duedate ASC, created DESC')
+  })
+
   it('escapes quotes so text cannot rewrite the query', async () => {
     const r = await call('jira_search', { text: 'a" OR project = SECRET', open_only: true, limit: 20 })
     expect(String(r.jql)).toContain('summary ~ "a\\" OR project = SECRET"')
@@ -242,6 +258,24 @@ describe('jira_update_issue', () => {
     expect(String((await call('jira_update_issue', { key: 'HTL-1' })).error)).toContain('Nothing to change')
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
+
+  it('changes only the summary when that is all that is given', async () => {
+    fetchMock.mockResolvedValue(json({}, 204))
+    const r = await call('jira_update_issue', { key: 'HTL-1', summary: 'New title' })
+    expect(r).toEqual({ key: 'HTL-1', updated: ['summary'] })
+    expect(lastBody().fields).toEqual({ summary: 'New title' })
+  })
+
+  it('reports not configured rather than attempting the change', async () => {
+    delete process.env.JIRA_API_TOKEN
+    expect(String((await call('jira_update_issue', { key: 'HTL-1', summary: 'x' })).error)).toContain('JIRA_BASE_URL')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('surfaces an update failure as an error result', async () => {
+    fetchMock.mockResolvedValue(json({ errorMessages: ['locked'] }, 409))
+    expect(String((await call('jira_update_issue', { key: 'HTL-1', summary: 'x' })).error)).toContain('Jira API 409')
+  })
 })
 
 describe('jira_attach_email_file', () => {
@@ -279,6 +313,20 @@ describe('jira_attach_email_file', () => {
     readAttachment.mockResolvedValue({ filename: 'x.pdf', mimeType: 'application/pdf', size: 1, bytes: new Uint8Array([1]) })
     fetchMock.mockResolvedValue(json({ errorMessages: ['too big'] }, 413))
     expect(String((await call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })).error)).toContain('Jira API 413')
+  })
+
+  it('reports not configured before checking anything else', async () => {
+    delete process.env.JIRA_API_TOKEN
+    expect(String((await call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })).error)).toContain('JIRA_BASE_URL')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('hands back a mailbox error rather than attaching anything', async () => {
+    ctx = { ...ctx, member }
+    mailboxOwnerMock.mockResolvedValueOnce({ error: 'No family member called "Nobody".' })
+    const r = await call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf', of: 'Nobody' })
+    expect(r).toEqual({ error: 'No family member called "Nobody".' })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 
@@ -388,6 +436,22 @@ describe('provider odds and ends', () => {
     delete process.env.JIRA_API_TOKEN
     await expect(jira.ping()).rejects.toThrow('JIRA_BASE_URL')
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('refuses to attach when unconfigured, without a network call', async () => {
+    delete process.env.JIRA_API_TOKEN
+    await expect(
+      jira.attachFile('HTL-1', { filename: 'x.pdf', mimeType: 'application/pdf', bytes: new Uint8Array([1]) }),
+    ).rejects.toThrow('JIRA_BASE_URL')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('fills in defaults when the upload reply is sparse', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => undefined, text: async () => '' })
+    const made = await jira.attachFile('HTL-1', {
+      filename: 'Notice.pdf', mimeType: 'application/pdf', bytes: new TextEncoder().encode('%PDF'),
+    })
+    expect(made).toEqual({ id: '', filename: 'Notice.pdf', size: 4 })
   })
 
   it('reads sparse ADF: text nodes without text, nodes without content or type, an empty doc', () => {

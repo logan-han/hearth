@@ -130,6 +130,11 @@ describe('withModelFallback', () => {
     await expect(withModelFallback(async () => 'x', [])).rejects.toThrow(/GEMINI_API_KEY/)
   })
 
+  it('wraps a non-Error rejection so the caller always gets an Error', async () => {
+    const fn = vi.fn(async () => { throw 'plain string failure' })
+    await expect(withModelFallback(fn, [slot('a')])).rejects.toThrow('plain string failure')
+  })
+
   it('retries an empty completion on the next model', async () => {
     const fn = vi.fn(async (s: ModelSlot) => {
       const text = s.name === 'gemini' ? '' : 'a real answer'

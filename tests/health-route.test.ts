@@ -82,4 +82,44 @@ describe('the health probe', () => {
     ;({ items } = await (await GET()).json())
     expect(items[0]).toMatchObject({ name: 'Jev', ok: false, error: expect.stringContaining('401') })
   })
+
+  it('also probes PocketSmith, Notion and Jira with their cheapest calls', async () => {
+    await createSession({ email: 'a@b.com', name: 'A', provider: 'google', role: 'admin' })
+    process.env.POCKETSMITH_DEVELOPER_KEY = 'ps-key'
+    process.env.NOTION_TOKEN = 'ntn_x'
+    process.env.JIRA_BASE_URL = 'https://example.atlassian.net'
+    process.env.JIRA_EMAIL = 'rowan@hearth.example'
+    process.env.JIRA_API_TOKEN = 'jira-token'
+    fetchMock.mockImplementation(async (u: unknown) => {
+      const url = String(u)
+      if (url.includes('pocketsmith.com')) return { ok: true, status: 200, json: async () => ({ id: 42 }), text: async () => '' }
+      if (url.includes('notion.com')) return { ok: true, status: 200, json: async () => ({ results: [] }), text: async () => '' }
+      if (url.includes('atlassian.net')) return { ok: false, status: 401, json: async () => ({}), text: async () => 'Unauthorized' }
+      throw new Error(`unexpected probe: ${url}`)
+    })
+
+    const { items } = await (await GET()).json()
+    const by = (n: string) => items.find((i: { name: string }) => i.name === n)
+    expect(by('PocketSmith').ok).toBe(true)
+    expect(by('Notion').ok).toBe(true)
+    expect(by('Jira').ok).toBe(false)
+    expect(String(by('Jira').error)).toContain('401')
+  })
+
+  it('reports a probe that never answers as a timeout, without waiting six seconds for it', async () => {
+    await createSession({ email: 'a@b.com', name: 'A', provider: 'google', role: 'admin' })
+    process.env.UP_API_TOKEN = 'dead-token'
+    fetchMock.mockImplementation(() => new Promise(() => {}))
+    vi.useFakeTimers()
+    try {
+      const res = GET()
+      // Once the probe has called out, its six-second clock is running.
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
+      await vi.advanceTimersByTimeAsync(6000)
+      const { items } = await (await res).json()
+      expect(items).toEqual([{ name: 'Up Bank', ok: false, error: 'No answer within 6s.' }])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

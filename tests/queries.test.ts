@@ -41,6 +41,12 @@ describe('members', () => {
     expect(revoked?.isAdmin).toBe(false)
   })
 
+  it('grants access when set to true', async () => {
+    await q.upsertMember('222', 'Guest')
+    const granted = await q.setMemberAllowed('222', true)
+    expect(granted?.allowed).toBe(true)
+  })
+
   it('lists only allowed members', async () => {
     await q.upsertMember('111', 'Rowan', { allowed: true })
     await q.upsertMember('222', 'Guest')
@@ -76,6 +82,20 @@ describe('chats and strangers', () => {
     await q.noteStranger('-100', { id: '9', name: 'A' })
     await q.rememberChat('-100', 'group', 'Renamed')
     expect(await q.strangersIn('-100')).toHaveLength(1)
+  })
+
+  it('treats a non-array strangers value as nobody, rather than throwing', async () => {
+    const { db } = await import('@/lib/db')
+    const { sql } = await import('drizzle-orm')
+    await db().execute(sql`update chats set strangers = '{"not":"an array"}' where chat_id = '-100'`)
+    expect(await q.strangersIn('-100')).toEqual([])
+  })
+
+  it('treats unparseable strangers text as nobody, rather than throwing', async () => {
+    const { db } = await import('@/lib/db')
+    const { sql } = await import('drizzle-orm')
+    await db().execute(sql`update chats set strangers = 'not json at all' where chat_id = '-100'`)
+    expect(await q.strangersIn('-100')).toEqual([])
   })
 })
 
@@ -116,6 +136,25 @@ describe('messages', () => {
     await q.recordMessage({ chatId: 'b', role: 'user', content: 'keep' })
     await q.pruneMessages('a', 1)
     expect(await q.recentMessages('b')).toHaveLength(1)
+  })
+})
+
+describe('messagesSince', () => {
+  it('returns recent talk across every chat, oldest first, with a default limit', async () => {
+    await q.recordMessage({ chatId: 'a', authorName: 'Rowan', role: 'user', content: 'one' })
+    await q.recordMessage({ chatId: 'b', authorName: 'Ada', role: 'user', content: 'two' })
+    const rows = await q.messagesSince(24)
+    expect(rows.map((r) => r.content)).toEqual(['one', 'two'])
+    expect(rows[0]).toMatchObject({ chatId: 'a', authorName: 'Rowan', role: 'user' })
+  })
+
+  it('excludes talk from before the window', async () => {
+    const id = await q.recordMessage({ chatId: 'a', role: 'user', content: 'old' })
+    const { db } = await import('@/lib/db')
+    const { sql } = await import('drizzle-orm')
+    await db().execute(sql`update messages set created_at = now() - interval '2 hours' where id = ${id}`)
+    await q.recordMessage({ chatId: 'a', role: 'user', content: 'new' })
+    expect((await q.messagesSince(1)).map((r) => r.content)).toEqual(['new'])
   })
 })
 
@@ -374,6 +413,12 @@ describe('email drafts', () => {
     expect(d.status).toBe('pending')
   })
 
+  it('joins several cc addresses', async () => {
+    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
+    const d = await q.createDraft({ chatId: 'c', memberId: m.id, provider: 'google', to: ['a@b.com'], cc: ['c@d.com', 'e@f.com'], subject: 's', body: 'b' })
+    expect(d.cc).toBe('c@d.com, e@f.com')
+  })
+
   it('can only be sent once', async () => {
     const d = await draft()
     expect(await q.markDraft(d.id, 'sent')).toBe(true)
@@ -418,6 +463,19 @@ describe('shared lists', () => {
     expect((await q.listContents(l.id)).map((i) => i.content)).toEqual(['b', 'a'])
   })
 
+  it('matches a needle longer than the item against the item it contains, and skips a blank needle', async () => {
+    const l = await q.findOrCreateList('shopping')
+    await q.addListItems(l.id, ['2L milk', 'eggs'])
+    const done = await q.markListItems(l.id, ['  ', '2L milk please'], true)
+    expect(done.map((d) => d.content)).toEqual(['2L milk'])
+  })
+
+  it('marks nothing when no needle matches anything', async () => {
+    const l = await q.findOrCreateList('shopping')
+    await q.addListItems(l.id, ['eggs'])
+    expect(await q.markListItems(l.id, ['bacon'], true)).toEqual([])
+  })
+
   it('clears only ticked items by default', async () => {
     const l = await q.findOrCreateList('shopping')
     await q.addListItems(l.id, ['a', 'b'])
@@ -437,6 +495,12 @@ describe('shared lists', () => {
   it('counts an empty list as zero rather than omitting it', async () => {
     await q.findOrCreateList('packing')
     expect(await q.allLists()).toEqual([{ name: 'packing', open: 0 }])
+  })
+
+  it('sorts several lists alphabetically by name', async () => {
+    await q.findOrCreateList('zzz list')
+    await q.findOrCreateList('shopping')
+    expect((await q.allLists()).map((l) => l.name)).toEqual(['shopping', 'zzz list'])
   })
 
   it('adding nothing is a no-op', async () => {
@@ -470,6 +534,15 @@ describe('event proposals', () => {
     await make()
     await make()
     expect(await q.pendingProposals('c')).toHaveLength(2)
+  })
+
+  it('lists proposals across every chat when none is named', async () => {
+    await make('s1')
+    await q.addProposal({
+      chatId: 'other', title: 'Assembly',
+      startsAt: new Date('2030-09-09T23:00:00Z'), endsAt: new Date('2030-09-10T00:00:00Z'),
+    })
+    expect(await q.pendingProposals(undefined, new Date('2030-01-01T00:00:00Z'))).toHaveLength(2)
   })
 
   it('settles exactly once', async () => {

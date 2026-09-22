@@ -60,6 +60,14 @@ describe('only an admin may manage the family', () => {
 describe('adding and editing a member', () => {
   beforeEach(asAdmin)
 
+  it('lists members for a signed-in admin', async () => {
+    await post({ telegramUserId: '999', name: 'Ada' })
+    const res = await GET()
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.members.some((m: { telegramUserId: string }) => m.telegramUserId === '999')).toBe(true)
+  })
+
   it('adds someone with an id, a name and an email', async () => {
     const res = await post({ telegramUserId: '999', name: 'Ada', email: 'Ada@Hearth.Example' })
     expect(res.status).toBe(200)

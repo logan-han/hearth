@@ -55,6 +55,29 @@ describe('the tick grid', () => {
     // Adelaide sits half an hour off UTC, so an on-the-hour UTC tick is half past there.
     expect(describeGrid(hourly, 'Australia/Adelaide')).toBe('hourly, at 30 past')
   })
+
+  it('falls back to naming the last tick when the interval does not evenly divide an hour', () => {
+    const odd: TickGrid = { everyMinutes: 7, anchor: new Date('2026-09-14T09:00:00Z') }
+    expect(describeGrid(odd, TZ)).toMatch(/^every 7 minutes, last at /)
+    expect(suggestAligned(odd, '45 7 * * *', now, TZ)).toBeNull()
+  })
+
+  it('has nothing to suggest for a cron with the wrong number of fields', () => {
+    expect(suggestAligned(hourly, '0 * * *', now, TZ)).toBeNull()
+  })
+
+  it('rounds a minute up to the next tick within the same hour when one exists', () => {
+    expect(suggestAligned(quarterly, '10 7 * * *', now, TZ)).toBe('15 7 * * *')
+  })
+
+  it('leaves nothing to round down to when the grid does not start at the hour', () => {
+    const offset: TickGrid = { everyMinutes: 20, anchor: new Date('2026-09-14T09:05:00Z') }
+    expect(suggestAligned(offset, '2 7 * * *', now, TZ)).toBe('5 7 * * *')
+  })
+
+  it('has nothing left to suggest once the only candidate already matches the input', () => {
+    expect(suggestAligned(quarterly, '0,15,30,45 * * * *', now, TZ)).toBeNull()
+  })
 })
 
 describe('the scheduler pulse', () => {

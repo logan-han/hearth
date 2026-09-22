@@ -1,6 +1,19 @@
-import { describe, it, expect } from 'vitest'
-import { buildCalendar } from '@/lib/ics'
+import { describe, it, expect, vi } from 'vitest'
 import type { FamilyEvent } from '@/lib/db/schema'
+
+// The real ics library by default, so every other test exercises real output; a test
+// that needs to force the error/no-output path overrides it just for that one call.
+vi.mock('ics', async (orig) => {
+  const actual = await orig<typeof import('ics')>()
+  return { ...actual, createEvents: vi.fn(actual.createEvents) }
+})
+const { buildCalendar } = await import('@/lib/ics')
+const { createEvents } = await import('ics')
+// createEvents is overloaded (a callback form returns void); the mock always uses
+// the synchronous (events, headerAttributes?) => ReturnObject form the app calls.
+const mockedCreateEvents = createEvents as unknown as {
+  mockReturnValueOnce: (v: { error: Error | null; value: string | null }) => void
+}
 
 const MEL = 'Australia/Melbourne'
 
@@ -114,5 +127,22 @@ describe('buildCalendar', () => {
       MEL,
     )
     expect(ics.match(/BEGIN:VEVENT/g)).toHaveLength(3)
+  })
+
+  it('throws whatever the ics library reports', () => {
+    mockedCreateEvents.mockReturnValueOnce({ error: new Error('ics blew up'), value: null })
+    expect(() => buildCalendar([event()], 'Family', MEL)).toThrow('ics blew up')
+  })
+
+  it('throws a fallback error when ics reports neither an error nor any output', () => {
+    mockedCreateEvents.mockReturnValueOnce({ error: null, value: null })
+    expect(() => buildCalendar([event()], 'Family', MEL)).toThrow('ICS generation produced no output')
+  })
+
+  it('adds the refresh hint even when ics has not already included one', () => {
+    mockedCreateEvents.mockReturnValueOnce({ error: null, value: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n' })
+    const ics = buildCalendar([event()], 'Family', MEL)
+    expect(ics).toContain('BEGIN:VCALENDAR\r\nX-WR-TIMEZONE:')
+    expect(ics).toContain('X-PUBLISHED-TTL:PT15M')
   })
 })

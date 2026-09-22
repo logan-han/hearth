@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { required, optional, appUrl, idSet } from '@/lib/env'
+import { required, optional, appUrl, idSet, reasoningLevel } from '@/lib/env'
 
-const KEYS = ['APP_URL', 'VERCEL_PROJECT_PRODUCTION_URL', 'VERCEL_URL', 'SOME_KEY']
+const KEYS = ['APP_URL', 'VERCEL_PROJECT_PRODUCTION_URL', 'VERCEL_URL', 'SOME_KEY', 'LLM_REASONING']
 
 beforeEach(() => {
   for (const k of KEYS) delete process.env[k]
@@ -60,5 +60,18 @@ describe('idSet', () => {
   it('is a set, so duplicates collapse', () => {
     process.env.SOME_KEY = '1,1,2'
     expect(idSet('SOME_KEY').size).toBe(2)
+  })
+})
+
+describe('reasoningLevel', () => {
+  it('returns the level when it is one of the known ones', () => {
+    process.env.LLM_REASONING = 'high'
+    expect(reasoningLevel()).toBe('high')
+  })
+
+  it('is undefined when unset or not a recognised level', () => {
+    expect(reasoningLevel()).toBeUndefined()
+    process.env.LLM_REASONING = 'extreme'
+    expect(reasoningLevel()).toBeUndefined()
   })
 })

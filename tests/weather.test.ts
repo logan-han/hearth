@@ -78,6 +78,40 @@ describe('the weather tool', () => {
     expect(days[1]).toEqual({ day: '2026-09-02', min: 9, max: 21, condition: 'Clear', rain_mm: 0 })
   })
 
+  it('picks the commonest condition when a day mixes more than one', async () => {
+    fetchMock.mockImplementation(async (u: unknown) => {
+      const url = String(u)
+      if (url.includes('/geo/')) return json([{ name: 'Melbourne', lat: -37.8, lon: 144.9, country: 'AU' }])
+      if (url.includes('/data/2.5/weather')) return json({ weather: [{ description: 'overcast' }], main: { temp: 12 } })
+      if (url.includes('/data/2.5/forecast')) {
+        return json({
+          city: { timezone: 36000 },
+          list: [
+            { dt: DAY1, main: { temp_min: 10, temp_max: 15 }, weather: [{ main: 'Rain' }] },
+            { dt: DAY1 + 3 * 3600, main: { temp_min: 10, temp_max: 15 }, weather: [{ main: 'Rain' }] },
+            { dt: DAY1 + 6 * 3600, main: { temp_min: 10, temp_max: 15 }, weather: [{ main: 'Clouds' }] },
+          ],
+        })
+      }
+      return json({}, false, 404)
+    })
+    const r = await call({})
+    const days = r.days as { condition: string }[]
+    expect(days[0].condition).toBe('Rain')
+  })
+
+  it('includes the state in the place name when the geocoder returns one', async () => {
+    fetchMock.mockImplementation(async (u: unknown) => {
+      const url = String(u)
+      if (url.includes('/geo/')) return json([{ name: 'Hillside', lat: -37.5, lon: 143.8, state: 'Victoria', country: 'AU' }])
+      if (url.includes('/data/2.5/weather')) return json({ weather: [{ description: 'clear' }], main: { temp: 10 } })
+      if (url.includes('/data/2.5/forecast')) return json({ list: [] })
+      return json({}, false, 404)
+    })
+    const r = await call({ location: 'Hillside' })
+    expect(r.place).toBe('Hillside, Victoria, AU')
+  })
+
   it('honours the imperial setting', async () => {
     process.env.UNITS = 'imperial'
     happyWeather()

@@ -37,6 +37,11 @@ describe('nextRun in Australia/Melbourne', () => {
     expect(next.getTime() - from.getTime()).toBeLessThanOrEqual(5 * 60 * 1000)
   })
 
+  it('returns null for an expression that can never fire', () => {
+    // 31 February never happens, so croner can never find a next occurrence.
+    expect(nextRun('0 0 31 2 *', new Date('2026-01-01T00:00:00Z'), MEL)).toBeNull()
+  })
+
   it('validates cron expressions', () => {
     expect(isValidCron('0 19 * * 1')).toBe(true)
     expect(isValidCron('*/5 * * * *')).toBe(true)

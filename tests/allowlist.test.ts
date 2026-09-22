@@ -21,9 +21,10 @@ vi.mock('@/lib/db/queries', () => ({
   deleteConnection: vi.fn(async () => {}),
   calendarToken: vi.fn(async () => 'tok'),
 }))
-vi.mock('@/lib/telegram', () => ({
-  send, typing: vi.fn(), bot: () => ({ api: { getMe: async () => ({ id: 1, username: 'heart_family_bot' }) } }),
-}))
+// One bot instance, as in a warm lambda, so its identity is asked once; a test swaps it to act out a token change.
+const getMe = vi.fn(async () => ({ id: 1, username: 'heart_family_bot' }))
+let theBot = { api: { getMe } }
+vi.mock('@/lib/telegram', () => ({ send, typing: vi.fn(), bot: () => theBot }))
 const runAgent = vi.fn(async () => ({ text: 'sure', notices: [], model: 'test' }))
 const shouldChimeIn = vi.fn(async () => false)
 vi.mock('@/lib/agent', () => ({ runAgent, shouldChimeIn }))
@@ -192,6 +193,33 @@ describe('ambient mode', () => {
     } finally {
       delete process.env.AMBIENT_MODE
     }
+  })
+})
+
+describe("the bot's own identity", () => {
+  it('is asked of Telegram once per bot, and asked again after the token changes', async () => {
+    theBot = { api: { getMe } }
+    await processUpdate(message({ from: '111', chat: '111', type: 'private' }))
+    await processUpdate(message({ from: '111', chat: '111', type: 'private' }))
+    expect(getMe).toHaveBeenCalledTimes(1)
+    theBot = { api: { getMe } }
+    await processUpdate(message({ from: '111', chat: '111', type: 'private' }))
+    expect(getMe).toHaveBeenCalledTimes(2)
+    expect(send).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('housekeeping after a reply', () => {
+  it('never takes back a delivered reply when pruning or summarising fails', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { pruneMessages } = await import('@/lib/db/queries')
+    const { maybeSummarise } = await import('@/lib/summary')
+    vi.mocked(pruneMessages).mockRejectedValueOnce(new Error('db busy'))
+    vi.mocked(maybeSummarise).mockRejectedValueOnce(new Error('model down'))
+    await processUpdate(message({ from: '111', chat: '111', type: 'private' }))
+    expect(send).toHaveBeenCalledWith('111', 'sure', undefined)
+    expect(errSpy).toHaveBeenCalledWith('[telegram] prune failed:', expect.any(Error))
+    expect(errSpy).toHaveBeenCalledWith('[telegram] summary failed:', expect.any(Error))
   })
 })
 
