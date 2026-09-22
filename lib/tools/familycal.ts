@@ -3,7 +3,7 @@ import { z } from 'zod'
 import {
   addFamilyEvent, listFamilyEvents, cancelFamilyEvent, updateFamilyEvent, getFamilyEvent, calendarToken,
 } from '../db/queries'
-import { localToUtc, formatLocal, formatLocalDate } from '../cron'
+import { localToUtc, localDateKey, formatLocal, formatLocalDate } from '../cron'
 import { timezone, appUrl } from '../env'
 import { announce, type ToolContext } from './context'
 
@@ -13,6 +13,9 @@ const LOCAL_DATETIME = z
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
 const DAY_MS = 86_400_000
+
+/** The date after a YYYY-MM-DD date, by the calendar rather than by adding 24 hours across a clock change. */
+const dayAfter = (date: string) => new Date(Date.parse(`${date}T00:00:00Z`) + DAY_MS).toISOString().slice(0, 10)
 
 /**
  * Read a start and optional end the way the model gives them. A date with no
@@ -144,10 +147,21 @@ export function familyCalendarTools(ctx: ToolContext) {
               : new Date(times.startsAt.getTime() + (existing.endsAt.getTime() - existing.startsAt.getTime()))
             Object.assign(patch, { startsAt: times.startsAt, endsAt, allDay })
           } else {
+            // Made all-day with no new start, a timed event covers the days it
+            // was on, not its old hours under an all-day flag (09:00 to 10:00
+            // would reach a feed as a day that ends where it begins).
+            const toWholeDays = allDay && !existing.allDay
+            const startsAt = toWholeDays ? localToUtc(localDateKey(existing.startsAt)) : existing.startsAt
             const endsAt = end !== undefined
               ? (allDay ? localToUtc(end.trim().slice(0, 10)) : localToUtc(end))
-              : existing.endsAt
-            Object.assign(patch, { endsAt: endsAt.getTime() > existing.startsAt.getTime() ? endsAt : new Date(existing.startsAt.getTime() + (allDay ? DAY_MS : 3_600_000)), allDay })
+              : toWholeDays
+                ? localToUtc(dayAfter(localDateKey(new Date(existing.endsAt.getTime() - 1))))
+                : existing.endsAt
+            Object.assign(patch, {
+              ...(toWholeDays ? { startsAt } : {}),
+              endsAt: endsAt.getTime() > startsAt.getTime() ? endsAt : new Date(startsAt.getTime() + (allDay ? DAY_MS : 3_600_000)),
+              allDay,
+            })
           }
         }
         if (Object.keys(patch).length === 0) return { error: 'Nothing to change: give a new title, time, location or description.' }

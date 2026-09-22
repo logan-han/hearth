@@ -635,6 +635,39 @@ describe('family calendar tools', () => {
     expect(e).toMatchObject({ allDay: false, startsAt: new Date('2026-08-31T23:00:00Z'), endsAt: new Date('2026-09-01T00:30:00Z') })
   })
 
+  it('turns a timed event into the whole day it was on when only all_day is set', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Swim', start: '2026-09-01T09:00', end: '2026-09-01T10:00', all_day: false })
+    const r = await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, all_day: true })
+    expect(r).toMatchObject({ all_day: true, changed: ['start', 'end', 'all-day'] })
+    const [e] = await q.listFamilyEvents(new Date('2026-08-30'), new Date('2026-09-05'))
+    // Midnight to midnight in Melbourne, 1 September.
+    expect(e).toMatchObject({ allDay: true, startsAt: new Date('2026-08-31T14:00:00Z'), endsAt: new Date('2026-09-01T14:00:00Z') })
+  })
+
+  it('covers every day a timed event touched once made all-day, but not a day it ended on at midnight', async () => {
+    const camp = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Camp', start: '2026-09-01T18:00', end: '2026-09-03T10:00', all_day: false })
+    const gig = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Gig', start: '2026-09-05T22:00', end: '2026-09-06T00:00', all_day: false })
+    for (const id of [camp.id, gig.id]) await call(familyCalendarTools(ctx), 'update_family_event', { id, all_day: true })
+    const rows = await q.listFamilyEvents(new Date('2026-08-30'), new Date('2026-09-10'))
+    expect(rows.find((e) => e.id === camp.id)).toMatchObject({ startsAt: new Date('2026-08-31T14:00:00Z'), endsAt: new Date('2026-09-03T14:00:00Z') })
+    expect(rows.find((e) => e.id === gig.id)).toMatchObject({ startsAt: new Date('2026-09-04T14:00:00Z'), endsAt: new Date('2026-09-05T14:00:00Z') })
+  })
+
+  it('ends a day made all-day at the next local midnight, across the clock going back too', async () => {
+    // 4 April 2027 runs 25 hours in Melbourne; adding 24 would stop at 11pm.
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Swim', start: '2027-04-04T09:00', all_day: false })
+    await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, all_day: true })
+    const [e] = await q.listFamilyEvents(new Date('2027-04-01'), new Date('2027-04-08'))
+    expect(e).toMatchObject({ startsAt: new Date('2027-04-03T13:00:00Z'), endsAt: new Date('2027-04-04T14:00:00Z') })
+  })
+
+  it('moves the start to its day too when made all-day with a new end', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Swim', start: '2026-09-01T09:00', all_day: false })
+    await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, all_day: true, end: '2026-09-03' })
+    const [e] = await q.listFamilyEvents(new Date('2026-08-30'), new Date('2026-09-05'))
+    expect(e).toMatchObject({ allDay: true, startsAt: new Date('2026-08-31T14:00:00Z'), endsAt: new Date('2026-09-02T14:00:00Z') })
+  })
+
   it('falls back to a default length when a new end is not after the start', async () => {
     const timed = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Swim', start: '2026-09-01T09:00', end: '2026-09-01T10:00', all_day: false })
     await call(familyCalendarTools(ctx), 'update_family_event', { id: timed.id, end: '2026-09-01T08:00' })
