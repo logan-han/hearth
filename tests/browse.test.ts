@@ -3,6 +3,8 @@ import type { ToolContext } from '@/lib/tools/context'
 
 const extractText = vi.hoisted(() => vi.fn())
 vi.mock('unpdf', () => ({ extractText }))
+const lookup = vi.hoisted(() => vi.fn())
+vi.mock('node:dns/promises', () => ({ lookup }))
 
 const { browseTools, htmlToText } = await import('@/lib/tools/browse')
 
@@ -18,11 +20,16 @@ const page = (html: string, type = 'text/html', url = 'https://school.example/x'
   headers: new Headers({ 'content-type': type }),
   arrayBuffer: async () => new TextEncoder().encode(html).buffer,
 })
+const moved = (location: string, status = 302, extra: object = {}) => ({ ok: false, status, url: '', headers: new Headers({ location }), ...extra })
+const resolvesTo = (address: string) => [{ address, family: address.includes(':') ? 6 : 4 }]
 
 beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
   fetchMock.mockReset()
   extractText.mockReset()
+  // A documentation address stands in for any public host.
+  lookup.mockReset()
+  lookup.mockResolvedValue(resolvesTo('203.0.113.10'))
   delete process.env.TAVILY_API_KEY
 })
 afterEach(() => vi.unstubAllGlobals())
@@ -76,16 +83,60 @@ describe('read_url', () => {
     expect(String(r.text)).toContain('One guest per family')
   })
 
-  it('refuses private addresses outright', async () => {
-    for (const url of ['http://localhost/x', 'http://127.0.0.1/x', 'http://192.168.1.10/x', 'http://169.254.169.254/meta']) {
-      expect(String((await read(url)).error)).toContain('public')
+  it('refuses private addresses outright, however they are written', async () => {
+    for (const url of [
+      'http://localhost/x', 'http://127.0.0.1/x', 'http://192.168.1.10/x', 'http://169.254.169.254/meta',
+      'http://2130706433/x', 'http://[::1]/x', 'http://[::ffff:127.0.0.1]/x', 'http://[fd00::1]/x', 'http://[fe80::1]/x',
+      'http://100.64.0.1/x', 'http://printer.local/x', 'http://metadata.google.internal/x', 'ftp://files.example/x',
+    ]) {
+      expect(String((await read(url)).error), url).toContain('public')
     }
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(lookup).not.toHaveBeenCalled()
+  })
+
+  it('refuses a public name that resolves inward, even beside a public address', async () => {
+    lookup.mockResolvedValue([...resolvesTo('203.0.113.10'), ...resolvesTo('::ffff:10.0.0.5')])
+    expect(String((await read('https://sneaky.example/x')).error)).toContain('public')
+    expect(lookup).toHaveBeenCalledWith('sneaky.example', { all: true })
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('refuses a redirect that lands somewhere private', async () => {
-    fetchMock.mockResolvedValue(page('<p>hi</p>', 'text/html', 'http://192.168.1.5/admin'))
-    expect(String((await read('https://bit.example/short')).error)).toContain('private')
+  it('never requests a redirect hop that is private, by address or by what its name resolves to', async () => {
+    lookup.mockImplementation(async (host: string) => resolvesTo(host === 'intranet.example' ? '10.1.2.3' : '203.0.113.10'))
+    for (const location of ['http://192.168.1.5/admin', 'https://intranet.example/admin']) {
+      fetchMock.mockReset()
+      fetchMock.mockResolvedValueOnce(moved(location))
+      expect(String((await read('https://bit.example/short')).error)).toBe('That address redirected somewhere private.')
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it('follows public redirects one hop at a time, relative ones included, and says where it landed', async () => {
+    const cancel = vi.fn(async () => {})
+    fetchMock
+      .mockResolvedValueOnce(moved('https://news.example/letter', 301, { body: { cancel } }))
+      .mockResolvedValueOnce(moved('/letter/final'))
+      .mockResolvedValueOnce(page('<p>Newsletter</p>'))
+    const r = await read('https://bit.example/short')
+    expect(r.url).toBe('https://news.example/letter/final')
+    expect(fetchMock.mock.calls.map(([u]) => String(u))).toEqual([
+      'https://bit.example/short', 'https://news.example/letter', 'https://news.example/letter/final',
+    ])
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: 'manual' })
+    expect(cancel).toHaveBeenCalled()
+  })
+
+  it('gives up on redirects that never land anywhere', async () => {
+    fetchMock.mockImplementation(async () => moved('/again'))
+    expect(String((await read('https://loop.example/start')).error)).toBe('That address redirected too many times.')
+    expect(fetchMock).toHaveBeenCalledTimes(6)
+  })
+
+  it('says so when the name does not exist', async () => {
+    lookup.mockRejectedValue(new Error('getaddrinfo ENOTFOUND nowhere.example'))
+    expect(String((await read('https://nowhere.example/x')).error)).toBe('That address could not be found.')
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('spots a template-heavy form shell even when its labels add up to real text', async () => {

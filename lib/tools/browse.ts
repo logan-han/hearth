@@ -1,3 +1,5 @@
+import { lookup } from 'node:dns/promises'
+import { BlockList, isIP } from 'node:net'
 import { tool } from 'ai'
 import { z } from 'zod'
 import type { ToolContext } from './context'
@@ -13,12 +15,61 @@ import { describeError } from '../errors'
 
 const MAX_BYTES = 3 * 1024 * 1024
 const MAX_CHARS = 9000
+const MAX_REDIRECTS = 5
 
-/** The bot fetches URLs out of family chat; it must never reach inward. */
-function blockedHost(hostname: string): boolean {
-  const h = hostname.toLowerCase()
-  if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal')) return true
-  return /^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1)/.test(h)
+/**
+ * Where the bot must never reach, whatever name led there: loopback, the
+ * private ranges, link-local (cloud metadata lives at 169.254.169.254),
+ * carrier-grade NAT, multicast and the reserved blocks. An IPv4 address
+ * written as IPv6 (::ffff:127.0.0.1) is checked against the IPv4 rules.
+ */
+const INWARD = new BlockList()
+for (const [net, bits] of [
+  ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
+  ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['224.0.0.0', 3],
+] as const) INWARD.addSubnet(net, bits, 'ipv4')
+for (const [net, bits] of [['::', 127], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8]] as const) INWARD.addSubnet(net, bits, 'ipv6')
+
+const inward = (address: string) => INWARD.check(address, isIP(address) === 6 ? 'ipv6' : 'ipv4')
+
+/**
+ * The bot fetches URLs out of family chat; it must never reach inward. A name
+ * is judged by every address it resolves to, since the fetch may use any of
+ * them: a public name pointed at 127.0.0.1 is as private as 127.0.0.1. The
+ * fetch resolves the name again to connect, so one whose answer changes in
+ * between (DNS rebinding) is beyond this check.
+ */
+async function readable(url: URL): Promise<boolean> {
+  if (!/^https?:$/.test(url.protocol)) return false
+  const host = url.hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1')
+  if (host === 'localhost' || /\.(?:localhost|local|internal)$/.test(host)) return false
+  if (isIP(host)) return !inward(host)
+  return (await lookup(host, { all: true })).every((a) => !inward(a.address))
+}
+
+/**
+ * Redirects are followed by hand so each hop is checked before it is
+ * requested: with redirect 'follow', a public link that bounces to a private
+ * address has been fetched by the time the final URL can be looked at.
+ */
+async function fetchPublic(start: URL): Promise<{ res: Response; url: URL } | { error: string }> {
+  const signal = AbortSignal.timeout(12_000)
+  let url = start
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    if (!(await readable(url))) {
+      return { error: hop === 0 ? 'Only public http(s) addresses can be read.' : 'That address redirected somewhere private.' }
+    }
+    const res = await fetch(url, {
+      redirect: 'manual',
+      signal,
+      headers: { 'user-agent': 'Mozilla/5.0 (compatible; Hearth family assistant)' },
+    })
+    const location = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null
+    if (!location) return { res, url }
+    await res.body?.cancel()
+    url = new URL(location, url)
+  }
+  return { error: 'That address redirected too many times.' }
 }
 
 export function htmlToText(html: string): string {
@@ -88,19 +139,12 @@ export function browseTools(_ctx: ToolContext) {
         } catch {
           return { error: `"${url}" is not a valid address.` }
         }
-        if (!/^https?:$/.test(target.protocol) || blockedHost(target.hostname)) {
-          return { error: 'Only public http(s) addresses can be read.' }
-        }
 
         try {
-          const res = await fetch(target, {
-            redirect: 'follow',
-            signal: AbortSignal.timeout(12_000),
-            headers: { 'user-agent': 'Mozilla/5.0 (compatible; Hearth family assistant)' },
-          })
-          if (blockedHost(new URL(res.url).hostname)) {
-            return { error: 'That address redirected somewhere private.' }
-          }
+          const fetched = await fetchPublic(target)
+          if ('error' in fetched) return fetched
+          const { res } = fetched
+          const at = fetched.url.href
           if (!res.ok) return { error: `The page answered ${res.status}.` }
 
           const type = res.headers.get('content-type') ?? ''
@@ -110,31 +154,32 @@ export function browseTools(_ctx: ToolContext) {
           if (type.includes('pdf') || target.pathname.toLowerCase().endsWith('.pdf')) {
             const { extractText } = await import('unpdf')
             const { text, totalPages } = await extractText(new Uint8Array(buf), { mergePages: true })
-            return { url: res.url, kind: 'pdf', pages: totalPages, text: text.slice(0, MAX_CHARS) }
+            return { url: at, kind: 'pdf', pages: totalPages, text: text.slice(0, MAX_CHARS) }
           }
 
           const raw = new TextDecoder().decode(buf)
           if (type.includes('html') || /^\s*</.test(raw)) {
             const text = htmlToText(raw)
             if (render || looksLikeShell(raw, text)) {
-              const rendered = await renderViaTavily(res.url)
+              const rendered = await renderViaTavily(at)
               if (rendered && rendered.trim().length > text.length) {
-                return { url: res.url, kind: 'page', rendered: true, text: rendered.slice(0, MAX_CHARS) }
+                return { url: at, kind: 'page', rendered: true, text: rendered.slice(0, MAX_CHARS) }
               }
               return {
-                url: res.url,
+                url: at,
                 kind: 'page',
                 text: text.slice(0, MAX_CHARS),
                 note:
                   'This page builds its content in the browser and could not be fully rendered here, so this may be templates rather than content. Say so rather than guessing at what it holds.',
               }
             }
-            return { url: res.url, kind: 'page', text: text.slice(0, MAX_CHARS) }
+            return { url: at, kind: 'page', text: text.slice(0, MAX_CHARS) }
           }
 
-          return { url: res.url, kind: type.split(';')[0] || 'file', text: raw.slice(0, MAX_CHARS) }
+          return { url: at, kind: type.split(';')[0] || 'file', text: raw.slice(0, MAX_CHARS) }
         } catch (e) {
           const reason = describeError(e)
+          if (reason.includes('ENOTFOUND')) return { error: 'That address could not be found.' }
           return { error: reason.includes('timeout') || reason.includes('timed out') ? 'The page took too long to answer.' : reason }
         }
       },
