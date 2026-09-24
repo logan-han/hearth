@@ -452,12 +452,18 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
   try {
     const review = await reviewDraft({ label: a.label, draft, evidence, deadline: deadline - DECISION_RESERVE_MS })
     if (review.message === null) {
-      const why = review.rewriteFailed
-        ? `claims failed the check and could not be cut out (${review.rewriteFailed}): ${review.unsupported.join(' | ')}`
-        : `no claim survived the check: ${review.unsupported.join(' | ')}`
+      // A rewrite the tick's own clock stopped is no judge refusing the
+      // draft, only one not asked in time, so what the run read stays new,
+      // as it does for a decision the clock stopped.
+      const outOfTime = review.rewriteFailed !== undefined && Date.now() >= deadline - DECISION_RESERVE_MS - 1_000
+      const why = outOfTime
+        ? `the tick ran out of time to cut out claims that failed the check: ${review.unsupported.join(' | ')}`
+        : review.rewriteFailed
+          ? `claims failed the check and could not be cut out (${review.rewriteFailed}): ${review.unsupported.join(' | ')}`
+          : `no claim survived the check: ${review.unsupported.join(' | ')}`
       console.warn(`[tick] ${a.label}: held back, ${why}`)
       await tellAdminQuietly(member, heldBack(a, why, draft))
-      return null
+      return outOfTime ? UNJUDGED : null
     }
     if (review.unsupported.length) {
       console.warn(`[tick] ${a.label}: cut ${review.unsupported.length} unsupported claim(s): ${review.unsupported.join(' | ')}`)
@@ -605,7 +611,16 @@ async function deliver(
   } catch (err) {
     // The start is in the chat, and the next run would post it all again:
     // spent like a whole post, with what went on record and an admin told.
-    if (!(err instanceof PartlySent)) throw err
+    if (!(err instanceof PartlySent)) {
+      // Nothing reached the chat, but a run that wrote on what it read spends
+      // it all the same, or the next would write it again; the draft is then
+      // all there is of it, so an admin gets that.
+      if (result.wrote?.length) {
+        await spent().catch((e) => console.error('[tick] could not spend what the run read:', describeError(e)))
+        await tellAdminQuietly(member, heldBack(a, `the post could not be sent (${describeError(err)}) after the run had already acted on what it read.`, message))
+      }
+      throw err
+    }
     posted = err.sent
     broken = err
   }

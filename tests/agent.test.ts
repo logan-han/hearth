@@ -978,8 +978,27 @@ describe('a reply that reports a change no tool made', () => {
       expect((await runAgent(asked)).text).toBe(told)
       expect(generateText.mock.calls[1][0].telemetry.functionId).toBe('hearth.claim')
       const note = String(generateText.mock.calls[2][0].messages.at(-1).content)
-      expect(note).toContain('may or may not have gone through: do not try it again')
+      expect(note).toContain('jira_comment ran out of time, so it may or may not have gone through: do not try it again')
+      expect(note).toContain('a draft or a proposal only waits for a yes: show it and ask for the yes')
       expect(note).not.toContain('Nothing has changed')
+    })
+
+    it('will not let the retry make the timed-out write a second time, whatever the model does', async () => {
+      let again: unknown
+      const told = 'The comment on HTL-12 may not have gone through, so check the issue.'
+      generateText
+        .mockImplementationOnce(timedOut('Done, commented on HTL-12.'))
+        .mockResolvedValueOnce(judged('claims_change'))
+        .mockImplementationOnce(async (opts: { tools: Tools }) => {
+          again = await opts.tools.jira_comment.execute({ key: 'HTL-12', text: 'The plumber is booked' }, {})
+          return reply(told)
+        })
+        .mockResolvedValueOnce(judged('no_change_claimed'))
+      const fetched = vi.mocked(fetch).mock.calls.length
+      expect((await runAgent(asked)).text).toBe(told)
+      expect(again).toMatchObject({ error: expect.stringContaining('Not tried again: jira_comment ran out of time') })
+      // The first comment's request went out; the second never did.
+      expect(vi.mocked(fetch).mock.calls.length).toBe(fetched + 1)
     })
 
     it('says the change could not be confirmed, not that nothing changed, when the model insists or cannot be asked again', async () => {

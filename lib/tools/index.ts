@@ -100,6 +100,11 @@ function linkSeen(ctx: ToolContext, url: string): boolean {
   )
 }
 
+/** What a second call to an unrepeatable write gets, once an earlier one this turn may have gone through. */
+const unconfirmedAgain = (name: string) =>
+  `Not tried again: ${name} ran out of time earlier this turn and may have gone through, so a second call could do it twice. ` +
+  'Say it may not have happened and what to check.'
+
 const UNSEEN_LINK =
   'Not opened: this turn has read mail, a page or a file from outside the household, and this address does not ' +
   'appear in anything it was given or read. Open a link only exactly as it appears there; if it was in a photo or ' +
@@ -113,7 +118,9 @@ const UNSEEN_LINK =
  * nothing), or once it may have: one with `maybe_done` ran out of time and
  * could have gone through all the same, and is kept apart from those that
  * did. Once something untrusted has been read, read_url opens only a link
- * that was there to be read.
+ * that was there to be read. An unrepeatable write that may have gone
+ * through is not called again in the same turn, whatever the prompt says:
+ * nothing in it would notice the copy.
  */
 function instrument<T extends Record<string, { execute?: (...args: never[]) => unknown }>>(ctx: ToolContext, tools: T): T {
   const out: Record<string, unknown> = { ...tools }
@@ -129,6 +136,7 @@ function instrument<T extends Record<string, { execute?: (...args: never[]) => u
         const input: unknown = args[0]
         const typed = (ctx.typed ??= [])
         typed.push(JSON.stringify(input) ?? '')
+        if (unrepeatable && ctx.unconfirmed?.includes(name)) return { error: unconfirmedAgain(name) }
         if (name === 'read_url') {
           const url = String((input as { url?: unknown } | undefined)?.url ?? '')
           if (ctx.readUntrusted && !linkSeen(ctx, url)) return { error: UNSEEN_LINK }

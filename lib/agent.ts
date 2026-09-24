@@ -514,8 +514,9 @@ async function claimsUnmadeAction(slot: ModelSlot, text: string, ctx: ToolContex
 const unmadeActionNote = (who: string, ctx: ToolContext) =>
   ctx.maybeChanged?.length
     ? `[Hearth] That reply says something was done, but no tool confirmed it this turn. ` +
-      `A tool that answered with maybe_done ran out of time, so it may or may not have gone through: do not try it again, ` +
+      `${[...new Set(ctx.maybeChanged)].join(', ')} ran out of time, so it may or may not have gone through: do not try it again, ` +
       `and tell ${who} it may not have happened and what to check. ` +
+      `A tool that answered with an error changed nothing, and a draft or a proposal only waits for a yes: show it and ask for the yes. ` +
       `Anything else the reply says was done, do now with the right tool if ${who} asked for it, or reply without saying you did it.`
     : `[Hearth] Nothing has changed: that reply says something was done, but no tool did it this turn. ` +
       `A tool that answered with an error changed nothing, and a draft or a proposal only waits for a yes. ` +

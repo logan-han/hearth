@@ -510,6 +510,28 @@ describe('running due automations', () => {
     expect(setSetting).not.toHaveBeenCalledWith('up_cursor:-100999:joint', expect.anything())
   })
 
+  it('spends what a custom automation wrote on when its post cannot be sent at all, and gives an admin the draft', async () => {
+    const staged = [{ key: 'mail_cursor:-100999:1:google', at: '2026-09-24T01:00:00.000Z', ids: ['m1'], prev: null }]
+    dueAutomations.mockResolvedValue([automation()])
+    runAgent.mockResolvedValueOnce({ text: 'Added glue sticks to the shopping list.', notices: [], model: 'primary:test', cursors: staged, wrote: ['add_to_list'] })
+    send.mockRejectedValueOnce(new Error('socket hang up'))
+    await authed()
+    expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.stringContaining('m1'))
+    expect(send).toHaveBeenCalledWith('900', expect.stringMatching(/the post could not be sent \(socket hang up\) after the run had already acted[\s\S]*Draft:\nAdded glue sticks/))
+    // Still reported as the failure it was.
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('failed: socket hang up'))
+  })
+
+  it('leaves what a run read new when its post cannot be sent and it wrote nothing', async () => {
+    const staged = [{ key: 'mail_cursor:-100999:1:google', at: '2026-09-24T01:00:00.000Z', ids: ['m1'], prev: null }]
+    dueAutomations.mockResolvedValue([automation()])
+    runAgent.mockResolvedValueOnce({ text: 'One email from the school.', notices: [], model: 'primary:test', cursors: staged })
+    send.mockRejectedValueOnce(new Error('socket hang up'))
+    await authed()
+    expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+    expect(send).not.toHaveBeenCalledWith('900', expect.stringContaining('Draft:'))
+  })
+
   it('spends what a custom automation read with a PROBLEM, when it already wrote something unrepeatable on it', async () => {
     const staged = [{ key: 'mail_cursor:-100999:1:google', at: '2026-09-24T01:00:00.000Z', ids: ['m1'], prev: null }]
     dueAutomations.mockResolvedValue([automation()])
@@ -964,6 +986,28 @@ describe('the post decision', () => {
     expect(decideWatcherPost).not.toHaveBeenCalled()
     expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
     expect(send).toHaveBeenCalledWith('900', expect.stringContaining('could not be cut out (Timed out before any model was asked): a trip to Lisbon'))
+  })
+
+  it('holds the draft back and leaves what it read new when the tick ran out of time to cut out a failed claim', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const start = Date.now()
+      const staged = [{ key: 'mail_cursor:-100999:1:google', at: '2026-09-24T01:00:00.000Z', ids: ['m1'], prev: null }]
+      runAgent.mockResolvedValueOnce({ text: 'Bins out tonight, and a trip to Lisbon.', notices: [], model: 'primary:test', cursors: staged })
+      // The check ran long, and the rewrite was refused for want of time, not by any judge.
+      reviewDraft.mockImplementation(async () => {
+        vi.setSystemTime(start + 255_000)
+        return { claims: ['bins tonight', 'a trip to Lisbon'], unsupported: ['a trip to Lisbon'], message: null, rewriteFailed: 'Timed out before any model was asked' }
+      })
+      await authed()
+      expect(decideWatcherPost).not.toHaveBeenCalled()
+      expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+      expect(send).toHaveBeenCalledWith('900', expect.stringContaining('the tick ran out of time to cut out claims that failed the check: a trip to Lisbon'))
+      expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+      expect(setSetting).not.toHaveBeenCalledWith('unspent:1', expect.anything())
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('falls back to deciding on the raw draft when the check itself fails', async () => {

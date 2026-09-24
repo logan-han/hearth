@@ -788,12 +788,21 @@ describe('calendar tools', () => {
     // Kept apart from the writes that went through: it backs no reply that says it was done.
     expect(turn.changed).toBeUndefined()
     expect(turn.maybeChanged).toEqual(['create_calendar_event'])
+    // Not tried again this turn, however the model asks: the first may be there, and nothing would notice a copy.
+    createEvent.mockClear()
+    const again = await call(tools, 'create_calendar_event', { title: 'T', start: '2026-08-27T09:00', all_day: false })
+    expect(String(again.error)).toContain('Not tried again: create_calendar_event ran out of time earlier this turn')
+    expect(createEvent).not.toHaveBeenCalled()
+    expect(turn.wrote).toEqual(['create_calendar_event'])
     // A timeout before the request, on the token, is only a failure: nothing was asked.
+    const other = later()
+    const fresh = buildTools(other) as unknown as Parameters<typeof call>[0]
     createEvent.mockRejectedValueOnce(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
-    const plain = await call(tools, 'create_calendar_event', { title: 'T', start: '2026-08-27T09:00', all_day: false })
+    const plain = await call(fresh, 'create_calendar_event', { title: 'T', start: '2026-08-27T09:00', all_day: false })
     expect(plain.error).toBeDefined()
     expect(plain.maybe_done).toBeUndefined()
-    expect(turn.wrote).toHaveLength(1)
+    expect(other.wrote).toBeUndefined()
+    expect(other.unconfirmed).toBeUndefined()
   })
 
   it('reports one account failing without sinking the reply', async () => {
