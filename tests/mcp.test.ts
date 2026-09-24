@@ -45,6 +45,12 @@ afterEach(async () => closeDb(client))
 
 const text = (result: { content: { text: string }[] }) => result.content[0].text
 
+/** A group the bot is in, where this member has said something. */
+async function talkedIn(chatId: string, title = 'Home', who: Member = member) {
+  await q.rememberChat(chatId, 'supergroup', title)
+  await q.recordMessage({ chatId, memberId: who.id, authorName: who.name, role: 'user', content: 'hi' })
+}
+
 describe('the tools an MCP client is offered', () => {
   const names = () => descriptors().map((d) => d.name)
 
@@ -79,13 +85,37 @@ describe('the tools an MCP client is offered', () => {
 
 describe('the room a call acts in', () => {
   it('is the household group, so what it posts reaches everyone', async () => {
-    await q.rememberChat('-100', 'supergroup', 'Home')
+    await talkedIn('-100')
     expect(await mcpChat(member)).toBe('-100')
   })
 
   it('is not a room with someone unrecognised in it', async () => {
-    await q.rememberChat('-100', 'supergroup', 'Home')
+    await talkedIn('-100')
     await q.noteStranger('-100', { id: '999', name: 'Guest' })
+    expect(await mcpChat(member)).toBe(member.telegramUserId)
+  })
+
+  it('is the group the caller talked in last, never merely the oldest on record', async () => {
+    const parent = await q.upsertMember('222', 'Sam', { allowed: true })
+    await talkedIn('-100', 'Parents', parent)
+    await talkedIn('-200', 'Family')
+    await talkedIn('-300', 'Cousins')
+    await talkedIn('-200', 'Family')
+    // Rowan never spoke in the parents' room, so its summary and drafts are not his to read.
+    expect(await mcpChat(member)).toBe('-200')
+    expect(await mcpChat(parent)).toBe('-100')
+  })
+
+  it('is not a room the bot has been removed from, until it is back', async () => {
+    await talkedIn('-100')
+    await q.setChatLeft('-100', true)
+    expect(await mcpChat(member)).toBe(member.telegramUserId)
+    await q.setChatLeft('-100', false)
+    expect(await mcpChat(member)).toBe('-100')
+  })
+
+  it('is not a group the caller has never said anything in', async () => {
+    await q.rememberChat('-100', 'supergroup', 'Test room')
     expect(await mcpChat(member)).toBe(member.telegramUserId)
   })
 
@@ -105,7 +135,7 @@ describe('the room a call acts in', () => {
 })
 
 describe('calling a tool', () => {
-  beforeEach(async () => q.rememberChat('-100', 'supergroup', 'Home'))
+  beforeEach(async () => talkedIn('-100'))
 
   it('runs it in the name of whoever holds the key', async () => {
     await callTool('add_family_event', { title: 'Swimming', start: '2026-09-20T10:00', all_day: false }, member)
@@ -131,17 +161,18 @@ describe('calling a tool', () => {
       const result = await callTool('add_family_event', { title: `Swimming ${count}`, start: '2026-09-20T10:00', all_day: false }, member)
       expect(send).toHaveBeenCalledTimes(1)
       expect(send).toHaveBeenCalledWith(member.telegramUserId, expect.stringContaining('Swimming'))
-      expect(text(result)).toContain('your own chat rather than the family group')
+      expect(text(result)).toContain('your own chat rather than the group "Home"')
     }
   })
 
-  it('withdraws the promise when the family could not be told', async () => {
+  it('withdraws the promise when the family could not be told, naming the room that was not', async () => {
     send.mockRejectedValueOnce(new Error('telegram is down'))
     const result = await callTool(
       'add_family_event',
       { title: 'Swimming', start: '2026-09-20T10:00', all_day: false },
       member,
     )
+    expect(text(result)).toContain('could not post this in the group "Home"')
     expect(text(result)).toContain('nobody there has been told')
     expect(result.isError).toBeUndefined()
   })
@@ -188,11 +219,19 @@ describe('calling a tool', () => {
 
 describe('the context a client gets instead of a chat turn', () => {
   it('says who it is acting as, where it is acting, and when', async () => {
-    await q.rememberChat('-100', 'supergroup', 'Home')
+    await talkedIn('-100')
     const result = text(await callTool(CONTEXT_TOOL, {}, member))
     expect(result).toContain('acting as Rowan')
-    expect(result).toContain('the family group')
+    expect(result).toContain('lands in the group "Home"')
     expect(result).toContain('Australia/Melbourne')
+  })
+
+  it('names the room by its title, since the one the caller used last need not be the family\'s', async () => {
+    await talkedIn('-100', 'Family')
+    await talkedIn('-200', 'Parents')
+    const result = text(await callTool(CONTEXT_TOOL, {}, member))
+    expect(result).toContain('lands in the group "Parents"')
+    expect(result).not.toContain('family group')
   })
 
   it('says when it is acting somewhere only the member can see', async () => {

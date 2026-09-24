@@ -3,13 +3,15 @@ import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
 
-const { send, typing, runAgent, sendMessage, sendChatAction, getFile, me } = vi.hoisted(() => ({
+const { send, typing, runAgent, sendMessage, sendChatAction, getFile, getChatMember, me } = vi.hoisted(() => ({
   send: vi.fn(async (_chatId: string | number, _text: string, _replyTo?: number) => {}),
   typing: vi.fn(async (_chatId: string | number) => {}),
   runAgent: vi.fn(async () => ({ text: 'sure', notices: [] as string[], model: 'gemini' })),
   sendMessage: vi.fn(async () => ({})),
   sendChatAction: vi.fn(async () => true),
   getFile: vi.fn(),
+  /** Who Telegram says is in a room; nobody, unless a test says otherwise. */
+  getChatMember: vi.fn<(chatId: string, userId: number) => Promise<{ status: string; user: { id: number } }>>(),
   /** What getMe answers; a test may take the username away. */
   me: { value: { id: 1, username: 'heart_family_bot' } as { id: number; username?: string } },
 }))
@@ -17,7 +19,7 @@ const { send, typing, runAgent, sendMessage, sendChatAction, getFile, me } = vi.
 vi.mock('@/lib/telegram', async (orig) => ({
   ...(await orig<typeof import('@/lib/telegram')>()),
   send, typing,
-  bot: () => ({ api: { getMe: async () => me.value, sendMessage, sendChatAction, getFile } }),
+  bot: () => ({ api: { getMe: async () => me.value, sendMessage, sendChatAction, getFile, getChatMember } }),
 }))
 vi.mock('@/lib/agent', () => ({ runAgent, shouldChimeIn: vi.fn(async () => false) }))
 vi.mock('@vercel/functions', () => ({ waitUntil: (p: Promise<unknown>) => p }))
@@ -68,6 +70,7 @@ beforeEach(async () => {
   vi.clearAllMocks()
   vi.spyOn(console, 'warn').mockImplementation(() => {})
   me.value = { id: 1, username: 'heart_family_bot' }
+  getChatMember.mockRejectedValue(new Error('Bad Request: user not found'))
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
   process.env.APP_URL = 'https://hearth.example'
   process.env.ALLOWED_TELEGRAM_IDS = '111'
@@ -133,6 +136,43 @@ describe('/allow and /deny', () => {
     expect(await q.strangersIn('-100')).toEqual([])
   })
 
+  it('unmutes every room they were flagged in when vouched for from a DM', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    await q.rememberChat('-200', 'group', 'Cousins')
+    await q.noteStranger('-100', { id: '777', name: 'Nan' })
+    await q.noteStranger('-200', { id: '777', name: 'Nan' })
+    await processUpdate(dm('/allow 777'))
+    expect(await q.strangersIn('-100')).toEqual([])
+    expect(await q.strangersIn('-200')).toEqual([])
+    send.mockClear()
+    await processUpdate(group('@heart_family_bot hi'))
+    expect(runAgent).toHaveBeenCalled()
+  })
+
+  it('unmutes every room a founder is flagged in once they speak in any one of them', async () => {
+    // Flagged before they joined ALLOWED_TELEGRAM_IDS; the seed lets them in without an /allow.
+    process.env.ALLOWED_TELEGRAM_IDS = '111,222'
+    await q.rememberChat('-100', 'group', 'Family')
+    await q.rememberChat('-200', 'group', 'Cousins')
+    await q.noteStranger('-100', { id: '222', name: 'Dad' })
+    await q.noteStranger('-200', { id: '222', name: 'Dad' })
+    await processUpdate(group('morning all', '222'))
+    expect(await q.strangersIn('-100')).toEqual([])
+    expect(await q.strangersIn('-200')).toEqual([])
+    send.mockClear()
+    await processUpdate({
+      update_id: 7,
+      message: {
+        message_id: 8, date: 1787000000,
+        from: { id: 111, is_bot: false, first_name: 'Rowan' },
+        chat: { id: -200, type: 'group', title: 'Cousins' },
+        text: '@heart_family_bot what is on today',
+      },
+    } as never)
+    expect(lastSent()).not.toContain('Not while')
+    expect(runAgent).toHaveBeenCalled()
+  })
+
   it('asks for an id when given neither an id nor a reply', async () => {
     await processUpdate(dm('/allow'))
     expect(lastSent()).toContain('Usage')
@@ -143,7 +183,35 @@ describe('/allow and /deny', () => {
     send.mockClear()
     await processUpdate(dm('/deny 999'))
     expect(lastSent()).toContain('Revoked')
+    expect(lastSent()).toContain('/calendar new')
+    expect(lastSent()).not.toContain('stay quiet')
     expect((await q.memberByTelegramId('999'))!.allowed).toBe(false)
+  })
+
+  it('quiets every room a revoked member sits in, silent or not, and says which', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    await q.rememberChat('-200', 'group', 'Cousins')
+    await q.rememberChat('-300', 'group', 'Book club')
+    await processUpdate(dm('/allow 333'))
+    // Telegram sees them in the family group; the cousins' room will not say, but they have talked there.
+    const nan = await q.memberByTelegramId('333')
+    await q.recordMessage({ chatId: '-200', memberId: nan!.id, role: 'user', content: 'see you all sunday' })
+    getChatMember.mockImplementation(async (chatId, id) => {
+      if (chatId === '-100') return { status: 'member', user: { id } }
+      if (chatId === '-200') throw new Error('Bad Request: CHAT_ADMIN_REQUIRED')
+      throw new Error('Bad Request: user not found')
+    })
+    send.mockClear()
+    await processUpdate(dm('/deny 333'))
+    expect(lastSent()).toContain("I'll stay quiet in Family, Cousins while they are there.")
+    expect(await q.strangersIn('-100')).toEqual([{ id: '333', name: 'user333' }])
+    expect(await q.strangersIn('-200')).toEqual([{ id: '333', name: 'user333' }])
+    expect(await q.strangersIn('-300')).toEqual([])
+    // Nothing was said to the rooms themselves.
+    expect(send).toHaveBeenCalledTimes(1)
+    send.mockClear()
+    await processUpdate(group('@heart_family_bot read my inbox'))
+    expect(lastSent()).toContain('Not while user333 is here')
   })
 
   it('says so when revoking someone it has never seen', async () => {
@@ -375,6 +443,68 @@ describe('someone unrecognised joining', () => {
   it('creates no row for the bot arriving on its own', async () => {
     await processUpdate(joined({ id: 1, is_bot: true }))
     expect(await q.groupChats()).toEqual([])
+  })
+})
+
+describe("the bot's own membership", () => {
+  const became = (status: string, extra: Record<string, unknown> = {}) => ({
+    update_id: 11,
+    my_chat_member: {
+      chat: { id: -100, type: 'group', title: 'Family' },
+      from: { id: 111, is_bot: false, first_name: 'Rowan' },
+      date: 1787000000,
+      old_chat_member: { status: 'member', user: { id: 1, is_bot: true, first_name: 'Hearth' } },
+      new_chat_member: { status, user: { id: 1, is_bot: true, first_name: 'Hearth' }, ...extra },
+    },
+  }) as never
+
+  it('drops a room it was removed from out of the household, and takes it back when re-added', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    for (const [status, extra] of [['left', {}], ['kicked', { until_date: 0 }], ['restricted', { is_member: false }]] as const) {
+      await processUpdate(became(status, extra))
+      expect(await q.groupChats()).toEqual([])
+      await processUpdate(became('member'))
+      expect((await q.groupChats()).map((r) => r.chatId)).toEqual(['-100'])
+    }
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('takes a room back as soon as anyone speaks in it, whatever it was told before', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    await processUpdate(became('kicked'))
+    await processUpdate(group('hello again'))
+    expect((await q.groupChats()).map((r) => r.chatId)).toEqual(['-100'])
+  })
+})
+
+describe('a group made a supergroup', () => {
+  const service = (chatId: number, field: Record<string, number>) => ({
+    update_id: 12,
+    message: {
+      message_id: 12, date: 1787000000,
+      from: { id: 111, is_bot: false, first_name: 'Rowan' },
+      chat: { id: chatId, type: chatId === -100 ? 'group' : 'supergroup', title: 'Family' },
+      ...field,
+    },
+  }) as never
+
+  it('keeps its stranger, its history and its watchers under the new id, from either end of the change', async () => {
+    for (const [update, to] of [
+      [service(-100, { migrate_to_chat_id: -1001234 }), '-1001234'],
+      [service(-1005678, { migrate_from_chat_id: -100 }), '-1005678'],
+    ] as const) {
+      await q.rememberChat('-100', 'group', 'Family')
+      await q.noteStranger('-100', { id: '999', name: 'Eve' })
+      await processUpdate(group('bins tonight'))
+      await q.addAutomation({ chatId: '-100', label: 'Morning brief', cronExpr: '0 7 * * *', instruction: 'x', kind: 'morning', nextRunAt: new Date() })
+
+      await processUpdate(update)
+      expect(await q.strangersIn(to)).toEqual([{ id: '999', name: 'Eve' }])
+      expect((await q.recentMessages(to)).map((m) => m.content)).toContain('bins tonight')
+      expect((await q.listAutomations(to)).map((a) => a.kind)).toEqual(['morning'])
+      expect(await q.listAutomations('-100')).toEqual([])
+    }
+    expect(runAgent).not.toHaveBeenCalled()
   })
 })
 

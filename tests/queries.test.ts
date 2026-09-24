@@ -13,6 +13,10 @@ beforeEach(async () => {
 })
 afterEach(async () => closeDb(client))
 
+/** Push messages back in time, as the days a real chat has behind it would. */
+const age = (days: number, where = 'true') =>
+  client.query(`update messages set created_at = now() - make_interval(days => ${days}) where ${where}`)
+
 describe('members', () => {
   it('creates on first sight and refreshes the name after', async () => {
     const first = await q.upsertMember('111', 'Rowan')
@@ -102,6 +106,137 @@ describe('chats and strangers', () => {
     await db().execute(sql`update chats set strangers = 'not json at all' where chat_id = '-100'`)
     expect(await q.strangersIn('-100')).toEqual([])
   })
+
+  it('keeps both of two strangers noted at the same moment', async () => {
+    expect(await Promise.all([
+      q.noteStranger('-100', { id: '9', name: 'A' }),
+      q.noteStranger('-100', { id: '8', name: 'B' }),
+    ])).toEqual([true, true])
+    expect((await q.strangersIn('-100')).map((s) => s.id).sort()).toEqual(['8', '9'])
+  })
+
+  it('loses nobody when one stranger leaves as another arrives', async () => {
+    await q.noteStranger('-100', { id: '9', name: 'A' })
+    await Promise.all([q.clearStranger('-100', '9'), q.noteStranger('-100', { id: '8', name: 'B' })])
+    expect(await q.strangersIn('-100')).toEqual([{ id: '8', name: 'B' }])
+  })
+
+  it('unflags someone vouched for in every room at once, and nobody else', async () => {
+    await q.rememberChat('-200', 'supergroup', 'Cousins')
+    await q.noteStranger('-100', { id: '9', name: 'Nan' })
+    await q.noteStranger('-200', { id: '9', name: 'Nan' })
+    await q.noteStranger('-200', { id: '8', name: 'Guest' })
+    await q.clearStrangerEverywhere('9')
+    expect(await q.strangersIn('-100')).toEqual([])
+    expect(await q.strangersIn('-200')).toEqual([{ id: '8', name: 'Guest' }])
+  })
+
+  it("stops counting a room the bot was removed from as the household's, until it hears from it again", async () => {
+    await q.rememberChat('-200', 'supergroup', 'Cousins')
+    await q.rememberChat('111', 'private', null)
+    await q.setChatLeft('-100', true)
+    expect((await q.groupChats()).map((r) => r.chatId)).toEqual(['-200'])
+    await q.rememberChat('-100', 'group', 'Family')
+    expect((await q.groupChats()).map((r) => r.chatId)).toEqual(['-100', '-200'])
+    await q.setChatLeft('-200', true)
+    await q.setChatLeft('-200', false)
+    expect((await q.groupChats()).map((r) => r.chatId)).toEqual(['-100', '-200'])
+  })
+
+  it("lists a member's groups by where they spoke last, leaving out DMs, rooms the bot left and others' rooms", async () => {
+    const rowan = await q.upsertMember('111', 'Rowan', { allowed: true })
+    const sam = await q.upsertMember('222', 'Sam', { allowed: true })
+    await q.rememberChat('-200', 'supergroup', 'Cousins')
+    await q.rememberChat('-300', 'group', 'Old test room')
+    await q.rememberChat('-400', 'group', 'Parents')
+    await q.rememberChat('111', 'private', null)
+    const say = (chatId: string, memberId: number) => q.recordMessage({ chatId, memberId, role: 'user', content: 'hi' })
+    await say('-100', rowan.id)
+    await say('-200', rowan.id)
+    await say('-300', rowan.id)
+    await say('111', rowan.id)
+    await say('-400', sam.id)
+    await say('-100', rowan.id)
+    await q.setChatLeft('-300', true)
+    expect((await q.roomsOf(rowan.id)).map((r) => r.chatId)).toEqual(['-100', '-200'])
+    expect((await q.roomsOf(sam.id)).map((r) => r.title)).toEqual(['Parents'])
+  })
+})
+
+describe('a group made a supergroup', () => {
+  const at = new Date('2026-09-20T00:00:00Z')
+
+  it('carries everything kept under the old id across to the new one', async () => {
+    await q.rememberChat('-5', 'group', 'Family')
+    await q.noteStranger('-5', { id: '9', name: 'Eve' })
+    const said = await q.recordMessage({ chatId: '-5', role: 'user', content: 'bins tonight' })
+    await q.setChatSummary('-5', 'Talked about bins.', said)
+    const brief = await q.addAutomation({ chatId: '-5', label: 'Morning brief', cronExpr: '0 7 * * *', instruction: 'x', kind: 'morning', nextRunAt: at })
+    await q.setAutomationEnabled(brief.id, false)
+    await q.addAutomation({ chatId: '-5', label: 'bins', cronExpr: '0 19 * * 1', instruction: 'remind', nextRunAt: at })
+    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
+    await q.createDraft({ chatId: '-5', memberId: m.id, provider: 'google', to: ['a@b.com'], subject: 'S', body: 'B' })
+    await q.addProposal({ chatId: '-5', title: 'Fete', startsAt: at, endsAt: at })
+    await q.setSetting('mail_cursor:-5:1:google', 'seen')
+    await q.setSetting('proactive_posts:-5', '[1]')
+    await q.setSetting('mail_cursor:-55:1:google', 'another room')
+
+    await q.moveChat('-5', '-1005')
+
+    expect(await q.strangersIn('-1005')).toEqual([{ id: '9', name: 'Eve' }])
+    expect(await q.chatSummary('-1005')).toEqual({ summary: 'Talked about bins.', through: said })
+    expect((await q.groupChats()).map((r) => [r.chatId, r.title])).toEqual([['-1005', 'Family']])
+    expect((await q.recentMessages('-1005')).map((r) => r.content)).toEqual(['bins tonight'])
+    expect(await q.recentMessages('-5')).toEqual([])
+    const rows = await q.listAutomations('-1005')
+    expect(rows.map((a) => [a.kind, a.enabled]).sort()).toEqual([[null, true], ['morning', false]])
+    expect(await q.pendingDrafts('-1005')).toHaveLength(1)
+    expect(await q.pendingProposals('-1005', new Date('2026-01-01'))).toHaveLength(1)
+    expect(await q.getSetting('mail_cursor:-1005:1:google')).toBe('seen')
+    expect(await q.getSetting('proactive_posts:-1005')).toBe('[1]')
+    expect(await q.getSetting('mail_cursor:-5:1:google')).toBeNull()
+    expect(await q.getSetting('mail_cursor:-55:1:google')).toBe('another room')
+
+    // The other end of the upgrade says the same; there is nothing left to move.
+    await q.moveChat('-5', '-1005')
+    await q.moveChat('-1005', '-1005')
+    expect(await q.listAutomations('-1005')).toHaveLength(2)
+    expect(await q.strangersIn('-1005')).toHaveLength(1)
+  })
+
+  it('merges into a new room someone already spoke in, the household keeping its own watchers', async () => {
+    await q.rememberChat('-5', 'group', 'Family')
+    await q.noteStranger('-5', { id: '9', name: 'Eve' })
+    await q.noteStranger('-5', { id: '7', name: 'Ted' })
+    await q.setChatSummary('-5', 'The long story.', 40)
+    const old = await q.addAutomation({ chatId: '-5', label: 'Morning brief', cronExpr: '0 7 * * *', instruction: 'x', kind: 'morning', nextRunAt: at })
+    await q.setSetting('mail_cursor:-1005:1:google', 'newer')
+    await q.setSetting('mail_cursor:-5:1:google', 'older')
+
+    await q.rememberChat('-1005', 'supergroup', 'Family')
+    await q.noteStranger('-1005', { id: '9', name: 'Eve' })
+    await q.noteStranger('-1005', { id: '6', name: 'Val' })
+    await q.addAutomation({ chatId: '-1005', label: 'Morning brief', cronExpr: '0 7 * * *', instruction: 'x', kind: 'morning', nextRunAt: at })
+    await q.addAutomation({ chatId: '-1005', label: 'Money snapshot', cronExpr: '0 18 * * 0', instruction: 'y', kind: 'snapshot', nextRunAt: at })
+
+    await q.moveChat('-5', '-1005')
+
+    expect((await q.strangersIn('-1005')).map((s) => s.id).sort()).toEqual(['6', '7', '9'])
+    expect(await q.chatSummary('-1005')).toEqual({ summary: 'The long story.', through: 40 })
+    const rows = await q.listAutomations('-1005')
+    expect(rows.map((a) => a.kind).sort()).toEqual(['morning', 'snapshot'])
+    expect(rows.find((a) => a.kind === 'morning')!.id).toBe(old.id)
+    expect(await q.getSetting('mail_cursor:-1005:1:google')).toBe('newer')
+    expect(await q.getSetting('mail_cursor:-5:1:google')).toBeNull()
+  })
+
+  it("keeps the new room's own summary when the old one had none", async () => {
+    await q.rememberChat('-5', 'group', 'Family')
+    await q.rememberChat('-1005', 'supergroup', 'Family')
+    await q.setChatSummary('-1005', 'Since the upgrade.', 12)
+    await q.moveChat('-5', '-1005')
+    expect(await q.chatSummary('-1005')).toEqual({ summary: 'Since the upgrade.', through: 12 })
+  })
 })
 
 describe('messages', () => {
@@ -126,20 +261,32 @@ describe('messages', () => {
     expect((await q.recentMessages('c'))[0].content).toHaveLength(8000)
   })
 
-  it('prunes down to the most recent N', async () => {
+  it('prunes down to the most recent N once they are older than the fortnight kept', async () => {
     for (let i = 0; i < 12; i++) {
       await q.recordMessage({ chatId: 'c', role: 'user', content: `m${i}` })
     }
+    await age(15)
     await q.pruneMessages('c', 5)
     const left = await q.recentMessages('c', 50)
     expect(left).toHaveLength(5)
     expect(left.map((m) => m.content)).toEqual(['m7', 'm8', 'm9', 'm10', 'm11'])
   })
 
+  it('keeps a fortnight of talk however many rows it runs to, so System can chart it', async () => {
+    for (let i = 0; i < 12; i++) {
+      await q.recordMessage({ chatId: 'c', role: 'user', content: `m${i}` })
+    }
+    await age(15, `content in ('m0', 'm1', 'm2')`)
+    await q.pruneMessages('c', 5)
+    expect((await q.recentMessages('c', 50)).map((m) => m.content)).toEqual(['m3', 'm4', 'm5', 'm6', 'm7', 'm8', 'm9', 'm10', 'm11'])
+  })
+
   it('prunes one chat without touching another', async () => {
     for (let i = 0; i < 4; i++) await q.recordMessage({ chatId: 'a', role: 'user', content: `${i}` })
     await q.recordMessage({ chatId: 'b', role: 'user', content: 'keep' })
+    await age(15)
     await q.pruneMessages('a', 1)
+    expect(await q.recentMessages('a')).toHaveLength(1)
     expect(await q.recentMessages('b')).toHaveLength(1)
   })
 })
@@ -151,6 +298,11 @@ describe('messagesSince', () => {
     const rows = await q.messagesSince(24)
     expect(rows.map((r) => r.content)).toEqual(['one', 'two'])
     expect(rows[0]).toMatchObject({ chatId: 'a', authorName: 'Rowan', role: 'user' })
+  })
+
+  it('keeps the newest talk when a busy day runs past the limit', async () => {
+    for (let i = 0; i < 5; i++) await q.recordMessage({ chatId: 'a', role: 'user', content: `m${i}` })
+    expect((await q.messagesSince(24, 3)).map((r) => r.content)).toEqual(['m2', 'm3', 'm4'])
   })
 
   it('excludes talk from before the window', async () => {
@@ -412,6 +564,19 @@ describe('automations', () => {
     expect(row!.nextRunAt.toISOString()).toBe(later.toISOString())
   })
 
+  it('holds a chat to one of each ready-made watcher, however many ticks install it at once', async () => {
+    const brief = () =>
+      q.addAutomation({ chatId: '-100', label: 'Morning brief', cronExpr: '0 7 * * *', instruction: 'x', kind: 'morning', nextRunAt: soon })
+    const [a, b] = await Promise.all([brief(), brief()])
+    expect(b.id).toBe(a.id)
+    expect((await brief()).id).toBe(a.id)
+    // Another chat, or a custom instruction, is its own row.
+    await q.addAutomation({ chatId: '-200', label: 'Morning brief', cronExpr: '0 7 * * *', instruction: 'x', kind: 'morning', nextRunAt: soon })
+    await make()
+    await make()
+    expect((await q.listAutomations()).map((r) => r.chatId).sort()).toEqual(['-100', '-200', 'c', 'c'])
+  })
+
   it('lists per chat and deletes', async () => {
     const a = await make()
     await q.addAutomation({ chatId: 'other', label: 'x', cronExpr: '0 8 * * *', instruction: 'i', nextRunAt: soon })
@@ -467,6 +632,12 @@ describe('shared lists', () => {
     const b = await q.findOrCreateList('  shopping ')
     expect(b.id).toBe(a.id)
     expect(await q.findList('SHOPPING')).toBeDefined()
+  })
+
+  it('gives two people starting the same new list at once the one list', async () => {
+    const [a, b] = await Promise.all([q.findOrCreateList('Groceries'), q.findOrCreateList('groceries')])
+    expect(b.id).toBe(a.id)
+    expect(await q.allLists()).toEqual([{ name: 'groceries', open: 0 }])
   })
 
   it('ticks off by substring and counts what is open', async () => {
@@ -644,6 +815,12 @@ describe('settings and the calendar token', () => {
     expect(await q.calendarToken()).toBe(first)
   })
 
+  it('hands two first uses at once the same, stored, token', async () => {
+    const [a, b] = await Promise.all([q.calendarToken(), q.calendarToken()])
+    expect(b).toBe(a)
+    expect(await q.getSetting('calendar_token')).toBe(a)
+  })
+
   it('pauses a deleted member\'s own automations before the row that says whose they were goes', async () => {
     const m = await q.upsertMember('222', 'Nanny', { allowed: true })
     const at = new Date('2026-09-20T00:00:00Z')
@@ -676,6 +853,41 @@ describe('settings and the calendar token', () => {
     await q.recordTick(second)
     expect(await q.getSetting('last_tick_at')).toBe(second.toISOString())
     expect(await q.getSetting('prev_tick_at')).toBe(first.toISOString())
+  })
+})
+
+describe('the migration that holds a chat to one of each watcher', () => {
+  it('keeps the copy still running of a watcher two ticks had doubled, and nothing else changes', async () => {
+    const { PGlite } = await import('@electric-sql/pglite')
+    const { readFileSync } = await import('node:fs')
+    const read = (path: string) => readFileSync(new URL(`../drizzle/${path}`, import.meta.url), 'utf8')
+    const pg = new PGlite()
+    const apply = async (tag: string) => {
+      for (const statement of read(`${tag}.sql`).split('--> statement-breakpoint')) {
+        if (statement.trim()) await pg.exec(statement)
+      }
+    }
+    const tags = (JSON.parse(read('meta/_journal.json')) as { entries: { tag: string }[] }).entries.map((e) => e.tag)
+    const at = tags.indexOf('0007_chat_lifecycle')
+    for (const tag of tags.slice(0, at)) await apply(tag)
+    await pg.exec(`
+      insert into automations (chat_id, label, cron_expr, instruction, kind, next_run_at, enabled) values
+        ('-100', 'Morning brief', '0 7 * * *', 'x', 'morning', now(), false),
+        ('-100', 'Morning brief', '0 7 * * *', 'x', 'morning', now(), true),
+        ('-100', 'Morning brief', '0 7 * * *', 'x', 'morning', now(), true),
+        ('-100', 'bins', '0 19 * * 1', 'remind', null, now(), true),
+        ('-100', 'bins', '0 19 * * 1', 'remind', null, now(), true),
+        ('-200', 'Morning brief', '0 7 * * *', 'x', 'morning', now(), false)
+    `)
+    await apply('0007_chat_lifecycle')
+    const { rows } = await pg.query(`select id, chat_id, kind, enabled from automations order by id`)
+    expect(rows).toEqual([
+      { id: 2, chat_id: '-100', kind: 'morning', enabled: true },
+      { id: 4, chat_id: '-100', kind: null, enabled: true },
+      { id: 5, chat_id: '-100', kind: null, enabled: true },
+      { id: 6, chat_id: '-200', kind: 'morning', enabled: false },
+    ])
+    await pg.close()
   })
 })
 

@@ -33,6 +33,7 @@ vi.mock('@/lib/db/queries', () => ({
   strangersIn: vi.fn(async () => []),
   noteStranger: vi.fn(async () => true),
   clearStranger: vi.fn(async () => {}),
+  clearStrangerEverywhere: vi.fn(async () => {}),
   recordMessage,
   pruneMessages: vi.fn(async () => {}),
   connectionsFor: vi.fn(async () => []),

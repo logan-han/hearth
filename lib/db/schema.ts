@@ -8,6 +8,7 @@ import {
   index,
   uniqueIndex,
 } from 'drizzle-orm/pg-core'
+import { sql } from 'drizzle-orm'
 
 /**
  * A person in the family, keyed by their Telegram user id. `allowed` is the only
@@ -57,6 +58,13 @@ export const chats = pgTable(
     /** The newest message id the summary covers. */
     summaryThrough: integer('summary_through'),
     summaryAt: timestamp('summary_at', { withTimezone: true }),
+    /**
+     * When Telegram said the bot was removed. The row and its history stay, but
+     * a room the bot is no longer in is not one of the household's: it gets no
+     * built-in watchers and is never where an MCP call acts. Seeing the bot
+     * back, or any message from the room, clears it.
+     */
+    leftAt: timestamp('left_at', { withTimezone: true }),
   },
   (t) => [uniqueIndex('chats_chat_id_idx').on(t.chatId)],
 )
@@ -81,7 +89,7 @@ export const connections = pgTable(
   (t) => [uniqueIndex('connections_member_provider_idx').on(t.memberId, t.provider)],
 )
 
-/** Rolling conversation window per chat. Pruned to MAX_HISTORY per chat. */
+/** Rolling conversation window per chat: the newest MAX_HISTORY rows, or the last HISTORY_DAYS if that is more. */
 export const messages = pgTable(
   'messages',
   {
@@ -179,7 +187,13 @@ export const automations = pgTable(
     enabled: boolean('enabled').notNull().default(true),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('automations_next_run_idx').on(t.enabled, t.nextRunAt)],
+  (t) => [
+    index('automations_next_run_idx').on(t.enabled, t.nextRunAt),
+    // One of each ready-made watcher per chat. Checking first and inserting
+    // after lets two overlapping ticks both install one, and each copy then
+    // posts every day; the index makes the second insert a no-op instead.
+    uniqueIndex('automations_chat_kind_idx').on(t.chatId, t.kind).where(sql`${t.kind} is not null`),
+  ],
 )
 
 /** Outbound email held for explicit human confirmation. Never sent silently. */

@@ -7,12 +7,13 @@ const memberByTelegramId = vi.fn<(id: string) => Promise<Member | undefined>>()
 const strangersIn = vi.fn<(chatId: string) => Promise<Stranger[]>>()
 const noteStranger = vi.fn<(chatId: string, s: Stranger) => Promise<boolean>>()
 const clearStranger = vi.fn()
+const clearStrangerEverywhere = vi.fn()
 const rememberChat = vi.fn()
 const send = vi.fn<(chatId: string, text: string, reply?: number) => Promise<void>>()
 
 vi.mock('@/lib/summary', () => ({ maybeSummarise: vi.fn(async () => false) }))
 vi.mock('@/lib/db/queries', () => ({
-  upsertMember, memberByTelegramId, strangersIn, noteStranger, clearStranger, rememberChat,
+  upsertMember, memberByTelegramId, strangersIn, noteStranger, clearStranger, clearStrangerEverywhere, rememberChat,
   setMemberAllowed: vi.fn(async () => undefined),
   allowedMembers: vi.fn(async () => []),
   recordMessage: vi.fn(async () => 1),
@@ -171,9 +172,9 @@ describe('strangers in a group', () => {
     expect(send.mock.calls.filter(([, t]) => String(t).includes('Not while'))).toHaveLength(0)
   })
 
-  it('clears the flag when an allowed member speaks', async () => {
+  it('clears the flag in every room when an allowed member speaks in one', async () => {
     await processUpdate(message({ from: '111', chat: '-100999' }))
-    expect(clearStranger).toHaveBeenCalledWith('-100999', '111')
+    expect(clearStrangerEverywhere).toHaveBeenCalledWith('111')
   })
 
   it('names every stranger when there is more than one', async () => {

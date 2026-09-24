@@ -11,6 +11,8 @@ import { rankSimilar, DUPLICATE } from '../memory-match'
 import type { Provider } from '../oauth/providers'
 
 export const MAX_HISTORY = 200
+/** Talk younger than this is kept however many rows it runs to: System charts a fortnight of it. */
+export const HISTORY_DAYS = 14
 /** Raw messages the model sees verbatim; older talk arrives as the chat's summary. */
 export const CONTEXT_WINDOW = 15
 
@@ -100,10 +102,19 @@ export async function memberByMcpKey(key: string): Promise<Member | null> {
 /* ------------------------------------------------------------------ chats */
 
 export async function rememberChat(chatId: string, type: string, title: string | null) {
+  // A message from the room is proof the bot is in it, whatever was said before.
   await db()
     .insert(chats)
     .values({ chatId, type, title })
-    .onConflictDoUpdate({ target: chats.chatId, set: { type, title } })
+    .onConflictDoUpdate({ target: chats.chatId, set: { type, title, leftAt: null } })
+}
+
+/** Telegram says the bot was removed from a room, or added back to one it knew. */
+export async function setChatLeft(chatId: string, left: boolean): Promise<void> {
+  await db()
+    .update(chats)
+    .set({ leftAt: left ? new Date() : null })
+    .where(eq(chats.chatId, chatId))
 }
 
 export async function chatSummary(chatId: string): Promise<{ summary: string | null; through: number }> {
@@ -137,13 +148,31 @@ export async function strangersIn(chatId: string): Promise<Stranger[]> {
   return parseStrangers(row?.strangers)
 }
 
-/** The household's rooms: every group the bot has been in, with who there is unrecognised. */
+/** The household's rooms: every group the bot is still in, with who there is unrecognised. */
 export async function groupChats(): Promise<{ chatId: string; title: string | null; strangers: Stranger[] }[]> {
   const rows = await db()
     .select()
     .from(chats)
-    .where(inArray(chats.type, ['group', 'supergroup']))
+    .where(and(inArray(chats.type, ['group', 'supergroup']), isNull(chats.leftAt)))
     .orderBy(asc(chats.id))
+  return rows.map((r) => ({ chatId: r.chatId, title: r.title, strangers: parseStrangers(r.strangers) }))
+}
+
+/**
+ * The groups the bot is still in that this member has talked in, the one
+ * they talked in last first. Having spoken there is the evidence the history
+ * holds that they belong to the room, and the room they spoke in last is the
+ * one they are using.
+ */
+export async function roomsOf(memberId: number): Promise<{ chatId: string; title: string | null; strangers: Stranger[] }[]> {
+  const last = sql`max(${messages.id})`
+  const rows = await db()
+    .select({ chatId: chats.chatId, title: chats.title, strangers: chats.strangers })
+    .from(chats)
+    .innerJoin(messages, and(eq(messages.chatId, chats.chatId), eq(messages.memberId, memberId)))
+    .where(and(inArray(chats.type, ['group', 'supergroup']), isNull(chats.leftAt)))
+    .groupBy(chats.id)
+    .orderBy(desc(last))
   return rows.map((r) => ({ chatId: r.chatId, title: r.title, strangers: parseStrangers(r.strangers) }))
 }
 
@@ -157,26 +186,87 @@ function parseStrangers(raw: string | undefined | null): Stranger[] {
   }
 }
 
+/*
+ * The list is changed in the database, in one statement each, rather than
+ * read, changed here and written back: updates are handled side by side, and
+ * two outsiders noted at once would otherwise leave only the second on the
+ * list, with the first in the room and the bot talking.
+ */
+
+/** Matches a room whose list already holds this person. */
+const holds = (userId: string) => sql`${chats.strangers}::jsonb @> ${JSON.stringify([{ id: userId }])}::jsonb`
+
 /** Returns true when this is the first time we have seen that stranger here. */
 export async function noteStranger(chatId: string, stranger: Stranger): Promise<boolean> {
-  const current = await strangersIn(chatId)
-  if (current.some((s) => s.id === stranger.id)) return false
-  const next = [...current, stranger]
   // True only if a row took it: a stranger reported as flagged but written
   // nowhere is a room the bot goes on talking in.
   const written = await db()
     .update(chats)
-    .set({ strangers: JSON.stringify(next) })
-    .where(eq(chats.chatId, chatId))
+    .set({ strangers: sql`(${chats.strangers}::jsonb || ${JSON.stringify([stranger])}::jsonb)::text` })
+    .where(and(eq(chats.chatId, chatId), sql`not ${holds(stranger.id)}`))
     .returning({ id: chats.id })
   return written.length > 0
 }
 
+const without = (userId: string) =>
+  sql`coalesce((select jsonb_agg(e) from jsonb_array_elements(${chats.strangers}::jsonb) e where e->>'id' <> ${userId}), '[]'::jsonb)::text`
+
 export async function clearStranger(chatId: string, userId: string): Promise<void> {
-  const current = await strangersIn(chatId)
-  const next = current.filter((s) => s.id !== userId)
-  if (next.length === current.length) return
-  await db().update(chats).set({ strangers: JSON.stringify(next) }).where(eq(chats.chatId, chatId))
+  await db().update(chats).set({ strangers: without(userId) }).where(and(eq(chats.chatId, chatId), holds(userId)))
+}
+
+/** Vouched for, so a stranger nowhere: a grant made in a DM or on the dashboard unmutes every room they are in. */
+export async function clearStrangerEverywhere(userId: string): Promise<void> {
+  await db().update(chats).set({ strangers: without(userId) }).where(holds(userId))
+}
+
+/**
+ * Telegram gives a group a new id when it becomes a supergroup, and the old
+ * id is dead from then on. Everything kept under it moves across: the room's
+ * row with its stranger flags and summary, its history, automations, drafts
+ * and proposals, and the settings keyed by the room, the sweep cursors among
+ * them, so the brief does not read the inbox out again. Both ends of the
+ * upgrade announce it, so this runs twice and is safe to. Should the new id
+ * have a row already (someone spoke there first), it gains the old one's
+ * strangers and its summary, which covers the longer history, and a built-in
+ * watcher already installed there gives way to the one the household had,
+ * paused or not.
+ */
+export async function moveChat(from: string, to: string): Promise<void> {
+  if (from === to) return
+  await db().execute(sql`
+    insert into chats (chat_id, type, title, strangers, summary, summary_through, summary_at, created_at)
+    select ${to}, 'supergroup', title, strangers, summary, summary_through, summary_at, created_at
+    from chats where chat_id = ${from}
+    on conflict (chat_id) do update set
+      strangers = (
+        select coalesce(jsonb_agg(e), '[]'::jsonb)::text from (
+          select distinct on (e->>'id') e
+          from jsonb_array_elements(chats.strangers::jsonb || excluded.strangers::jsonb) e
+        ) merged
+      ),
+      summary = coalesce(excluded.summary, chats.summary),
+      summary_through = case when excluded.summary is null then chats.summary_through else excluded.summary_through end,
+      summary_at = case when excluded.summary is null then chats.summary_at else excluded.summary_at end
+  `)
+  await db().delete(chats).where(eq(chats.chatId, from))
+  await db().update(messages).set({ chatId: to }).where(eq(messages.chatId, from))
+  await db().execute(sql`
+    delete from automations
+    where chat_id = ${to} and kind in (select kind from automations where chat_id = ${from} and kind is not null)
+  `)
+  await db().update(automations).set({ chatId: to }).where(eq(automations.chatId, from))
+  await db().update(emailDrafts).set({ chatId: to }).where(eq(emailDrafts.chatId, from))
+  await db().update(eventProposals).set({ chatId: to }).where(eq(eventProposals.chatId, from))
+  // Keys name the room as one colon-separated part: mail_cursor:<chat>:…,
+  // proactive_posts:<chat>. One the new room has already written stays.
+  const keyed = sql`(${settings.key} like ${`%:${from}:%`} or ${settings.key} like ${`%:${from}`})`
+  await db().execute(sql`
+    insert into settings (key, value)
+    select replace(key, ${`:${from}`}, ${`:${to}`}), value from settings where ${keyed}
+    on conflict (key) do nothing
+  `)
+  await db().delete(settings).where(keyed)
 }
 
 /* --------------------------------------------------------------- messages */
@@ -220,9 +310,13 @@ export async function recentMessages(chatId: string, limit = CONTEXT_WINDOW, exc
   return rows.reverse()
 }
 
-/** The last day's talk across every chat, oldest first, for the nightly memory pass. */
+/**
+ * The last day's talk across every chat, oldest first, for the nightly memory
+ * pass. On a day with more than `limit` messages it is the newest that are
+ * kept, since the pass is about what was said most recently.
+ */
 export async function messagesSince(hours: number, limit = 400) {
-  return db()
+  const rows = await db()
     .select({
       chatId: messages.chatId,
       authorName: messages.authorName,
@@ -231,15 +325,22 @@ export async function messagesSince(hours: number, limit = 400) {
     })
     .from(messages)
     .where(gte(messages.createdAt, new Date(Date.now() - hours * 3600_000)))
-    .orderBy(asc(messages.id))
+    .orderBy(desc(messages.id))
     .limit(limit)
+  return rows.reverse()
 }
 
-/** Keep the table bounded: drop everything older than the newest MAX_HISTORY rows. */
-export async function pruneMessages(chatId: string, keep = MAX_HISTORY) {
+/**
+ * Keep the table bounded: drop what is older than both the newest `keep` rows
+ * and the last `days`. A count alone let a chatty group lose its week-old
+ * talk, which left System's fortnight with empty days and the nightly pass
+ * short of the day's first messages.
+ */
+export async function pruneMessages(chatId: string, keep = MAX_HISTORY, days = HISTORY_DAYS) {
   await db().execute(sql`
     delete from ${messages}
     where ${messages.chatId} = ${chatId}
+      and ${messages.createdAt} < now() - make_interval(days => ${days})
       and ${messages.id} not in (
         select id from ${messages}
         where ${messages.chatId} = ${chatId}
@@ -506,6 +607,11 @@ export async function answerQuestion(
 
 /* ------------------------------------------------------------ automations */
 
+/**
+ * A chat has at most one of each ready-made watcher, and the database holds
+ * it to that: a second of the same kind, from two ticks installing the
+ * built-ins at once or a doubled /watch, hands back the one already there.
+ */
 export async function addAutomation(input: {
   chatId: string
   memberId?: number | null
@@ -523,8 +629,14 @@ export async function addAutomation(input: {
     instruction: input.instruction,
     kind: input.kind ?? null,
     nextRunAt: input.nextRunAt,
-  }).returning()
-  return row
+  }).onConflictDoNothing().returning()
+  if (row) return row
+  const [have] = await db()
+    .select()
+    .from(automations)
+    .where(and(eq(automations.chatId, input.chatId), eq(automations.kind, input.kind ?? '')))
+    .limit(1)
+  return have
 }
 
 export async function listAutomations(chatId?: string) {
@@ -619,13 +731,20 @@ export async function recordTick(now: Date): Promise<void> {
   await setSetting('last_tick_at', now.toISOString())
 }
 
-/** The long random path segment guarding the ICS feed; created on first use. */
+/**
+ * The long random path segment guarding the ICS feed; created on first use.
+ * Two first uses at once both get the one that was stored: an overwrite here
+ * would hand one of them a URL that is dead on arrival.
+ */
 export async function calendarToken(): Promise<string> {
   const existing = await getSetting('calendar_token')
   if (existing) return existing
-  const token = randomToken(24)
-  await setSetting('calendar_token', token)
-  return token
+  const [made] = await db()
+    .insert(settings)
+    .values({ key: 'calendar_token', value: randomToken(24) })
+    .onConflictDoNothing()
+    .returning({ value: settings.value })
+  return made?.value ?? ((await getSetting('calendar_token')) as string)
 }
 
 /**
@@ -700,13 +819,16 @@ export async function markDraft(
 
 /* ------------------------------------------------------------ shared lists */
 
-/** Lists are addressed by name, case-insensitively, and created on first use. */
+/**
+ * Lists are addressed by name, case-insensitively, and created on first use,
+ * by whichever of two people adding to a new list at once gets there first.
+ */
 export async function findOrCreateList(name: string): Promise<List> {
   const clean = name.trim().toLowerCase()
   const [existing] = await db().select().from(lists).where(eq(lists.name, clean)).limit(1)
   if (existing) return existing
-  const [row] = await db().insert(lists).values({ name: clean }).returning()
-  return row
+  const [row] = await db().insert(lists).values({ name: clean }).onConflictDoNothing().returning()
+  return row ?? ((await findList(clean)) as List)
 }
 
 export async function findList(name: string): Promise<List | undefined> {

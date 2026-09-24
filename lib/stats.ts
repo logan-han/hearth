@@ -54,12 +54,13 @@ export async function gatherStats(month?: string) {
       where created_at > now() - interval '14 days'
       group by 1 order by 1
     `),
-    // Which model actually answered, which is how the fallback chain is judged.
-    // Replies older than model tracking have a null model; they say nothing
-    // about the chain, so they stay out of the shares.
+    // Which model actually answered, which is how the fallback chain is judged:
+    // chat replies and watcher runs, read from the chain's own record, which
+    // is kept for the whole month. Stored messages are not: the history is
+    // only sure to reach back a fortnight.
     db().execute(sql`
-      select model, count(*) as n
-      from messages where role = 'assistant' and model is not null
+      select slot as model, count(*) as n
+      from model_events where outcome = 'answered' and purpose in ('hearth.chat', 'hearth.watcher')
         and created_at > now() - interval '30 days'
       group by 1 order by 2 desc limit 8
     `),

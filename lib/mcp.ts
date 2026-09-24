@@ -14,7 +14,7 @@ import { z } from 'zod'
 import { buildTools, MCP_TOOLS } from './tools'
 import type { ToolContext } from './tools/context'
 import { ambientContext } from './agent'
-import { groupChats } from './db/queries'
+import { roomsOf } from './db/queries'
 import { hydrateSecrets } from './settings'
 import { formatLocal } from './cron'
 import { timezone } from './env'
@@ -87,14 +87,29 @@ export function descriptors(): Descriptor[] {
 }
 
 /**
- * The room an MCP call acts in, which decides where a posted line goes and
- * which chat a draft, proposal or reminder belongs to. The household's own
- * group, or, while someone unrecognised is in it — that room is not the
- * household's — the member's own chat with the bot, whose id is theirs.
+ * The room an MCP call acts in, which decides where a posted line goes, which
+ * chat a draft, proposal or reminder belongs to, and whose summary the context
+ * carries. The group this member talked in last, of those the bot is still in
+ * and nobody unrecognised is in, or else the member's own chat with the bot,
+ * whose id is theirs. Never merely the oldest group on record: that may be a
+ * test room the bot has left, or the parents' room, whose summary a teenager's
+ * MCP client has no business reading.
  */
 export async function mcpChat(member: Member): Promise<string> {
-  const rooms = await groupChats().catch(() => [])
-  return rooms.find((r) => r.strangers.length === 0)?.chatId ?? member.telegramUserId
+  return (await mcpRoom(member)).chatId
+}
+
+/**
+ * That room, and what to call it when telling the client where its posts
+ * land. By name, never "the family group": the room the caller used last may
+ * be the parents' or the cousins', and a client told its notice reached the
+ * family will tell the user the children have heard.
+ */
+export async function mcpRoom(member: Member): Promise<{ chatId: string; name: string }> {
+  const rooms = await roomsOf(member.id).catch(() => [])
+  const room = rooms.find((r) => r.strangers.length === 0)
+  if (!room) return { chatId: member.telegramUserId, name: 'your own chat with Hearth' }
+  return { chatId: room.chatId, name: room.title ? `the group "${room.title}"` : 'a group chat' }
 }
 
 export type McpResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
@@ -110,8 +125,8 @@ export async function callTool(name: string, input: unknown, member: Member): Pr
     // The keys the tools reach for are stored, not deployed, so they have to be
     // in the environment before the first one runs.
     await hydrateSecrets()
-    const chatId = await mcpChat(member)
-    if (name === CONTEXT_TOOL) return answer(await context(member, chatId))
+    const { chatId, name: where } = await mcpRoom(member)
+    if (name === CONTEXT_TOOL) return answer(await context(member, chatId, where))
 
     if (!(MCP_TOOLS as string[]).includes(name)) return answer(`Hearth has no tool called ${name}.`, true)
     const ctx: ToolContext = { chatId, member, memberName: member.name, now: new Date(), notices: [], cursorScope: `mcp:${member.id}` }
@@ -121,7 +136,7 @@ export async function callTool(name: string, input: unknown, member: Member): Pr
     const result = await entry.execute(input as never, { toolCallId: `mcp-${name}`, messages: [] } as never)
     // The client has the result in hand, so what it reported as new is seen.
     await commitCursors(ctx.pendingCursors)
-    const trouble = await speak(ctx)
+    const trouble = await speak(ctx, where)
     return answer([render(result), trouble].filter(Boolean).join('\n\n'))
   } catch (err) {
     return answer(describeError(err), true)
@@ -129,11 +144,11 @@ export async function callTool(name: string, input: unknown, member: Member): Pr
 }
 
 /**
- * A tool that asked Hearth to say something says it to the family, the same as
- * it would on a chat turn. A client that cannot reach Telegram still gets its
- * result, with the promise the tool made withdrawn in as many words.
+ * A tool that asked Hearth to say something says it in the call's room, the
+ * same as it would on a chat turn. A client that cannot reach Telegram still
+ * gets its result, with the promise the tool made withdrawn in as many words.
  */
-async function speak(ctx: ToolContext): Promise<string> {
+async function speak(ctx: ToolContext, where: string): Promise<string> {
   if (ctx.notices.length === 0) return ''
   try {
     // Nobody in the room asked for this line, so it is held to the watchers'
@@ -144,18 +159,17 @@ async function speak(ctx: ToolContext): Promise<string> {
     await send(room, ctx.notices.join('\n'))
     return room === ctx.chatId
       ? ''
-      : 'Hearth posted this in your own chat rather than the family group, which has people in it I cannot account for.'
+      : `Hearth posted this in your own chat rather than ${where}, which has people in it I cannot account for.`
   } catch (err) {
-    return `Hearth could not post this in the family chat (${describeError(err)}), so nobody there has been told. Say it yourself.`
+    return `Hearth could not post this in ${where} (${describeError(err)}), so nobody there has been told. Say it yourself.`
   }
 }
 
-async function context(member: Member, chatId: string): Promise<string> {
+async function context(member: Member, chatId: string, where: string): Promise<string> {
   const ambient = await ambientContext(chatId, member, 'chat')
-  const room = chatId === member.telegramUserId ? 'your own chat with Hearth' : 'the family group'
   return [
     `You are acting as ${member.name}${member.isAdmin ? ', an admin of this household' : ''}.`,
-    `Anything Hearth posts on your behalf lands in ${room}.`,
+    `Anything Hearth posts on your behalf lands in ${where}.`,
     `NOW: ${formatLocal(new Date())} (${timezone()}).`,
     ambient.text,
   ]

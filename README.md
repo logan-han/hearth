@@ -316,10 +316,15 @@ npm run set-webhook               # or connect the webhook from /setup instead
 ```
 
 The build runs pending migrations whenever `DATABASE_URL` is present in the
-environment, which is what makes the Deploy button a complete install. A plain
-local `npm run build` finds no database and skips that step; point a local
-database at the schema with `npm run db:migrate` (or `db:push` while iterating
-on the schema).
+environment, which is what makes the Deploy button a complete install. On
+Vercel only the production build does: a preview built from an unmerged branch
+shares production's database unless Neon gives each preview a branch of its
+own, and would migrate it before review (and drizzle, which applies only what
+is newer than its last migration, would then skip one stamped earlier that
+merged later). With a Neon branch per preview, set `MIGRATE_PREVIEWS=1` on the
+Preview environment. A plain local `npm run build` finds no database and skips
+that step; point a local database at the schema with `npm run db:migrate` (or
+`db:push` while iterating on the schema).
 
 `drizzle-kit` and `set-webhook` both read `.env.local`, so secrets only have to
 live in one place locally. On Vercel they come from the project's environment
@@ -677,10 +682,11 @@ out twelve hours later.
 Admins manage the family from the same page: add someone by Telegram id and
 name, optionally with an email so they can sign in before linking anything,
 then change their email, allow, revoke, promote or remove. Revoking takes
-admin with it. A founding member from `ALLOWED_TELEGRAM_IDS` cannot be removed
-here, because the env seed would recreate them on their next message and the
-removal would be a lie — and the **last admin cannot be revoked, demoted or
-removed at all**, only succeeded, so the house cannot lock itself out.
+admin with it. A founding member from `ALLOWED_TELEGRAM_IDS` cannot be revoked
+or removed here, because the env seed would let them back in on their next
+message and the change would be a lie — and the **last admin cannot be
+revoked, demoted or removed at all**, only succeeded, so the house cannot lock
+itself out.
 
 System shows message volume over a fortnight, which model in the chain
 actually answered (the head answering nearly everything is the healthy shape),
@@ -763,9 +769,14 @@ what the morning brief was going to tell the family. Nobody in the group asked
 for a posted line, so it is held to the watchers' rule:
 while Telegram's head count there includes people the household cannot account
 for, it goes to the member's own chat with the bot instead.
-The room is the household's own group, or the member's DM with the bot while
-there is someone unrecognised in it. The transport is stateless streamable HTTP:
-nothing is remembered between calls, and an idle endpoint costs nothing.
+The room is the group the member talked in last, of those the bot is still in
+and nobody unrecognised is in, or else the member's DM with the bot. It is never
+simply the oldest group on record, which may be a test room the bot has left, or
+the parents' room, whose summary a teenager's client has no business reading.
+`hearth_context` names that room, so a client does not tell its user the family
+has heard when the notice went to the parents.
+The transport is stateless streamable HTTP: nothing is remembered between
+calls, and an idle endpoint costs nothing.
 
 ## Observability
 
@@ -815,6 +826,16 @@ scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
   `/allow`, which is how a room unmutes): `/calendar` in front of a stranger
   would hand them the feed. Someone who never speaks is caught by Telegram's
   head count before anything is posted unasked.
+- Vouching for someone unmutes every room they are in, whether it is done in
+  the room, by DM or on the dashboard, and so does an allowed member speaking
+  anywhere, which is how a founder, never vouched for, unmutes. Revoking or
+  removing someone flags them in every group Telegram says they are still in
+  (where it cannot say, every group they have talked in), so a member who sits
+  silent after `/deny` is a stranger like any other. A group Telegram upgrades
+  to a supergroup gets a new id, and its flags, history and watchers move to
+  it. A group the bot is removed from stops counting as the household's;
+  Telegram reports that only to a webhook that asks for it, so one registered by
+  an older Hearth wants pointing at the deployment again from Settings.
 - Whoever a private chat belongs to must still be allowed for any automation to
   post there. Revoking someone stops their DM watchers and pauses the custom
   automations they wrote, whose instructions are now a stranger's words run with

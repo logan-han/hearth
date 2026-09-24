@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
-import { gatherFamilyStats, readableLine } from '@/lib/stats'
+import { gatherFamilyStats, gatherStats, readableLine } from '@/lib/stats'
+import { recordModelEvent } from '@/lib/model-events'
 
 let client: PGlite
 beforeEach(async () => {
@@ -56,6 +57,21 @@ describe('what Home shows the family', () => {
     expect(stats.memories[0].since).toMatch(/\d{4}$/)
     expect(stats.questions.map((qn) => [qn.question, qn.candidate])).toEqual([['Who attends Hillside Grammar?', 'Juno attends Hillside Grammar']])
     expect(stats.automations.map((a) => [a.label, a.builtin])).toEqual([['Morning brief', true], ['bins', false]])
+  })
+})
+
+describe('what System shows', () => {
+  it("says which model answered from the chain's own month of record, not from the talk it keeps", async () => {
+    await recordModelEvent({ slot: 'gemini:flash', purpose: 'hearth.chat', outcome: 'answered' })
+    await recordModelEvent({ slot: 'gemini:flash', purpose: 'hearth.watcher', outcome: 'answered' })
+    await recordModelEvent({ slot: 'openrouter:free', purpose: 'hearth.chat', outcome: 'answered' })
+    // Three weeks back: older than the history keeps, well inside the thirty days shown.
+    await client.query(`update model_events set created_at = now() - interval '21 days' where slot = 'openrouter:free'`)
+    await recordModelEvent({ slot: 'openrouter:free', purpose: 'hearth.chat', outcome: 'failed', error: '429' })
+    await recordModelEvent({ slot: 'jev:jev-latest', purpose: 'hearth.gate', outcome: 'answered' })
+    await recordModelEvent({ slot: 'gemini:flash', purpose: 'hearth.summary', outcome: 'answered' })
+    const stats = await gatherStats()
+    expect(stats.models).toEqual([{ model: 'gemini:flash', count: 2 }, { model: 'openrouter:free', count: 1 }])
   })
 })
 

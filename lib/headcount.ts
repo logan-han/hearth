@@ -1,6 +1,7 @@
 import { GrammyError, HttpError } from 'grammy'
 import { bot } from './telegram'
-import { allowedMembers } from './db/queries'
+import { allowedMembers, groupChats, roomsOf, noteStranger } from './db/queries'
+import type { Member } from './db/schema'
 import { idSet } from './env'
 import { describeError } from './errors'
 
@@ -18,6 +19,9 @@ const transient = (err: unknown) =>
 
 /** What Telegram said, whether or not the message carries its description. */
 const said = (err: unknown) => (err instanceof GrammyError ? `${err.message} ${err.description}` : describeError(err))
+
+type ChatMember = Awaited<ReturnType<ReturnType<typeof bot>['api']['getChatMember']>>
+const inRoom = (m: ChatMember) => PRESENT.has(m.status) || (m.status === 'restricted' && m.is_member)
 
 /**
  * How many people in a group the household cannot account for: Telegram's
@@ -52,7 +56,7 @@ export async function unaccountedIn(chatId: string): Promise<number | null> {
   for (const id of ids) {
     try {
       const m = await api.getChatMember(chatId, id)
-      if (PRESENT.has(m.status) || (m.status === 'restricted' && m.is_member)) present.add(m.user.id)
+      if (inRoom(m)) present.add(m.user.id)
     } catch (err) {
       if (transient(err)) throw err
       // An id Telegram has never seen in this chat is simply not there. Any
@@ -64,4 +68,31 @@ export async function unaccountedIn(chatId: string): Promise<number | null> {
     }
   }
   return Math.max(0, total - 1 - present.size)
+}
+
+/**
+ * Someone has just lost access, so every group they are still in holds a
+ * stranger now, whether or not they ever speak again: the room is flagged the
+ * way it would be had they walked in. Telegram says who is in a room; where it
+ * cannot say, having talked there counts as being there. The room is not told,
+ * since the admin who revoked them is the one to say so. Returns the rooms
+ * that are quiet now.
+ */
+export async function flagRevoked(person: Pick<Member, 'id' | 'telegramUserId' | 'name'>): Promise<string[]> {
+  const [rooms, spoken] = await Promise.all([groupChats(), roomsOf(person.id)])
+  const quiet: string[] = []
+  for (const room of rooms) {
+    let there: boolean
+    try {
+      there = inRoom(await bot().api.getChatMember(room.chatId, Number(person.telegramUserId)))
+    } catch (err) {
+      if (NOT_THERE.test(said(err))) continue
+      console.warn(`[headcount] could not look for ${person.telegramUserId} in chat ${room.chatId}:`, said(err))
+      there = spoken.some((r) => r.chatId === room.chatId)
+    }
+    if (!there) continue
+    await noteStranger(room.chatId, { id: person.telegramUserId, name: person.name })
+    quiet.push(room.title ?? room.chatId)
+  }
+  return quiet
 }

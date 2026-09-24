@@ -43,7 +43,7 @@ async function main() {
   await call('setWebhook', {
     url: `${appUrl}/api/telegram`,
     secret_token: secret,
-    allowed_updates: ['message', 'edited_message'],
+    allowed_updates: ['message', 'edited_message', 'my_chat_member'],
     drop_pending_updates: true,
   })
   const { BOT_COMMANDS } = await import('../lib/telegram-admin')

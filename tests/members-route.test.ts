@@ -133,6 +133,42 @@ describe('adding and editing a member', () => {
     expect(saved).toMatchObject({ allowed: false, isAdmin: false })
   })
 
+  it('quiets the rooms a revoked member has talked in, and unmutes every one when they are allowed again', async () => {
+    // No bot token here, so Telegram cannot say who is where, and having talked in a room stands in for it.
+    delete process.env.TELEGRAM_BOT_TOKEN
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await post({ telegramUserId: '999', name: 'Ada' })
+    const ada = await q.memberByTelegramId('999')
+    await q.rememberChat('-100', 'group', 'Family')
+    await q.rememberChat('-200', 'group', 'Cousins')
+    await q.recordMessage({ chatId: '-100', memberId: ada!.id, role: 'user', content: 'hi' })
+
+    await post({ telegramUserId: '999', name: 'Ada', allowed: false })
+    expect(await q.strangersIn('-100')).toEqual([{ id: '999', name: 'Ada' }])
+    expect(await q.strangersIn('-200')).toEqual([])
+
+    await q.noteStranger('-200', { id: '999', name: 'Ada' })
+    await post({ telegramUserId: '999', name: 'Ada' })
+    expect(await q.strangersIn('-100')).toEqual([])
+    expect(await q.strangersIn('-200')).toEqual([])
+  })
+
+  it('refuses to revoke a founding member, whose next message would let them back into one room only', async () => {
+    delete process.env.TELEGRAM_BOT_TOKEN
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await post({ telegramUserId: '111', name: 'Boss', isAdmin: true })
+    await post({ telegramUserId: '8734670748', name: 'Rowan', isAdmin: true })
+    const rowan = await q.memberByTelegramId('8734670748')
+    await q.rememberChat('-100', 'group', 'Family')
+    await q.recordMessage({ chatId: '-100', memberId: rowan!.id, role: 'user', content: 'hi' })
+
+    const res = await post({ telegramUserId: '8734670748', name: 'Rowan', isAdmin: true, allowed: false })
+    expect(res.status).toBe(400)
+    expect(String((await res.json()).error)).toContain('ALLOWED_TELEGRAM_IDS')
+    expect(await q.memberByTelegramId('8734670748')).toMatchObject({ allowed: true, isAdmin: true })
+    expect(await q.strangersIn('-100')).toEqual([])
+  })
+
   it('updates an email on an existing member, and clears it on empty', async () => {
     await post({ telegramUserId: '999', name: 'Ada', email: 'old@hearth.example' })
     await post({ telegramUserId: '999', name: 'Ada', email: 'new@hearth.example' })
@@ -157,6 +193,16 @@ describe('removing a member', () => {
     await post({ telegramUserId: '999', name: 'Ada' })
     expect((await del('999')).status).toBe(200)
     expect(await q.memberByTelegramId('999')).toBeUndefined()
+  })
+
+  it('quiets the rooms they talked in, before the history forgets it was them', async () => {
+    delete process.env.TELEGRAM_BOT_TOKEN
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await post({ telegramUserId: '999', name: 'Ada' })
+    await q.rememberChat('-100', 'group', 'Family')
+    await q.recordMessage({ chatId: '-100', memberId: (await q.memberByTelegramId('999'))!.id, role: 'user', content: 'hi' })
+    expect((await del('999')).status).toBe(200)
+    expect(await q.strangersIn('-100')).toEqual([{ id: '999', name: 'Ada' }])
   })
 
   it('refuses to pretend it removed a founding member', async () => {

@@ -12,6 +12,9 @@ import {
   strangersIn,
   noteStranger,
   clearStranger,
+  clearStrangerEverywhere,
+  setChatLeft,
+  moveChat,
   recordMessage,
   pruneMessages,
   connectionsFor,
@@ -33,6 +36,7 @@ import type { Member } from './db/schema'
 import { describeError } from './errors'
 import { unsaid } from './notices'
 import { commitCursors } from './tools/cursor'
+import { flagRevoked } from './headcount'
 
 /**
  * Authorisation is per person, never per room. `ALLOWED_TELEGRAM_IDS` seeds the
@@ -383,11 +387,22 @@ async function handleCommand(c: TelegramContext, member: Member): Promise<boolea
       if (granting) {
         const name = c.replyToUserId === target ? (c.replyToUserName ?? `user${target}`) : `user${target}`
         await upsertMember(target, name, { allowed: true })
-        await clearStranger(c.chatId, target)
+        // Vouched for here or in a DM, they are family in every room.
+        await clearStrangerEverywhere(target)
         await send(c.chatId, `Done, \`${target}\` can use me now.`)
       } else {
         const row = await setMemberAllowed(target, false)
-        await send(c.chatId, row ? `Revoked \`${target}\`.` : `I have no record of \`${target}\`.`)
+        if (!row) {
+          await send(c.chatId, `I have no record of \`${target}\`.`)
+          return true
+        }
+        const quiet = await flagRevoked(row)
+        await send(
+          c.chatId,
+          `Revoked \`${target}\`.` +
+            (quiet.length ? ` I'll stay quiet in ${quiet.join(', ')} while they are there.` : '') +
+            ' If they had the family calendar URL, `/calendar new` replaces it.',
+        )
       }
       return true
     }
@@ -498,9 +513,30 @@ async function shouldRespond(c: TelegramContext, messageId: number): Promise<boo
  * membership, so anyone who never speaks is otherwise invisible.
  */
 async function handleMembershipChange(update: Update): Promise<boolean> {
+  // The bot's own comings and goings. A room it was removed from stops
+  // counting as the household's: no built-in watchers there, and never the
+  // room an MCP call acts in.
+  const own = update.my_chat_member
+  if (own) {
+    const next = own.new_chat_member
+    const gone = next.status === 'left' || next.status === 'kicked' || (next.status === 'restricted' && !next.is_member)
+    await setChatLeft(String(own.chat.id), gone)
+    return true
+  }
+
   const msg = update.message
   if (!msg) return false
   const chatId = String(msg.chat.id)
+
+  // Made a supergroup, the room has a new id; both ends of the change say so.
+  if (msg.migrate_to_chat_id) {
+    await moveChat(chatId, String(msg.migrate_to_chat_id))
+    return true
+  }
+  if (msg.migrate_from_chat_id) {
+    await moveChat(String(msg.migrate_from_chat_id), chatId)
+    return true
+  }
 
   if (msg.left_chat_member) {
     await clearStranger(chatId, String(msg.left_chat_member.id))
@@ -599,8 +635,11 @@ export async function processUpdate(update: Update): Promise<void> {
   }
 
   await rememberChat(c.chatId, c.chatType, c.chatTitle)
-  // Seeing an allowed member speak clears any stale flag against them.
-  await clearStranger(c.chatId, c.userId)
+  // Seeing an allowed member speak clears any stale flag against them, in
+  // every room: whoever is let through here is family everywhere. A founder
+  // re-granted by ALLOWED_TELEGRAM_IDS, or added to it in Settings, never went
+  // through /allow, so this is the only place their other rooms unmute.
+  await clearStrangerEverywhere(c.userId)
   const text = await cleanText(c.text)
   // History is text-only, so note that something was attached rather than
   // leaving a bare caption with no explanation of what it described. A file's

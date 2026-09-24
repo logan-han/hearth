@@ -65,7 +65,7 @@ export async function POST(req: Request) {
     const hook = await telegramApi(token, 'setWebhook', {
       url: `${appUrl()}/api/telegram`,
       secret_token: secret,
-      allowed_updates: ['message', 'edited_message'],
+      allowed_updates: ['message', 'edited_message', 'my_chat_member'],
     })
     if (!hook.ok) {
       return NextResponse.json(

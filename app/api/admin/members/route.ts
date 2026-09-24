@@ -1,8 +1,11 @@
 import { NextResponse } from 'next/server'
 import { requireAdmin } from '@/lib/auth/session'
-import { allMembersWithLinks, saveMember, deleteMember, memberByTelegramId, allowedMembers } from '@/lib/db/queries'
+import {
+  allMembersWithLinks, saveMember, deleteMember, memberByTelegramId, allowedMembers, clearStrangerEverywhere,
+} from '@/lib/db/queries'
 import { idSet } from '@/lib/env'
 import { hydrateSecrets } from '@/lib/settings'
+import { flagRevoked } from '@/lib/headcount'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -59,7 +62,23 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: `"${email}" does not look like an email address.` }, { status: 400 })
   }
 
-  const demotes = body.allowed === false || body.isAdmin !== true
+  const revokes = body.allowed === false
+  if (revokes) {
+    // The founder guard reads ALLOWED_TELEGRAM_IDS, and flagging their rooms
+    // asks Telegram who is where with the bot token; either may be stored.
+    await hydrateSecrets()
+    // As with removing one: a founder is re-granted on their next message, so
+    // revoking them here would undo itself, having muted every room they sit
+    // in until then.
+    if (idSet('ALLOWED_TELEGRAM_IDS').has(telegramUserId)) {
+      return NextResponse.json(
+        { error: 'That is a founding member, set in ALLOWED_TELEGRAM_IDS. Remove them there instead.' },
+        { status: 400 },
+      )
+    }
+  }
+
+  const demotes = revokes || body.isAdmin !== true
   if (demotes && (await isLastAdmin(telegramUserId))) {
     return NextResponse.json(
       { error: 'That is the only admin. Make someone else an admin first.' },
@@ -67,13 +86,20 @@ export async function POST(req: Request) {
     )
   }
 
-  await saveMember({
+  const saved = await saveMember({
     telegramUserId,
     name,
     email,
     allowed: body.allowed !== false,
     isAdmin: body.isAdmin === true,
   })
+  // The rooms follow the grant, as they do for /allow and /deny: vouched for
+  // here, they unmute every room; revoked, every room they are in goes quiet.
+  if (saved.allowed) {
+    await clearStrangerEverywhere(telegramUserId)
+  } else {
+    await flagRevoked(saved)
+  }
   return NextResponse.json({ ok: true, members: await allMembersWithLinks() })
 }
 
@@ -102,6 +128,10 @@ export async function DELETE(req: Request) {
     )
   }
 
+  // Removed is revoked as well. Their rooms are flagged first, while the
+  // history still says which ones they talked in.
+  const leaving = await memberByTelegramId(id)
+  if (leaving) await flagRevoked(leaving)
   const gone = await deleteMember(id)
   return gone
     ? NextResponse.json({ ok: true, members: await allMembersWithLinks() })

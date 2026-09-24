@@ -1,16 +1,20 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { GrammyError, HttpError } from 'grammy'
 
-const { getChatMemberCount, getChatMember, getMe, allowedMembers } = vi.hoisted(() => ({
+type Room = { chatId: string; title: string | null; strangers: [] }
+const { getChatMemberCount, getChatMember, getMe, allowedMembers, groupChats, roomsOf, noteStranger } = vi.hoisted(() => ({
   getChatMemberCount: vi.fn<(chatId: string) => Promise<number>>(),
   getChatMember: vi.fn<(chatId: string, userId: number) => Promise<{ status: string; is_member?: boolean; user: { id: number } }>>(),
   getMe: vi.fn(async () => ({ id: 1 })),
   allowedMembers: vi.fn(async () => [] as { telegramUserId: string }[]),
+  groupChats: vi.fn(async (): Promise<Room[]> => []),
+  roomsOf: vi.fn(async (_memberId: number): Promise<Room[]> => []),
+  noteStranger: vi.fn(async (_chatId: string, _s: { id: string; name: string }) => true),
 }))
 vi.mock('@/lib/telegram', () => ({ bot: () => ({ api: { getChatMemberCount, getChatMember, getMe } }) }))
-vi.mock('@/lib/db/queries', () => ({ allowedMembers }))
+vi.mock('@/lib/db/queries', () => ({ allowedMembers, groupChats, roomsOf, noteStranger }))
 
-const { unaccountedIn } = await import('@/lib/headcount')
+const { unaccountedIn, flagRevoked } = await import('@/lib/headcount')
 
 /** Telegram's answer for one person: a status, and who it is about. */
 const as = (status: string, id: number, isMember?: boolean) => ({ status, user: { id }, ...(isMember === undefined ? {} : { is_member: isMember }) })
@@ -104,5 +108,48 @@ describe('unaccountedIn', () => {
     getChatMember.mockImplementation(async (_c, id) => as('left', id))
     await unaccountedIn('-100')
     expect(getChatMember.mock.calls.map(([, id]) => id).sort()).toEqual([111, 222, 333, 444])
+  })
+})
+
+describe('flagRevoked', () => {
+  const room = (chatId: string, title: string | null = null): Room => ({ chatId, title, strangers: [] })
+  const nan = { id: 7, telegramUserId: '777', name: 'Nan' }
+  beforeEach(() => {
+    roomsOf.mockResolvedValue([])
+    noteStranger.mockResolvedValue(true)
+  })
+
+  it('flags every group Telegram says they are still in, silent or not, and names them', async () => {
+    groupChats.mockResolvedValue([room('-100', 'Family'), room('-200', 'Cousins'), room('-300', 'Old'), room('-400'), room('-500')])
+    getChatMember.mockImplementation(async (chatId, id) => {
+      if (chatId === '-100') return as('member', id)
+      if (chatId === '-200') return as('restricted', id, true)
+      if (chatId === '-300') return as('left', id)
+      if (chatId === '-400') return as('kicked', id)
+      throw refusal(400, 'Bad Request: user not found')
+    })
+    expect(await flagRevoked(nan)).toEqual(['Family', 'Cousins'])
+    expect(noteStranger.mock.calls).toEqual([
+      ['-100', { id: '777', name: 'Nan' }],
+      ['-200', { id: '777', name: 'Nan' }],
+    ])
+    expect(getChatMember).toHaveBeenCalledWith('-100', 777)
+    expect(roomsOf).toHaveBeenCalledWith(7)
+  })
+
+  it('takes having talked in a room as being there when Telegram cannot say', async () => {
+    groupChats.mockResolvedValue([room('-100', 'Family'), room('-200')])
+    roomsOf.mockResolvedValue([room('-200')])
+    getChatMember.mockRejectedValue(refusal(400, 'Bad Request: CHAT_ADMIN_REQUIRED'))
+    expect(await flagRevoked(nan)).toEqual(['-200'])
+    expect(noteStranger).toHaveBeenCalledTimes(1)
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('could not look for 777'), expect.stringContaining('CHAT_ADMIN_REQUIRED'))
+  })
+
+  it('still names a room they were already flagged in', async () => {
+    groupChats.mockResolvedValue([room('-100', 'Family')])
+    getChatMember.mockImplementation(async (_c, id) => as('member', id))
+    noteStranger.mockResolvedValueOnce(false)
+    expect(await flagRevoked(nan)).toEqual(['Family'])
   })
 })

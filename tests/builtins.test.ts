@@ -70,6 +70,19 @@ describe('the built-in watchers', () => {
     expect(counted).toHaveBeenCalledWith(expect.objectContaining({ chatId: '-400', title: 'School parents' }), 23)
   })
 
+  it('installs each of them once when two ticks overlap', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    await Promise.all([installBuiltins(now), installBuiltins(now)])
+    expect((await q.listAutomations('-100')).map((a) => a.kind).sort()).toEqual(['morning', 'snapshot'])
+  })
+
+  it('leaves alone a room the bot has been removed from', async () => {
+    await q.rememberChat('-100', 'group', 'Test room')
+    await q.setChatLeft('-100', true)
+    expect((await installBuiltins(now)).installed).toEqual([])
+    expect(unaccountedIn).not.toHaveBeenCalled()
+  })
+
   it('does not ask Telegram about a room that already has its watchers', async () => {
     await q.rememberChat('-100', 'group', 'Family')
     await installBuiltins(now)
