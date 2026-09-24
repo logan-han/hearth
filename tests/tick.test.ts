@@ -82,6 +82,8 @@ vi.mock('@/lib/db', () => ({
 }))
 
 const { POST, GET } = await import('@/app/api/tick/route')
+const { GrammyError, HttpError } = await import('grammy')
+const { APICallError, RetryError } = await import('ai')
 
 function automation(over: Partial<Automation> = {}): Automation {
   return {
@@ -830,12 +832,17 @@ describe('ready-made watchers', () => {
   const snapshot = (over: Partial<Automation> = {}) => automation({ kind: 'snapshot', label: 'Money snapshot', ...over })
 
   /** A brief whose mail fetch stages a cursor move on the run's context, as the real tool does. */
+  /** Where the staged look starts from: the stored cursor it read, or none on a first look. */
+  let stagedFrom: string | undefined
+  beforeEach(() => {
+    stagedFrom = undefined
+  })
   const stagingMail = () =>
     buildTools.mockImplementationOnce(((ctx: { pendingCursors?: unknown[] }) => ({
       new_transactions: { execute: newTransactions },
       new_mail: {
         execute: async (...a: unknown[]) => {
-          ctx.pendingCursors = [{ key: 'mail_cursor:-100999:1:google', at: '2026-09-24T01:00:00.000Z', ids: ['m1'], prev: null }]
+          ctx.pendingCursors = [{ key: 'mail_cursor:-100999:1:google', at: '2026-09-24T01:00:00.000Z', ids: ['m1'], prev: stagedFrom ? { at: stagedFrom, ids: [] } : null }]
           return newMail(...a)
         },
       },
@@ -983,15 +990,87 @@ describe('ready-made watchers', () => {
       expect(written()[KEY]).toEqual({ ...first, runs: 2 })
     })
 
-    it('does not count a model chain that is down or rate limited, which says nothing about the mail', async () => {
+    const apiError = (message: string, statusCode: number | undefined, isRetryable = false) =>
+      new APICallError({ message, url: 'https://llm.test', requestBodyValues: {}, statusCode, isRetryable })
+    const retried = (last: Error) => new RetryError({ message: `Failed after 3 attempts. Last error: ${last.message}`, reason: 'maxRetriesExceeded', errors: [last] })
+    const grammy = (code: number, description: string) =>
+      new GrammyError('Call to sendMessage failed!', { ok: false, error_code: code, description }, 'sendMessage', {})
+
+    it.each([
+      ['a rate limit', () => retried(apiError('Provider returned error', 429, true))],
+      ['a gateway error', () => apiError('Bad Gateway', 502, true)],
+      ['no credit left', () => apiError('Insufficient credits', 402)],
+      ['a key the provider refuses', () => apiError('User not found.', 401)],
+      ['a key Gemini answers a 400 for', () => apiError('API key not valid. Please pass a valid API key.', 400)],
+      ['no connection', () => apiError('Cannot connect to API: connect ECONNREFUSED 10.0.0.1:443', undefined, true)],
+      ['a step that timed out', () => new DOMException('The operation was aborted due to timeout', 'TimeoutError')],
+      ['Telegram flooded', () => grammy(429, 'Too Many Requests: retry after 5')],
+      ['Telegram unreachable', () => new HttpError('Network request for sendMessage failed!', new Error('ECONNRESET'))],
+      ['nothing configured', () => new Error('No LLM configured: set GEMINI_API_KEY, OPENROUTER_API_KEY, or LLM_BASE_URL + LLM_MODEL')],
+    ])('does not count %s, which says nothing about the mail', async (_what, make) => {
       stuckAt({ [KEY]: entry(2, 20) })
-      for (const err of ['429 quota', 'Request timed out', '503 Service Unavailable', 'No LLM configured: set GEMINI_API_KEY']) {
-        stagingMail()
-        runAgent.mockRejectedValueOnce(new Error(err))
-        await authed()
-      }
+      runAgent.mockRejectedValueOnce(make())
+      await authed()
       expect(setSetting).not.toHaveBeenCalledWith('unspent:1', expect.anything())
       expect(setSetting).not.toHaveBeenCalledWith(KEY, expect.anything())
+    })
+
+    it.each([
+      ['a request too long for the model, whose token count is no status code', () => retried(apiError('The input token count (1048576) exceeds the maximum number of tokens allowed (1048576).', 400))],
+      ['a payload the provider will not take', () => apiError('Request Entity Too Large', 413)],
+      ['a reply no model could finish', () => new Error('openrouter:minimax/minimax-m3:free returned no text')],
+    ])('counts %s, which fails the same way every time', async (_what, make) => {
+      stuckAt({ [KEY]: entry(2, 20) })
+      runAgent.mockRejectedValueOnce(make())
+      await authed()
+      expect(setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
+    })
+
+    it('counts a post Telegram cannot parse, which would fail the same way next time', async () => {
+      stuckAt({ [KEY]: entry(2, 20) })
+      runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.', notices: [], model: 'primary:test' })
+      send.mockRejectedValueOnce(grammy(400, "Bad Request: can't parse entities: Can't find end of the entity starting at byte offset 12"))
+      await authed()
+      expect(setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
+    })
+
+    it('does not count a PROBLEM that is a tool\'s service down or unset, only one about what was read', async () => {
+      stuckAt({ [KEY]: entry(2, 20) })
+      runAgent.mockResolvedValue({ text: 'PROBLEM: weather returned 503 Service Unavailable\nPROBLEM: Jira is not configured\nSKIP', notices: [], model: 'primary:test' })
+      await authed()
+      expect(setSetting).not.toHaveBeenCalledWith('unspent:1', expect.anything())
+
+      stagingMail()
+      runAgent.mockResolvedValue({ text: 'PROBLEM: weather returned 503\nPROBLEM: read_email failed for the school message\nSKIP', notices: [], model: 'primary:test' })
+      await authed()
+      expect(setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
+    })
+
+    it('forgets a count that has not got there in over a week', async () => {
+      stuckAt({ [KEY]: entry(2, 9 * 24) })
+      runAgent.mockResolvedValue(problem)
+      await authed()
+      expect(written()[KEY]).toMatchObject({ runs: 1 })
+      expect(setSetting).not.toHaveBeenCalledWith(KEY, expect.anything())
+    })
+
+    it('moves a cursor held at a real place on no further than it has got since, naming the span', async () => {
+      const from = '2026-09-22T21:00:00.000Z'
+      const ahead = '2026-09-24T03:00:00.000Z'
+      stagedFrom = from
+      const first = { from, since: new Date(Date.now() - 20 * HOUR).toISOString(), runs: 2, move: { key: KEY, at: '2026-09-23T01:00:00.000Z', ids: ['m0'], prev: { at: from, ids: [] } } }
+      // A chat turn has meanwhile moved the stored cursor on past the stuck move.
+      getSetting.mockImplementation(async (key: string) =>
+        key === 'unspent:1' ? JSON.stringify({ [KEY]: first })
+        : key === KEY ? JSON.stringify({ at: ahead, ids: ['c1'] })
+        : key === 'memory_sweep_day' ? today() : null,
+      )
+      runAgent.mockResolvedValue(problem)
+      await authed()
+      const spent = JSON.parse(setSetting.mock.calls.find(([k]) => k === KEY)![1])
+      expect(spent.at).toBe(ahead)
+      expect(spent.ids).toEqual(['c1', 'm0'])
+      expect(send).toHaveBeenCalledWith('900', expect.stringMatching(/mail in a linked Gmail mailbox from Wed,? 23 Sept 2026,? 7:00\s?am to Wed,? 23 Sept 2026,? 11:00\s?am/))
     })
 
     it('starts the count again when the cursor is held somewhere new', async () => {

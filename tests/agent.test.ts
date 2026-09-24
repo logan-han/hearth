@@ -550,6 +550,26 @@ describe('runAgent', () => {
     expect(r.cutShort).toBeUndefined()
   })
 
+  it('posts the first model\'s cut-short post after all when no later model answers', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
+    generateText
+      .mockResolvedValueOnce({ ...reply(`**To do**\n${lines.join('\n')}\n- Item 40: somethi`), finishReason: 'length' })
+      .mockRejectedValueOnce(new Error('429 quota'))
+    const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })
+    expect(r.text).toBe(`**To do**\n${lines.join('\n')}`)
+    expect(r.model).toContain('gemini')
+    expect(r.cutShort).toBe(true)
+  })
+
+  it('keeps no fragment in reserve: with no later answer, the run fails as it would have', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText
+      .mockResolvedValueOnce({ ...reply(`**To do**\n${'x'.repeat(300)}`), finishReason: 'length' })
+      .mockRejectedValueOnce(new Error('429 quota'))
+    await expect(runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })).rejects.toThrow('429 quota')
+  })
+
   it('trims on the first model when it already wrote something, since no other model gets the turn', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)

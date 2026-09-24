@@ -156,6 +156,25 @@ describe('a turn that looks at new mail', () => {
     expect(looksBefore('not an error')).toEqual([])
   })
 
+  it('spends what a cut-short post read when it goes out because no later model answered', async () => {
+    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+    listMail.mockResolvedValue([mail('a')])
+    const lines = Array.from({ length: 12 }, (_, i) => `- Item ${i}: something the school wants by Friday`)
+    generateText
+      .mockImplementationOnce(async (opts: { tools: Tools }) => {
+        await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+        return { ...reply(`**School**\n${lines.join('\n')}\n- Item 12: somethi`), finishReason: 'length' }
+      })
+      .mockImplementationOnce(async (opts: { tools: Tools }) => {
+        await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+        throw new Error('429 quota')
+      })
+    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', mode: 'watcher', tools: ['new_mail'], text: 'post new school mail' })
+    expect(r.cutShort).toBe(true)
+    // The first model's look, once: the second's went with its failure.
+    expect(r.cursors?.map((c) => c.ids)).toEqual([['a']])
+  })
+
   it('keeps nothing against a failed chat turn, whose reply the member is still waiting on', async () => {
     const member = await q.upsertMember('111', 'Rowan', { allowed: true })
     listMail.mockResolvedValue([mail('a')])

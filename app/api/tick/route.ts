@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
-import { GrammyError } from 'grammy'
+import { GrammyError, HttpError } from 'grammy'
+import { APICallError, RetryError } from 'ai'
 import { Receiver } from '@upstash/qstash'
 import {
   dueAutomations, claimAutomation, allowedMembers, recordMessage, strangersIn,
@@ -20,7 +21,7 @@ import { commitCursors, type StagedCursor } from '@/lib/tools/cursor'
 import { send } from '@/lib/telegram'
 import { hydrateSecrets } from '@/lib/settings'
 import { flushTelemetry } from '@/lib/telemetry'
-import { pruneModelEvents, failureKind } from '@/lib/model-events'
+import { pruneModelEvents } from '@/lib/model-events'
 import { parseLog, prune, underCap, recordPost, shouldWarn, markWarned, PROACTIVE_POSTS_PER_HOUR } from '@/lib/rate-cap'
 import type { Automation, Member } from '@/lib/db/schema'
 import { describeError } from '@/lib/errors'
@@ -333,8 +334,7 @@ async function counted<T>(
   try {
     out = await step()
   } catch (err) {
-    const why = describeError(err)
-    if (!passing(why)) await unspent(a, member, staged(err), why).catch((e) => console.error('[tick] stuck guard failed:', e))
+    if (!passing(err)) await unspent(a, member, staged(err), describeError(err)).catch((e) => console.error('[tick] stuck guard failed:', e))
     throw err
   }
   if (out === 'problem') {
@@ -343,9 +343,33 @@ async function counted<T>(
   return out
 }
 
-/** A model chain or a network that is down, rate limited or refusing the key, which will pass or needs fixing, not skipping. */
-const passing = (why: string) =>
-  ['rate limited', 'timed out', 'provider error', 'refused'].includes(failureKind(why)) || /no llm configured/i.test(why)
+/**
+ * How a failure that says nothing about the items reads: a service down,
+ * rate limited, out of credit, unreachable or refusing its key. Numbers
+ * stand alone, so a token count in a "too long" message is not a 5xx.
+ */
+const PASSING_WORDS =
+  /\b(?:401|403|429|5\d\d)\b|rate.?limit|quota|too many requests|timed? ?out|\btimeout\b|unavailable|overloaded|ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|cannot connect|network error|no llm configured|not configured|unreachable|unauthori[sz]ed|api key|insufficient credits|provider returned error|expired or been revoked/i
+
+/**
+ * A failure of the model chain, a service or the network, which passes or
+ * needs fixing, not skipping. What is left (a request the provider rejects as
+ * it stands, a message Telegram cannot parse) is about what was sent, and
+ * counts. Judged on the error itself where it says, and on its words only
+ * where it does not.
+ */
+function passing(err: unknown): boolean {
+  if (RetryError.isInstance(err)) return passing(err.lastError)
+  if (APICallError.isInstance(err)) {
+    if (err.isRetryable || err.statusCode === undefined || ![400, 413, 422].includes(err.statusCode)) return true
+    // A 400 can still be the key (Gemini answers a bad one that way).
+    return PASSING_WORDS.test(err.message)
+  }
+  if (err instanceof GrammyError) return err.error_code === 429 || err.error_code >= 500 || err.error_code === 401 || err.error_code === 403
+  if (err instanceof HttpError) return true
+  if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) return true
+  return PASSING_WORDS.test(describeError(err))
+}
 
 /**
  * Post-or-skip is decided in a fresh context against the evidence, by a
@@ -434,7 +458,7 @@ async function deliver(
   result: AgentResult,
   evidence: string,
   spent: () => Promise<void>,
-): Promise<'spent' | 'problem' | 'capped'> {
+): Promise<'spent' | 'problem' | 'unavailable' | 'capped'> {
   const split = (part: string) => {
     const lines = part.split('\n')
     const skip = lines.some(isSkipLine)
@@ -478,7 +502,9 @@ async function deliver(
       await spent()
       return 'spent'
     }
-    return 'problem'
+    // Counted against the stuck guard only when a problem is about what was
+    // read, not a tool whose service is down or whose link has lapsed.
+    return problems.every((line) => PASSING_WORDS.test(line)) ? 'unavailable' : 'problem'
   }
 
   // The last guard: however the run got here, a chat hears from its watchers
@@ -531,6 +557,12 @@ async function deliver(
  */
 const STUCK_RUNS = 3
 const STUCK_FOR_MS = 12 * 3600_000
+/**
+ * A count that has not got there in this long is forgotten: runs that far
+ * apart are not one failure repeating, and a mailbox unlinked meanwhile must
+ * not have its old place committed onto it when it is linked again.
+ */
+const STUCK_FORGOTTEN_MS = 8 * 86_400_000
 
 /** One cursor held at the same place: since when, how many runs, and the first stuck run's move. */
 type Stuck = { from: string; since: string; runs: number; move: StagedCursor }
@@ -543,9 +575,12 @@ async function readStuck(a: Automation): Promise<Record<string, Stuck>> {
     return {}
   }
   if (!parsed || typeof parsed !== 'object') return {}
-  // Anything unreadable counts as never stuck.
+  // Anything unreadable counts as never stuck, and anything that old as forgotten.
+  const cutoff = Date.now() - STUCK_FORGOTTEN_MS
   return Object.fromEntries(
-    Object.entries(parsed).filter(([, v]) => typeof v?.from === 'string' && typeof v?.move?.key === 'string'),
+    Object.entries(parsed).filter(
+      ([, v]) => typeof v?.from === 'string' && typeof v?.move?.key === 'string' && Date.parse(v?.since) > cutoff,
+    ),
   ) as Record<string, Stuck>
 }
 

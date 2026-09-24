@@ -482,11 +482,15 @@ the same every time would otherwise hold every later run on the same items for
 good, so a mailbox or account held at the same place for three runs and at
 least twelve hours is moved past what the first of those runs saw (anything
 newer keeps its chance), and an admin is told once which source and which span
-were skipped. A model chain that is down, rate limited or refusing its key
-does not count towards that: it says nothing about the items. A post longer
-than the model's output allowance goes to the next model in the chain first;
-the last one's loses its cut-off last line rather than going out mid-bullet,
-still faces the checks, and an admin is told it went out short. A reply cut
+were skipped. Only a failure about what was sent counts towards that (a
+request the model rejects as it stands, a post Telegram cannot parse, a
+PROBLEM about the mail itself): a model chain, service or network that is
+down, rate limited, out of credit or refusing its key says nothing about the
+items, and a count that has not got there in eight days is forgotten. A post
+longer than the model's output allowance goes to the next model in the chain
+first; the last one's, or the first one's when no later model answers at all,
+loses its cut-off last line rather than going out mid-bullet, still faces the
+checks, and an admin is told it went out short. A reply cut
 off before a whole line of any length is dropped as the fragment it is.
 
 ## Sweeping email onto the calendar

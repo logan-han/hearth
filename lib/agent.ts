@@ -600,6 +600,9 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const reasoning = reasoningLevel()
 
   const chain = modelChain()
+  // The first long post the cap cut off, trimmed, for when no later model
+  // answers at all: a brief short of its end beats no brief.
+  let shortPost: { text: string; model: string; evidence: string | undefined; cutShort: boolean; looks: StagedCursor[] } | undefined
   const result = await withModelFallback(async (slot: ModelSlot) =>
     traced(
       {
@@ -658,11 +661,15 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
             // after a change, which ends the turn here anyway) loses its
             // broken last line rather than going out mid-bullet, and still
             // faces the checks; failing it would fail every run the same way.
-            if (slot !== chain.at(-1) && !ctx.wrote?.length) {
-              throw new Error(`${slot.name} ran out of output tokens after ${cleaned.text.length} characters of post`)
-            }
             const cut = cleaned.text.lastIndexOf('\n')
             const whole = cut > 0 ? cleaned.text.slice(0, cut).trimEnd() : ''
+            if (slot !== chain.at(-1) && !ctx.wrote?.length) {
+              if (!shortPost && whole.length >= TRUNCATED_REPLY_CHARS) {
+                const evidence = collectEvidence(r.steps ?? [])
+                shortPost = { text: whole, model: slot.name, evidence, cutShort: true, looks: ctx.pendingCursors?.slice(stagedBefore) ?? [] }
+              }
+              throw new Error(`${slot.name} ran out of output tokens after ${cleaned.text.length} characters of post`)
+            }
             // What is left of a post cut off early is a fragment, and goes the way of a short one.
             truncated = whole.length < TRUNCATED_REPLY_CHARS
             console.warn(`[agent] ${slot.name} ran out of output tokens after ${cleaned.text.length} characters; ${truncated ? 'dropped' : 'kept the complete lines'}`)
@@ -746,7 +753,14 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     ),
   chain,
   `hearth.${mode}`,
-  )
+  ).catch((err: unknown) => {
+    if (!shortPost) throw err
+    // Every later model failed outright; the one that ran long had its say.
+    console.warn(`[agent] no later model answered (${describeError(err)}); keeping ${shortPost.model}'s post, cut short`)
+    const { looks, ...post } = shortPost
+    ;(ctx.pendingCursors ??= []).push(...looks)
+    return post
+  })
 
   return {
     text: result.text || ctx.notices.join('\n'),
