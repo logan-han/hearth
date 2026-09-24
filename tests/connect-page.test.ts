@@ -28,6 +28,16 @@ describe('/connect', () => {
     expect(html).toContain(`/api/calendar/${await q.calendarToken()}/family.ics`)
   })
 
+  it('tells a member whose MCP key has stopped working to send /mcp new, not /mcp', async () => {
+    // Plain /mcp only reports a key that is already there, and every key from
+    // before keys carried a tag is one of those.
+    await q.upsertMember('111', 'Rowan', { allowed: true })
+    const t = new URL(await connectLink('https://hearth.example', { tg: '111', name: 'Rowan', chat: '' })).searchParams.get('t')!
+    const html = await render(t)
+    expect(html).toContain('have stopped working')
+    expect(html).toMatch(/<strong> ?\/mcp new<\/strong>/)
+  })
+
   it('shows nothing of the household to the sign-in state anyone can ask for', async () => {
     const res = await startAuth(new Request('https://hearth.example/api/oauth/google?signin=1'), 'google')
     const state = new URL(res.headers.get('location')!).searchParams.get('state')!

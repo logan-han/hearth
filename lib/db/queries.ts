@@ -6,7 +6,7 @@ import {
   type Member, type Connection, type EmailDraft, type Stranger,
   type List, type ListItem, type EventProposal, type Memory, type MemoryQuestion,
 } from './schema'
-import { encrypt, decrypt, randomToken, hashToken } from '../crypto'
+import { encrypt, decrypt, randomToken, hashToken, mintMcpKey, mcpKeyHolder } from '../crypto'
 import { rankSimilar, DUPLICATE } from '../memory-match'
 import type { Provider } from '../oauth/providers'
 
@@ -67,10 +67,11 @@ export async function allMembers(): Promise<Member[]> {
 /**
  * Mint this member's key for the MCP endpoint, replacing whatever they had:
  * one key per person, so revoking is always unambiguous. The plaintext is
- * returned once and never stored.
+ * returned once and never stored. It carries a tag only this deployment can
+ * make (see mintMcpKey), so a made-up one is turned away before any read.
  */
 export async function issueMcpKey(memberId: number): Promise<string> {
-  const key = randomToken(32)
+  const key = await mintMcpKey(memberId)
   await db()
     .update(members)
     .set({ mcpTokenHash: await hashToken(key), mcpTokenAt: new Date() })
@@ -88,13 +89,20 @@ export async function revokeMcpKey(memberId: number): Promise<void> {
 /**
  * Who a bearer key belongs to, or null. A member who has since been denied
  * holds nothing: the allowlist is the one gate, here as everywhere else.
+ *
+ * The key's tag is checked first, with nothing read. Looking up every key sent
+ * let anyone who knew the host keep Neon awake by posting made-up ones every
+ * few minutes, which runs out the free plan's compute hours. A key whose tag
+ * checks was minted here for that member, and its stored hash then says
+ * whether it is still theirs: a replaced or revoked one no longer matches.
  */
 export async function memberByMcpKey(key: string): Promise<Member | null> {
-  if (!key) return null
+  const holder = await mcpKeyHolder(key)
+  if (holder === null) return null
   const [row] = await db()
     .select()
     .from(members)
-    .where(and(eq(members.mcpTokenHash, await hashToken(key)), eq(members.allowed, true)))
+    .where(and(eq(members.id, holder), eq(members.mcpTokenHash, await hashToken(key)), eq(members.allowed, true)))
     .limit(1)
   return row ?? null
 }

@@ -509,7 +509,8 @@ async function handleMcp(c: TelegramContext, member: Member): Promise<void> {
     await send(
       c.chatId,
       `You have a key, issued ${formatLocal(member.mcpTokenAt)}. I only ever show one once, so ` +
-        'if it is lost, `/mcp new` replaces it — which stops the old one working. `/mcp off` revokes it.',
+        'if it is lost or no longer works, `/mcp new` replaces it — which stops the old one working. ' +
+        '`/mcp off` revokes it.',
     )
     return
   }

@@ -38,7 +38,9 @@ const handler = createMcpHandler(
 /**
  * A key is one member's, so the member it belongs to travels with the request
  * and every tool runs in their name: their mailbox, their calendar, their
- * word on the household board.
+ * word on the household board. A key this deployment did not mint is turned
+ * away on its tag, before anything is read (see memberByMcpKey), so made-up
+ * keys sent every few minutes cannot keep the database awake.
  */
 async function verify(_req: Request, bearer?: string): Promise<AuthInfo | undefined> {
   if (!bearer) return undefined

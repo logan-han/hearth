@@ -1,13 +1,20 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Member } from '@/lib/db/schema'
+import { randomToken } from '@/lib/crypto'
 
 const member = { id: 7, telegramUserId: '111', name: 'Rowan', allowed: true, isAdmin: false } as Member
 
-const memberByMcpKey = vi.fn(async (key: string) => (key === 'good-key' ? member : null))
+// Any other key goes through the real lookup, against a database that is not there.
+const memberByMcpKey = vi.fn<(key: string) => Promise<Member | null>>()
 vi.mock('@/lib/db/queries', async (orig) => {
   const actual = await orig<typeof import('@/lib/db/queries')>()
+  memberByMcpKey.mockImplementation(async (key) => (key === 'good-key' ? member : actual.memberByMcpKey(key)))
   return { ...actual, memberByMcpKey }
 })
+const db = vi.fn(() => {
+  throw new Error('no database here')
+})
+vi.mock('@/lib/db', async (orig) => ({ ...(await orig<typeof import('@/lib/db')>()), db }))
 
 const callTool = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'done' }] }))
 vi.mock('@/lib/mcp', async (orig) => {
@@ -17,7 +24,10 @@ vi.mock('@/lib/mcp', async (orig) => {
 
 const { POST } = await import('@/app/api/mcp/route')
 
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
+})
 
 /** One JSON-RPC call over the streamable HTTP transport, however it answers. */
 async function rpc(method: string, params: unknown, key?: string) {
@@ -50,6 +60,13 @@ describe('who the MCP endpoint lets in', () => {
   it('turns away a key it does not know', async () => {
     expect((await rpc('tools/list', {}, 'stolen-key')).status).toBe(401)
     expect(memberByMcpKey).toHaveBeenCalledWith('stolen-key')
+  })
+
+  it('turns away a key it did not mint before anything is read, so junk cannot keep the database awake', async () => {
+    for (const key of ['stolen-key', randomToken(32), `7.${randomToken(32)}.${'A'.repeat(43)}`]) {
+      expect((await rpc('tools/list', {}, key)).status).toBe(401)
+    }
+    expect(db).not.toHaveBeenCalled()
   })
 
   it('lets a member in and offers them the household tools', async () => {

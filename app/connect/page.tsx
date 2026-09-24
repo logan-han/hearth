@@ -95,7 +95,10 @@ export default async function Connect({ searchParams }: { searchParams: Promise<
           Hearth&rsquo;s own tools, over the Model Context Protocol: the family calendar and lists,
           what it remembers, and your mail and calendar. Send <strong>/mcp</strong> to the bot and it
           will DM you a personal key and the one line that adds it to Claude Code. The key acts as
-          you, so keep it to yourself; <strong>/mcp off</strong> revokes it.
+          you, so keep it to yourself; <strong>/mcp off</strong> revokes it. Keys issued before keys
+          carried a tag have stopped working. If yours is lost or no longer works, send
+          <strong> /mcp new</strong> for one that does: once you hold a key, plain /mcp only says
+          it is there.
         </p>
       </div>
 

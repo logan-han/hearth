@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
+import { hashToken, randomToken } from '@/lib/crypto'
 import { HttpError } from 'grammy'
 
 const { send, typing, runAgent, sendMessage, sendChatAction, getFile, getChatMember, me } = vi.hoisted(() => ({
@@ -312,6 +313,19 @@ describe('/mcp', () => {
     await processUpdate(dm('/mcp new'))
     expect(lastSent()).toContain('stopped working')
     expect(await q.memberByMcpKey(first)).toBeNull()
+    expect(await q.memberByMcpKey(keyFrom(lastSent()))).not.toBeNull()
+  })
+
+  it('turns away a key from before keys carried a tag, and /mcp new replaces it', async () => {
+    await processUpdate(dm('/mcp'))
+    const legacy = randomToken(32)
+    await client.query(`update members set mcp_token_hash = $1 where telegram_user_id = '111'`, [await hashToken(legacy)])
+    expect(await q.memberByMcpKey(legacy)).toBeNull()
+    send.mockClear()
+
+    await processUpdate(dm('/mcp'))
+    expect(lastSent()).toContain('no longer works, `/mcp new` replaces it')
+    await processUpdate(dm('/mcp new'))
     expect(await q.memberByMcpKey(keyFrom(lastSent()))).not.toBeNull()
   })
 

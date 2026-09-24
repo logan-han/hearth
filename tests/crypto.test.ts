@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { encrypt, decrypt, randomToken, resetKeyCache, signingKey } from '@/lib/crypto'
+import { encrypt, decrypt, randomToken, resetKeyCache, signingKey, mintMcpKey, mcpKeyHolder } from '@/lib/crypto'
 
 const HEX_KEY = 'a'.repeat(64)
 const B64_KEY = Buffer.alloc(32, 7).toString('base64')
@@ -71,9 +71,44 @@ describe('signing keys', () => {
   it('differs by purpose, by epoch and by TOKEN_ENC_KEY', async () => {
     const base = hex(await signingKey('session', ''))
     expect(hex(await signingKey('oauth-state', ''))).not.toBe(base)
+    expect(hex(await signingKey('mcp', ''))).not.toBe(base)
     expect(hex(await signingKey('session', 'next'))).not.toBe(base)
     process.env.TOKEN_ENC_KEY = 'b'.repeat(64)
     expect(hex(await signingKey('session', ''))).not.toBe(base)
+  })
+})
+
+describe('MCP keys', () => {
+  it('names the member it was minted for from TOKEN_ENC_KEY alone, and no two are alike', async () => {
+    const key = await mintMcpKey(7)
+    expect(key).toMatch(/^7\.[\w-]{43}\.[\w-]{43}$/)
+    expect(await mcpKeyHolder(key)).toBe(7)
+    expect(await mintMcpKey(7)).not.toBe(key)
+  })
+
+  it('turns away a key it did not mint, whatever its shape', async () => {
+    const [id, random, tag] = (await mintMcpKey(7)).split('.')
+    const other = (await mintMcpKey(8)).split('.')[2]
+    for (const key of [
+      '',
+      'not-a-key',
+      randomToken(32), // how keys looked before they carried a tag
+      `${id}.${random}`,
+      `${id}.${random}.${tag}.${tag}`,
+      `8.${random}.${tag}`,
+      `${id}.${randomToken(32)}.${tag}`,
+      `${id}.${random}.${other}`,
+      `${id}.${random}.${'A'.repeat(43)}`,
+      `${id}.${random}.${tag.slice(1)}`,
+    ]) {
+      expect(await mcpKeyHolder(key)).toBeNull()
+    }
+  })
+
+  it('turns away one minted under another TOKEN_ENC_KEY', async () => {
+    const key = await mintMcpKey(7)
+    process.env.TOKEN_ENC_KEY = 'b'.repeat(64)
+    expect(await mcpKeyHolder(key)).toBeNull()
   })
 })
 

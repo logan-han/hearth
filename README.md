@@ -773,10 +773,9 @@ tick read it only once the caller has passed a first check against what the
 instance already holds; a caller that fails it gets one fresh look at the
 store an hour, in case the secret changed elsewhere, and callers that reach a
 fresh instance together share its first read. The calendar feed treats its
-token the same way. Someone fetching junk from any of the three every few
-minutes cannot keep the database awake and run out the free plan's compute
-hours. `/api/mcp` is not covered yet: it looks up every bearer key it is sent,
-so a made-up key still wakes the database.
+token the same way, and `/api/mcp` checks a key's tag before it looks the key
+up (see below). Someone fetching junk from any of the four every few minutes
+cannot keep the database awake and run out the free plan's compute hours.
 
 ## Claude, and anything else that speaks MCP
 
@@ -798,6 +797,15 @@ kept, which is why `/mcp` on its own reports what is there rather than quietly
 reissuing and breaking whatever is connected; `/mcp new` replaces it and stops
 the old one working. A member who is denied takes their key with them, like
 every other door here.
+
+A key reads `<member id>.<random>.<tag>`, the tag an HMAC over the rest under a
+key derived from `TOKEN_ENC_KEY`. A key this deployment did not mint is turned
+away on its tag before anything is read, so made-up keys sent every few minutes
+cannot keep the database awake. One whose tag checks must still match the
+stored hash, which is what `/mcp new` and `/mcp off` change, so a replaced or
+revoked key stays dead. Keys issued before keys carried a tag no longer work:
+each member sends `/mcp new` once and reconnects with the key it sends.
+Replacing `TOKEN_ENC_KEY` voids every key the same way.
 
 A key travels as a header, which is what Claude Code, Claude Desktop, Cursor and
 anything driven by `mcp-remote` take. Custom connectors on claude.ai want OAuth
@@ -925,6 +933,8 @@ scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
   up; the calendar app's next try then gets it.
 - `/api/mcp` accepts only a bearer key it can match to an allowed member, and
   keys are stored as SHA-256 digests, so the store cannot hand one back out.
+  Each key carries an HMAC tag that is checked before the lookup, so a made-up
+  one costs no database read.
 - `/api/tick` verifies the QStash signature.
 - Email is never sent without a human "yes": `draft_email` and `send_email` are
   separate tools, the draft is persisted, and the send claims it atomically so a

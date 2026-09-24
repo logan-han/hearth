@@ -3,6 +3,7 @@ import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
 import type { Member } from '@/lib/db/schema'
+import { hashToken, mcpKeyHolder, mintMcpKey, randomToken } from '@/lib/crypto'
 
 const send = vi.fn(async () => {})
 vi.mock('@/lib/telegram', () => ({ send }))
@@ -288,6 +289,8 @@ describe('the key that says who is calling', () => {
   it('leaves nothing to find once revoked', async () => {
     const key = await q.issueMcpKey(member.id)
     await q.revokeMcpKey(member.id)
+    // Its tag still checks: the stored hash is what turns it away.
+    expect(await mcpKeyHolder(key)).toBe(member.id)
     expect(await q.memberByMcpKey(key)).toBeNull()
   })
 
@@ -301,5 +304,27 @@ describe('the key that says who is calling', () => {
     await q.issueMcpKey(member.id)
     expect(await q.memberByMcpKey('')).toBeNull()
     expect(await q.memberByMcpKey('not-a-key')).toBeNull()
+  })
+
+  it('reads nothing for a key it did not mint, even one stored from before keys carried a tag', async () => {
+    const [id, random] = (await q.issueMcpKey(member.id)).split('.')
+    const legacy = randomToken(32)
+    await client.query('update members set mcp_token_hash = $1 where id = $2', [await hashToken(legacy), member.id])
+    const reads = vi.spyOn(client, 'query')
+    try {
+      for (const key of ['not-a-key', legacy, `${id}.${random}.${'A'.repeat(43)}`]) {
+        expect(await q.memberByMcpKey(key)).toBeNull()
+      }
+      expect(reads).not.toHaveBeenCalled()
+    } finally {
+      reads.mockRestore()
+    }
+  })
+
+  it('names only the member a key was minted for, whoever holds its hash', async () => {
+    const other = await q.upsertMember('222', 'Sam', { allowed: true })
+    const theirs = await mintMcpKey(other.id)
+    await client.query('update members set mcp_token_hash = $1 where id = $2', [await hashToken(theirs), member.id])
+    expect(await q.memberByMcpKey(theirs)).toBeNull()
   })
 })

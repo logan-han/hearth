@@ -66,7 +66,7 @@ export async function decrypt(payload: string): Promise<string> {
  * caller stores: changing it voids everything signed before, while the key
  * that decrypts every stored refresh token and setting stays as it was.
  */
-export async function signingKey(purpose: 'session' | 'oauth-state', epoch: string): Promise<Uint8Array> {
+export async function signingKey(purpose: 'session' | 'oauth-state' | 'mcp', epoch: string): Promise<Uint8Array> {
   const root = await crypto.subtle.importKey('raw', keyMaterial() as BufferSource, 'HKDF', false, ['deriveBits'])
   const bits = await crypto.subtle.deriveBits(
     {
@@ -79,6 +79,49 @@ export async function signingKey(purpose: 'session' | 'oauth-state', epoch: stri
     256,
   )
   return new Uint8Array(bits)
+}
+
+/**
+ * The key an MCP key's tag is made and checked with. It takes no epoch: the
+ * tag exists to be checked before anything is read, and the epoch is in the
+ * store. Nor does it need one, since the stored hash is what revokes a key
+ * (see memberByMcpKey). Only TOKEN_ENC_KEY goes into it, which is always in
+ * the environment and never in the store, so an instance that has not read
+ * the store yet checks keys the same as one that has.
+ */
+async function mcpTagKey(): Promise<CryptoKey> {
+  const raw = await signingKey('mcp', '')
+  return crypto.subtle.importKey('raw', raw as BufferSource, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
+}
+
+/**
+ * A new key for the MCP endpoint, `<member id>.<random>.<tag>`, the tag an HMAC
+ * over the first two. Only a key minted here carries a tag that checks, so one
+ * that was made up is known for what it is without a database read.
+ */
+export async function mintMcpKey(memberId: number): Promise<string> {
+  const body = `${memberId}.${randomToken(32)}`
+  const tag = await crypto.subtle.sign('HMAC', await mcpTagKey(), new TextEncoder().encode(body))
+  return `${body}.${Buffer.from(tag).toString('base64url')}`
+}
+
+/**
+ * The member an MCP key was minted for, or null when its tag does not check,
+ * worked out from the key alone. A key from before keys carried a tag has none,
+ * so it is null too. A key that checks may still have been replaced or revoked
+ * since; only the stored hash can say that.
+ */
+export async function mcpKeyHolder(key: string): Promise<number | null> {
+  const parts = /^(\d+)\.([\w-]+)\.([\w-]{43})$/.exec(key)
+  if (!parts) return null
+  const [, id, random, tag] = parts
+  const ok = await crypto.subtle.verify(
+    'HMAC',
+    await mcpTagKey(),
+    Buffer.from(tag, 'base64url'),
+    new TextEncoder().encode(`${id}.${random}`),
+  )
+  return ok ? Number(id) : null
 }
 
 /** URL-safe random token, used for the ICS feed address. */
