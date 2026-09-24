@@ -85,6 +85,25 @@ describe('maybeSummarise', () => {
     expect((await q.chatSummary('-100')).summary).toBeNull()
   })
 
+  it('keeps the old summary, and the messages still to fold, when the output cap cuts the new one short', async () => {
+    await q.setChatSummary('-100', 'Ada is allergic to peanuts. Grandma visits 3 Oct.', 0)
+    await talk(q.CONTEXT_WINDOW + SUMMARISE_BATCH)
+    generateText.mockResolvedValue({ ...reply('Rowan'), finishReason: 'length' })
+    await expect(maybeSummarise('-100')).rejects.toThrow(/ran out of room/)
+    expect(await q.chatSummary('-100')).toEqual({ summary: 'Ada is allergic to peanuts. Grandma visits 3 Oct.', through: 0 })
+  })
+
+  it('tries the next model when the first runs out of room', async () => {
+    process.env.GEMINI_MODEL = 'gemini-3.5-flash-lite,gemini-3.5-flash'
+    const ids = await talk(q.CONTEXT_WINDOW + SUMMARISE_BATCH)
+    generateText
+      .mockResolvedValueOnce({ ...reply('Rowan'), finishReason: 'length' })
+      .mockResolvedValueOnce({ ...reply('Rowan and Sam talked about messages 1 to 6.'), finishReason: 'stop' })
+    expect(await maybeSummarise('-100')).toBe(true)
+    expect(generateText).toHaveBeenCalledTimes(2)
+    expect(await q.chatSummary('-100')).toEqual({ summary: 'Rowan and Sam talked about messages 1 to 6.', through: ids[SUMMARISE_BATCH - 1] })
+  })
+
   it('puts the summary in front of the chat model, above the household facts', async () => {
     await q.setChatSummary('-100', "Ada's dentist is Thursday 2pm.", 3)
     await q.addMemory('bin night is Monday')

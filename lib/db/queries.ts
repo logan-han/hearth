@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, lte, lt, ne, or, sql, isNull, gt, exists, notExists } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, lte, lt, ne, or, sql, isNull, gt, exists, notExists, ilike } from 'drizzle-orm'
 import { db } from './index'
 import {
   members, chats, connections, messages, familyEvents, memories, memoryQuestions, automations, settings, emailDrafts,
@@ -515,12 +515,17 @@ export async function addMemory(content: string, createdBy?: number | null, repl
   return row
 }
 
-/** Current facts only, newest first. Forgotten and superseded rows stay as history. */
-export async function listMemories(limit = 100) {
+/**
+ * Current facts only, newest first. Forgotten and superseded rows stay as
+ * history. `contains` is a plain case-insensitive substring, so a % or _ in
+ * it matches only itself.
+ */
+export async function listMemories(limit = 100, contains?: string) {
+  const needle = contains?.replace(/[\\%_]/g, '\\$&')
   return db()
     .select()
     .from(memories)
-    .where(isNull(memories.invalidatedAt))
+    .where(and(isNull(memories.invalidatedAt), needle ? ilike(memories.content, `%${needle}%`) : undefined))
     // Two facts filed in the same instant tie on created_at; the id settles it.
     .orderBy(desc(memories.createdAt), desc(memories.id))
     .limit(limit)

@@ -4,6 +4,9 @@ import { addMemory, listMemories, deleteMemory, askQuestion, answerQuestion } fr
 import { rankSimilar, DUPLICATE } from '../memory-match'
 import type { ToolContext } from './context'
 
+/** Facts one recall hands back; past this the model is told to narrow it. */
+const RECALL_LIMIT = 100
+
 export function memoryTools(ctx: ToolContext) {
   return {
     remember: tool({
@@ -44,12 +47,15 @@ export function memoryTools(ctx: ToolContext) {
         contains: z.string().optional().describe('Optional case-insensitive filter'),
       }),
       execute: async ({ contains }) => {
-        const rows = await listMemories()
-        const needle = contains?.toLowerCase()
+        // The filter runs over every current fact, not a newest page of them:
+        // the oldest facts are often the most basic, and they are the first to
+        // drop out of the few dozen the chat already sees.
+        const rows = await listMemories(RECALL_LIMIT + 1, contains)
         return {
-          memories: rows
-            .filter((m) => !needle || m.content.toLowerCase().includes(needle))
-            .map((m) => ({ id: m.id, fact: m.content })),
+          memories: rows.slice(0, RECALL_LIMIT).map((m) => ({ id: m.id, fact: m.content })),
+          ...(rows.length > RECALL_LIMIT
+            ? { note: `Only the newest ${RECALL_LIMIT} are listed. Pass contains to reach older ones.` }
+            : {}),
         }
       },
     }),

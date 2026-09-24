@@ -1013,6 +1013,28 @@ describe('memory tools', () => {
     expect((await call(memoryTools(ctx), 'recall', {})).memories).toHaveLength(1)
   })
 
+  it('finds an old fact behind a hundred newer ones, and says when a list was cut short', async () => {
+    await q.addMemory('Ada is allergic to peanuts')
+    await q.addMemory('Swim bag needs 100% of the goggles_spare kit')
+    for (let i = 0; i < 100; i++) await q.addMemory(`fact ${i}`)
+    const found = await call(memoryTools(ctx), 'recall', { contains: 'ALLERG' })
+    expect((found.memories as { fact: string }[]).map((m) => m.fact)).toEqual(['Ada is allergic to peanuts'])
+    expect(found.note).toBeUndefined()
+    // A % or _ is looked for as itself, not as a wildcard.
+    expect((await call(memoryTools(ctx), 'recall', { contains: '0%' })).memories).toHaveLength(1)
+    expect((await call(memoryTools(ctx), 'recall', { contains: 's_' })).memories).toHaveLength(1)
+    const all = await call(memoryTools(ctx), 'recall', {})
+    expect(all.memories).toHaveLength(100)
+    expect(String(all.note)).toContain('contains')
+  })
+
+  it('files a correction that differs only by a "not", and points at the fact it contradicts', async () => {
+    const old = await call(memoryTools(ctx), 'remember', { fact: 'Ada is allergic to peanuts' })
+    const fresh = await call(memoryTools(ctx), 'remember', { fact: 'Ada is not allergic to peanuts' })
+    expect(fresh.stored).toBe('Ada is not allergic to peanuts')
+    expect(fresh.possibly_overlapping).toEqual([{ id: old.id, fact: 'Ada is allergic to peanuts' }])
+  })
+
   it('turns away a fact that is already known, reworded', async () => {
     const first = await call(memoryTools(ctx), 'remember', { fact: 'bin night is Monday' })
     const again = await call(memoryTools(ctx), 'remember', { fact: 'Bin night is Monday by the way' })

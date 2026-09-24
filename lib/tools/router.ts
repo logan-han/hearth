@@ -51,17 +51,25 @@ export const SITUATIONAL_TOOLS = ['import_calendar_file', 'unsure'] as const
 /**
  * Words that make a group likely. Over-matching costs a few extra tool
  * definitions; under-matching costs a more_tools round trip, so these lean
- * generous. An issue key such as HTL-344 counts as a board cue.
+ * generous, and they ignore case: "Jira" or "Tasks" opening a sentence is
+ * the common way to say it.
  */
 const CUES: Record<ToolGroup, RegExp> = {
   mail: /\b(e-?mails?|mail(?:box)?|inbox|gmail|outlook|drafts?|send (?:it|that|this|the)|reply(?:ing)? to|newsletters?|invoice|receipt|attach(?:ed|ment|ments)|pdf)\b/i,
   personal_calendar: /\b(my (?:calendar|day|week|schedule|diary)|appointments?|meetings?|calendar|am i (?:free|busy)|free (?:on|at|this|tomorrow)|busy)\b/i,
   money: /\b(spen[dt]|spending|transactions?|bank|2 ?up|budgets?|pocketsmith|paid|payments?|purchases?|bought|costs?|balance|money|refunds?|charge[sd]?|bills?)\b|\$\s?\d/i,
   notion: /\b(notion|reading list|travel plans?|wiki|notes? page)\b/i,
-  jira: /\b(jira|board|tasks?|overdue|tickets?|to-?dos?|due|chores?|jobs)\b|\b[A-Z]{2,6}-\d+\b/,
+  jira: /\b(jira|board|tasks?|overdue|tickets?|to-?dos?|due|chores?|jobs)\b/i,
   automations:
     /\b(every (?:day|morning|evening|night|week|month|weekday|hour|\d+ ?(?:min(?:ute)?s?|hours?)|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)|daily|weekly|hourly|remind(?:er|ers|ing)?|schedule[ds]?|automations?|watch(?:er|ers|ing)?|stop (?:posting|reminding|watching)|pause|unpause|resume)\b/i,
 }
+
+/**
+ * An issue key such as HTL-344 counts as a board cue. It is matched apart
+ * from the words because it alone must keep its case: in lower case it would
+ * take "covid-19" for a ticket.
+ */
+const ISSUE_KEY = /\b[A-Z]{2,6}-\d+\b/
 
 function isGroup(value: unknown): value is ToolGroup {
   return typeof value === 'string' && (GROUP_NAMES as string[]).includes(value)
@@ -71,6 +79,7 @@ function isGroup(value: unknown): value is ToolGroup {
 export function routeGroups(text: string, opts: { pendingDrafts?: boolean } = {}): ToolGroup[] {
   const groups = new Set<ToolGroup>()
   for (const g of GROUP_NAMES) if (CUES[g].test(text)) groups.add(g)
+  if (ISSUE_KEY.test(text)) groups.add('jira')
   // "Send it" needs the mail tools whatever the wording; the draft is the cue.
   if (opts.pendingDrafts) groups.add('mail')
   return [...groups]

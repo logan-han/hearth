@@ -46,6 +46,13 @@ describe('cues', () => {
     expect(routeGroups('mark HTL-344 done')).toContain('jira')
   })
 
+  it('hears the board in a capitalised word, but takes only an upper-case key for an issue', () => {
+    expect(routeGroups('Check Jira for me')).toEqual(['jira'])
+    expect(routeGroups('Tasks for this week?')).toEqual(['jira'])
+    expect(routeGroups('Board summary please')).toEqual(['jira'])
+    expect(routeGroups('Ada had covid-19 last week')).toEqual([])
+  })
+
   it('hears a schedule as automations', () => {
     expect(routeGroups('every friday 5pm remind us to book the market run')).toContain('automations')
     expect(routeGroups('what are we watching in here?')).toContain('automations')
