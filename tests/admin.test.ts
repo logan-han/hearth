@@ -18,7 +18,7 @@ vi.mock('next/headers', () => ({ cookies: jar.cookies }))
 
 const {
   MANAGED_KEYS, isManaged, isSecretShaped, setSecret, clearSecret, listSettings,
-  hydrateSecrets, resetHydration, recheckSecrets,
+  hydrateSecrets, resetHydration, recheckSecrets, readSecret,
 } = await import('@/lib/settings')
 const { createSession, readSession, destroySession, resolveRole, requireAdmin, requireMember } = await import('@/lib/auth/session')
 
@@ -127,6 +127,23 @@ describe('storing settings', () => {
     const shown = (await listSettings()).find((s) => s.key === 'GEMINI_MODEL')!
     expect(shown.set).toBe(false)
     expect(shown.origin).toBeNull()
+  })
+
+  it('reads one setting back for a script without seeding or applying anything', async () => {
+    await setSecret('OPENROUTER_API_KEY', 'sk-or-stored', 'rowan@hearth.example')
+    delete process.env.OPENROUTER_API_KEY
+    expect(await readSecret('OPENROUTER_API_KEY')).toBe('sk-or-stored')
+    expect(process.env.OPENROUTER_API_KEY).toBeUndefined()
+
+    // The script's own .env.local is not the deployment's: nothing is imported from it.
+    process.env.GEMINI_API_KEY = 'from-env-local'
+    expect(await readSecret('GEMINI_API_KEY')).toBeNull()
+    const { db } = await import('@/lib/db')
+    const { secrets } = await import('@/lib/db/schema')
+    expect((await db().select().from(secrets)).map((r) => r.key)).toEqual(['OPENROUTER_API_KEY'])
+
+    await clearSecret('OPENROUTER_API_KEY', 'rowan@hearth.example')
+    expect(await readSecret('OPENROUTER_API_KEY')).toBeNull()
   })
 
   it('updating twice keeps one row and the newer value', async () => {

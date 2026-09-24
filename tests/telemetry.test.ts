@@ -104,6 +104,12 @@ describe('telemetry', () => {
     await setupTelemetry()
     expect(otel.LangfuseSpanProcessor).toHaveBeenLastCalledWith(expect.objectContaining({ environment: 'preview' }))
 
+    // The empty line .env.example ships is no label.
+    slot.__hearthLangfuse = null
+    process.env.LANGFUSE_TRACING_ENVIRONMENT = ''
+    await setupTelemetry()
+    expect(otel.LangfuseSpanProcessor).toHaveBeenLastCalledWith(expect.objectContaining({ environment: 'preview' }))
+
     slot.__hearthLangfuse = null
     process.env.LANGFUSE_TRACING_ENVIRONMENT = 'staging'
     await setupTelemetry()

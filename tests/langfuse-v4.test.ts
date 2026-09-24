@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
 /**
@@ -33,7 +34,9 @@ function sourceFiles(dir: string): string[] {
   })
 }
 
-const root = new URL('..', import.meta.url).pathname
+// fileURLToPath, not .pathname: a checkout under a folder with a space in its
+// name would otherwise be looked for at a %20 path that does not exist.
+const root = fileURLToPath(new URL('..', import.meta.url))
 const appSources = [...sourceFiles(join(root, 'lib')), ...sourceFiles(join(root, 'app')), join(root, 'instrumentation.ts')]
 
 /**

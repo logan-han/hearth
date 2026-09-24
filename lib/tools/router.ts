@@ -4,10 +4,10 @@ import type { ToolName } from './index'
 
 /**
  * Which tools a chat turn sees. A small model picks the right tool far more
- * often from twenty than from forty-six, so the everyday set is always in
- * reach and the rest sit behind groups: switched on by cues in the message,
- * or unlocked by the model itself through `more_tools` when a cue was missed.
- * Watchers and the sweep never route; they get an explicit list.
+ * often from two dozen than from all of them at once, so the everyday set is
+ * always in reach and the rest sit behind groups: switched on by cues in the
+ * message, or unlocked by the model itself through `more_tools` when a cue
+ * was missed. Watchers and the sweep never route; they get an explicit list.
  */
 export const TOOL_GROUPS = {
   mail: ['list_email', 'new_mail', 'read_email', 'read_attachment', 'draft_email', 'send_email', 'cancel_draft'],

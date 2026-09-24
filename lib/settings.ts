@@ -243,6 +243,16 @@ export async function clearSecret(key: ManagedKey, updatedBy: string): Promise<v
 }
 
 /**
+ * One setting as the store holds it, for the CLI scripts: a key set up at
+ * /setup lives nowhere else. Nothing is seeded or applied, so running a script
+ * never imports its .env.local into the deployment's store. Null when unset.
+ */
+export async function readSecret(key: ManagedKey): Promise<string | null> {
+  const [row] = await db().select().from(secrets).where(eq(secrets.key, key))
+  return row ? (await decrypt(row.value)) || null : null
+}
+
+/**
  * How the dashboard presents each setting: what to call it in plain words,
  * which service it belongs to, and where to go to get one. Keyed by env var
  * because that is what the deployment actually reads.

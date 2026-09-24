@@ -1,4 +1,4 @@
-CREATE TABLE "model_events" (
+CREATE TABLE IF NOT EXISTS "model_events" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"slot" text NOT NULL,
 	"purpose" text NOT NULL,
@@ -8,4 +8,4 @@ CREATE TABLE "model_events" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX "model_events_created_idx" ON "model_events" USING btree ("created_at");
+CREATE INDEX IF NOT EXISTS "model_events_created_idx" ON "model_events" USING btree ("created_at");

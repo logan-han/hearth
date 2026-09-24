@@ -18,9 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The Node version is `engines` in package.json, which Vercel reads too,
+      # so CI tests on the runtime production runs.
       - uses: actions/setup-node@v5
         with:
-          node-version: 24
+          node-version-file: package.json
           cache: npm
 
       - run: npm ci
@@ -28,12 +30,22 @@ jobs:
       # `next build` type-checks the whole repo, tests included. A broken type
       # here is what a failed production deploy looks like, so catch it first.
       - run: npm run typecheck
+
+      # The tests build their database from drizzle/*.sql, not from the schema,
+      # so an index or default added to lib/db/schema.ts without a migration
+      # passes everything below and never reaches Neon.
+      - name: Migrations match the schema
+        run: bash scripts/check-migrations.sh
+
       - run: npm run build
 
       - run: npm run test:coverage
 
+      # A run Dependabot starts sees only Dependabot's secrets, so unless
+      # CODECOV_TOKEN is copied there as well (Settings, Secrets, Dependabot)
+      # Codecov refuses its upload. That should not turn its pull requests red.
       - uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
-          fail_ci_if_error: true
+          fail_ci_if_error: ${{ github.actor != 'dependabot[bot]' }}

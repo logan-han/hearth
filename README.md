@@ -48,11 +48,11 @@ Vercel Fluid compute (300 s ceiling). A turn gives itself 150 s of that, every
 model it tries included, and starts no further model once they are spent, so
 the reply, or the apology, still goes out before the function is stopped.
 
-A chat turn does not see all 52 tools. About twenty are always in reach (search,
-weather, lists, the shared calendar and its proposals, memory); mail, personal
-calendar, money, Notion, Jira and automations are switched on by cues in the
-message, and the model can unlock any group itself with `more_tools`. Fewer
-tools per call is one of the better-evidenced ways to keep a small model
+A chat turn does not see all 55 tools. The 23 in the core are always in reach
+(search, weather, lists, the shared calendar and its proposals, memory); mail,
+personal calendar, money, Notion, Jira and automations are switched on by cues
+in the message, and the model can unlock any group itself with `more_tools`.
+Fewer tools per call is one of the better-evidenced ways to keep a small model
 picking the right one. Watchers and the nightly memory pass get a fixed short
 list instead.
 
@@ -181,8 +181,13 @@ AADSTS code.
 ### 4. Services
 
 - **Neon** — add Postgres from the Vercel Marketplace; it injects `DATABASE_URL`
-  and friends into the project. Copy them into `.env.local` too, so `db:push`
-  works. `drizzle.config.ts` prefers `DATABASE_URL_UNPOOLED` for DDL, since
+  and friends into the project, and every build migrates that database itself.
+  Never `db:push` to it, before the first deploy or after: push records no
+  migrations, so the next build replays them all from the start, stops on the
+  first column that already exists, and every build after it does the same.
+  A database pushed while this README still advised it is safe: migrations
+  0000 to 0006 skip whatever is already there, so its next build only records
+  them. `drizzle.config.ts` prefers `DATABASE_URL_UNPOOLED` for DDL, since
   pgbouncer in transaction mode is a poor host for migrations.
 - **Upstash QStash** — one recurring schedule, `0 * * * *`, POSTing to
   `https://<your-deployment>/api/tick`. Copy both signing keys into Settings →
@@ -236,6 +241,11 @@ two things every slot has to do:
 ```bash
 npm run probe -- openrouter minimax/minimax-m3
 ```
+
+It takes the provider's key from `.env.local`, or, when that holds the
+database URL and `TOKEN_ENC_KEY`, from the dashboard's store, so a key entered
+at /setup needs no copying out. It only reads the store; nothing in
+`.env.local` is imported into it.
 
 **On training:** whether a provider may train on your prompts is an account
 setting at `openrouter.ai/settings/privacy`, not a property of a model, and the
@@ -326,8 +336,10 @@ own, and would migrate it before review (and drizzle, which applies only what
 is newer than its last migration, would then skip one stamped earlier that
 merged later). With a Neon branch per preview, set `MIGRATE_PREVIEWS=1` on the
 Preview environment. A plain local `npm run build` finds no database and skips
-that step; point a local database at the schema with `npm run db:migrate` (or
-`db:push` while iterating on the schema).
+that step; point a local database at the schema with `npm run db:migrate`.
+`db:push` is only for a throwaway database that no build and no `db:migrate`
+will ever touch: it records no migrations, so a later migrate against it fails
+on the first column that already exists.
 
 `drizzle-kit` and `set-webhook` both read `.env.local`, so secrets only have to
 live in one place locally. On Vercel they come from the project's environment
@@ -791,11 +803,11 @@ A key travels as a header, which is what Claude Code, Claude Desktop, Cursor and
 anything driven by `mcp-remote` take. Custom connectors on claude.ai want OAuth
 and cannot be given a header, so that one is not a way in.
 
-A client is handed all fifty tools at once rather than the routed subset a chat
-turn sees: `more_tools` exists so a small model can start from twenty and widen,
-and a capable client picks well from a long list. The two that mean nothing down
-this pipe are left out — `more_tools` itself, and the import tool that reads a
-calendar file attached to a Telegram message.
+A client is handed 53 of the 55 tools at once rather than the routed subset a
+chat turn sees: `more_tools` exists so a small model can start from the 23 in
+the core and widen, and a capable client picks well from a long list. The two
+that mean nothing down this pipe are left out — `more_tools` itself, and the
+import tool that reads a calendar file attached to a Telegram message.
 
 What a chat turn gets for free, a client has to ask for. `hearth_context` is the
 first call to make: who it is acting as, the household clock, the family and
@@ -954,7 +966,7 @@ npm run dev           # http://localhost:3000
 npm test              # vitest
 npm run test:coverage # vitest + coverage, thresholds at 98% (lines 98.5%, branches 96.5%)
 npm run typecheck
-npm run db:generate   # after editing lib/db/schema.ts
+npm run db:generate   # after editing lib/db/schema.ts; CI fails without it
 ```
 
 The badge reads lower than the local run, and both are right: vitest reports

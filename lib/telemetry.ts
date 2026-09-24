@@ -41,7 +41,8 @@ export async function setupTelemetry(): Promise<boolean> {
   const [{ registerOTel }, { LangfuseSpanProcessor }, { LangfuseVercelAiSdkIntegration }, { registerTelemetry }] =
     await Promise.all([import('@vercel/otel'), import('@langfuse/otel'), import('@langfuse/vercel-ai-sdk'), import('ai')])
   const created = new LangfuseSpanProcessor({
-    environment: process.env.LANGFUSE_TRACING_ENVIRONMENT ?? process.env.VERCEL_ENV ?? 'development',
+    // An empty line copied from .env.example means unset, not a label of ''.
+    environment: process.env.LANGFUSE_TRACING_ENVIRONMENT || process.env.VERCEL_ENV || 'development',
     release: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7),
   })
   registerOTel({ serviceName: 'hearth', spanProcessors: [created] })

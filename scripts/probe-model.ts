@@ -5,7 +5,9 @@
  *   npm run probe -- gemini gemini-3.5-flash-lite
  *   npm run probe -- self-hosted qwen3
  *
- * Reads the provider's key from .env.local. Every model in the chain must
+ * Reads the provider's key from .env.local, or failing that from the
+ * dashboard's store when .env.local has DATABASE_URL and TOKEN_ENC_KEY: a key
+ * set up at /setup lives nowhere else. Every model in the chain must
  * drive tools and answer a typed choice (the ambient gate and the claimed-
  * action check rely on it), so both are exercised. Exits 1 when the model
  * never called the tool.
@@ -15,22 +17,35 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { generateText, tool, stepCountIs, Output } from 'ai'
 import { z } from 'zod'
 import { GEMINI_BASE_URL, OPENROUTER_BASE_URL } from '../lib/model'
+import { readSecret, type ManagedKey } from '../lib/settings'
 
 loadEnvLocal()
 
-const [provider = '', model = ''] = process.argv.slice(2)
-const endpoints: Record<string, { baseURL: string | undefined; apiKey: string | undefined }> = {
-  openrouter: { baseURL: OPENROUTER_BASE_URL, apiKey: process.env.OPENROUTER_API_KEY },
-  gemini: { baseURL: process.env.GEMINI_BASE_URL || GEMINI_BASE_URL, apiKey: process.env.GEMINI_API_KEY },
-  'self-hosted': { baseURL: process.env.LLM_BASE_URL, apiKey: process.env.LLM_API_KEY || 'not-needed' },
+/** A key in .env.local wins, so a candidate can be tried on another account. */
+async function setting(key: ManagedKey): Promise<string | undefined> {
+  if (process.env[key]) return process.env[key]
+  if (!process.env.DATABASE_URL || !process.env.TOKEN_ENC_KEY) return undefined
+  try {
+    return (await readSecret(key)) ?? undefined
+  } catch (err) {
+    console.error(`Could not read ${key} from the dashboard's store:`, err instanceof Error ? err.message : err)
+    return undefined
+  }
 }
-const endpoint = endpoints[provider]
-if (!endpoint || !model) {
+
+const [provider = '', model = ''] = process.argv.slice(2)
+const endpoints: Record<string, () => Promise<{ baseURL: string | undefined; apiKey: string | undefined }>> = {
+  openrouter: async () => ({ baseURL: OPENROUTER_BASE_URL, apiKey: await setting('OPENROUTER_API_KEY') }),
+  gemini: async () => ({ baseURL: process.env.GEMINI_BASE_URL || GEMINI_BASE_URL, apiKey: await setting('GEMINI_API_KEY') }),
+  'self-hosted': async () => ({ baseURL: await setting('LLM_BASE_URL'), apiKey: (await setting('LLM_API_KEY')) || 'not-needed' }),
+}
+if (!endpoints[provider] || !model) {
   console.error('usage: npm run probe -- <openrouter|gemini|self-hosted> <model id>')
   process.exit(2)
 }
+const endpoint = await endpoints[provider]()
 if (!endpoint.baseURL || !endpoint.apiKey) {
-  console.error(`No endpoint or key configured for ${provider} in .env.local`)
+  console.error(`No endpoint or key configured for ${provider} in .env.local or the dashboard`)
   process.exit(2)
 }
 
