@@ -127,6 +127,31 @@ describe('the settings API respects the allowlist', () => {
     expect(process.env.ALLOWED_TELEGRAM_IDS).toBe('111, 222')
   })
 
+  it('holds a bot token saved from its own row to the check the Telegram panel makes', async () => {
+    const telegram = (reply: unknown) => fetchMock.mockResolvedValueOnce({ json: async () => reply })
+
+    const pasted = await post({ key: 'TELEGRAM_BOT_TOKEN', value: '123456' })
+    expect(pasted.status).toBe(400)
+    expect((await pasted.json()).error).toContain('does not look like a bot token')
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    telegram({ ok: false, description: 'Unauthorized' })
+    const rejected = await post({ key: 'TELEGRAM_BOT_TOKEN', value: '123456:WRONG' })
+    expect(rejected.status).toBe(400)
+    expect((await rejected.json()).error).toContain('Unauthorized')
+    expect(process.env.TELEGRAM_BOT_TOKEN).toBeUndefined()
+
+    telegram({ ok: true, result: { username: 'hearth_bot' } })
+    expect((await post({ key: 'TELEGRAM_BOT_TOKEN', value: '123456:GOOD-token\n' })).status).toBe(200)
+    expect(String(fetchMock.mock.calls.at(-1)![0])).toContain('/bot123456:GOOD-token/getMe')
+    expect(process.env.TELEGRAM_BOT_TOKEN).toBe('123456:GOOD-token')
+
+    // Removing it is a choice, not a paste, and asks nothing of Telegram.
+    expect((await post({ key: 'TELEGRAM_BOT_TOKEN', value: '' })).status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(process.env.TELEGRAM_BOT_TOKEN).toBeUndefined()
+  })
+
   it('refuses a missing key and a malformed body', async () => {
     expect((await post({ value: 'x' })).status).toBe(400)
     const bad = await POST(new Request('https://hearth.example/api/admin/settings', { method: 'POST', body: 'not json' }))

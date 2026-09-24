@@ -662,10 +662,15 @@ was proposed in and what was found, then the month calendar with what's next,
 the reminders that are running and the shared lists beneath it. Home is not
 read-only: any recognised member can add or decline a proposal, cancel an
 event, pause, resume or delete a reminder, and tick off, add or remove list
-items — the same things they could ask the bot to do, one click closer. The
-list only ever holds live questions: a proposal whose occasion has passed, or
-whose event has since reached the calendar another way, drops out at once,
-and the next tick records it as expired or superseded. Admins also get **System** and
+items or clear a list's ticked ones — the same things they could ask the bot
+to do, one click closer. A list shows everything still to get but only the
+ten most recently added of its ticked items, so a year of weekly shops does not
+pile up there. The rest are a click away: nothing records when an item was
+ticked, so one that sat on the list for a while can drop behind those ten the
+moment it is ticked. The list of proposals only ever holds live questions: a
+proposal whose occasion has passed, or whose event has since reached the
+calendar another way, drops out at once, and the next tick records it as
+expired or superseded. Admins also get **System** and
 **Settings**; for everyone else Home is the only destination, so no tabs are
 shown at all. An admin landing on a deployment with no bot token is redirected
 to **/setup**, the first-run guide.
@@ -674,7 +679,8 @@ The calendar leads because it is the thing the household actually wants to
 look at. It is a real month grid, Monday-first, always six weeks tall so
 flicking between months never moves the page, with events placed on their
 Melbourne day rather than their UTC one, and multi-day events repeated across
-each day they cover.
+each day they cover. A cell has room for the start of a title and little
+more on a phone, so tapping a day lists its events in full beneath the grid.
 
 Sign-in reuses the Google and Microsoft clients already configured for member
 linking. Both flows come back through the same provider callback and are told
@@ -703,12 +709,15 @@ replacing the key that decrypts every stored refresh token and setting.
 
 Admins manage the family from the same page: add someone by Telegram id and
 name, optionally with an email so they can sign in before linking anything,
-then change their email, allow, revoke, promote or remove. Revoking takes
-admin with it. A founding member from `ALLOWED_TELEGRAM_IDS` cannot be revoked
-or removed here, because the env seed would let them back in on their next
-message and the change would be a lie — and the **last admin cannot be
-revoked, demoted or removed at all**, only succeeded, so the house cannot lock
-itself out.
+then change their email, allow, revoke, promote or remove. Adding an id that
+is already in the family renames that person and changes only what was filled
+in, so it never clears an email, takes admin away or lets back in someone who
+was revoked; Allow is for that, and so is adding them at /setup, whose whole
+point is letting people in. Revoking takes admin with it. A founding member
+from `ALLOWED_TELEGRAM_IDS` cannot be revoked or removed here, because the env
+seed would let them back in on their next message and the change would be a
+lie — and the **last admin cannot be revoked, demoted or removed at all**, only
+succeeded, so the house cannot lock itself out.
 
 System shows message volume over a fortnight, which model in the chain
 actually answered (the head answering nearly everything is the healthy shape),
@@ -737,7 +746,9 @@ repoint the deployment at another database or lock the owner out. The Telegram
 token, webhook secret and founding members *are* editable — an admin session
 can already manage the family, so hiding the bot's own wiring bought nothing —
 and Settings shows what Telegram thinks of the bot, with one button to point
-the webhook back at this deployment after a change. Stored values are
+the webhook back at this deployment after a change. A new bot token is kept
+only once Telegram vouches for it, whether it is pasted into Settings or
+/setup, so a paste error cannot silently kill the bot. Stored values are
 AES-256-GCM encrypted and are **never sent back to the browser** for
 credential-shaped keys. Every setting has exactly one home: the deployment's
 environment seeds a key the first time it is seen, and the store owns it from

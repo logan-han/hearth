@@ -38,6 +38,16 @@ describe('the month grid', () => {
     expect(calendar.next).toBe('2026-10')
   })
 
+  it('knows which month today is in, whichever month it shows', async () => {
+    const now = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Australia/Melbourne', year: 'numeric', month: '2-digit',
+    }).format(new Date()).slice(0, 7)
+    const shown = (await gatherCalendar('2031-12')).calendar
+    expect(shown.isCurrent).toBe(false)
+    expect(shown.thisMonth).toBe(now)
+    expect((await gatherCalendar(now)).calendar).toMatchObject({ isCurrent: true, thisMonth: now })
+  })
+
   it('rolls the year over at both ends', async () => {
     expect((await gatherCalendar('2026-01')).calendar.prev).toBe('2025-12')
     expect((await gatherCalendar('2026-12')).calendar.next).toBe('2027-01')

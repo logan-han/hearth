@@ -57,12 +57,21 @@ export async function POST(req: Request) {
   if (!telegramUserId) return NextResponse.json({ error: 'A numeric Telegram id is required.' }, { status: 400 })
   if (!name) return NextResponse.json({ error: 'A name is required.' }, { status: 400 })
 
-  const email = String(body.email ?? '').trim().toLowerCase() || null
-  if (email && !looksLikeEmail(email)) {
-    return NextResponse.json({ error: `"${email}" does not look like an email address.` }, { status: 400 })
+  const typed = String(body.email ?? '').trim().toLowerCase() || null
+  if (typed && !looksLikeEmail(typed)) {
+    return NextResponse.json({ error: `"${typed}" does not look like an email address.` }, { status: 400 })
   }
 
-  const revokes = body.allowed === false
+  // Someone already in the family keeps the email, access and admin the body
+  // leaves out. The Add row sends only what was typed into it, so adding an id
+  // that is already here to fix a name cannot quietly clear an email, demote,
+  // or let back in someone who was revoked; the row's Allow button does that.
+  const existing = await memberByTelegramId(telegramUserId)
+  const email = body.email === undefined ? (existing?.email ?? null) : typed
+  const allowed = body.allowed === undefined ? (existing?.allowed ?? true) : body.allowed !== false
+  const isAdmin = body.isAdmin === undefined ? (existing?.isAdmin ?? false) : body.isAdmin === true
+
+  const revokes = !allowed
   if (revokes) {
     // The founder guard reads ALLOWED_TELEGRAM_IDS, and flagging their rooms
     // asks Telegram who is where with the bot token; either may be stored.
@@ -78,7 +87,7 @@ export async function POST(req: Request) {
     }
   }
 
-  const demotes = revokes || body.isAdmin !== true
+  const demotes = revokes || !isAdmin
   if (demotes && (await isLastAdmin(telegramUserId))) {
     return NextResponse.json(
       { error: 'That is the only admin. Make someone else an admin first.' },
@@ -90,8 +99,8 @@ export async function POST(req: Request) {
     telegramUserId,
     name,
     email,
-    allowed: body.allowed !== false,
-    isAdmin: body.isAdmin === true,
+    allowed,
+    isAdmin,
   })
   // The rooms follow the grant, as they do for /allow and /deny: vouched for
   // here, they unmute every room; revoked, every room they are in goes quiet.

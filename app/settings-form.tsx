@@ -9,6 +9,15 @@ import { TelegramPanel } from './telegram-panel'
 export type GroupStatus = { group: string; items: { name: string; on: boolean; note: string }[] }
 
 /**
+ * Removing one of these stops the bot at once, and a credential is never
+ * shown back here to be put again, so a Remove beside Change asks first.
+ */
+const REMOVE_WARNINGS: Record<string, string> = {
+  TELEGRAM_BOT_TOKEN: 'Remove the bot token? The bot goes silent until a new one is saved.',
+  TELEGRAM_WEBHOOK_SECRET: 'Remove the webhook secret? The bot refuses every message until the webhook is reconnected below.',
+}
+
+/**
  * A group in one line: how many of its keys are set, and the values that are
  * safe to show (models, toggles, choices, plain text). Nothing set at all is
  * simply "not set up".
@@ -51,6 +60,9 @@ export function SettingsForm({
   // rarely change. A group opens on a click, or on its own when an
   // integration in it is failing, since that is the one worth looking at.
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
+  // Bumped on every saved Telegram setting, so the panel below asks Telegram
+  // again rather than vouching for the bot as it was before the change.
+  const [telegramSaves, setTelegramSaves] = useState(0)
 
   // A dot should mean "working", not merely "a key is present": each
   // configured integration is probed live once the page is up.
@@ -81,6 +93,7 @@ export function SettingsForm({
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Could not save')
       setSettings(data.settings)
+      if (settings.find((s) => s.key === key)?.group === 'Telegram') setTelegramSaves((n) => n + 1)
       setFlash({ text: value === '' ? 'Removed.' : 'Saved.' })
       setEditing(null)
       setDraft('')
@@ -267,7 +280,10 @@ export function SettingsForm({
                             {s.set ? 'Change' : 'Set'}
                           </button>
                           {s.set ? (
-                            <button disabled={busy} onClick={() => save(s.key, '')}>
+                            <button
+                              disabled={busy}
+                              onClick={() => (!REMOVE_WARNINGS[s.key] || confirm(REMOVE_WARNINGS[s.key])) && save(s.key, '')}
+                            >
                               Remove
                             </button>
                           ) : null}
@@ -299,7 +315,7 @@ export function SettingsForm({
                     </div>
                   )
                 })()}
-                {group === 'Telegram' ? <TelegramPanel /> : null}
+                {group === 'Telegram' ? <TelegramPanel changed={telegramSaves} /> : null}
               </div>
             </details>
           </section>

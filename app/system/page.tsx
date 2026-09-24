@@ -158,6 +158,36 @@ export default async function SystemPage() {
           </div>
         </section>
       </div>
+
+      <section>
+        <h2>Reminders</h2>
+        <div className="panel">
+          {stats.automations.length === 0 ? (
+            <Empty>None scheduled.</Empty>
+          ) : (
+            <>
+              <ul className="listing">
+                {stats.automations.map((a) => (
+                  <li key={a.id}>
+                    <span className="title">
+                      {a.label} {a.enabled ? null : <span className="tag none">paused</span>}
+                      {a.offGrid ? <span className="tag none">off the tick</span> : null}
+                    </span>
+                    <span className="meta mono">{a.cron}</span>
+                    <span className="meta">
+                      {!a.enabled ? 'will not run' : a.offGrid ? `due ${a.nextRun}, runs ${a.runsAt}` : `next ${a.nextRun}`}
+                      {a.lastRun ? ` · last ran ${a.lastRun}` : ' · not run yet'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="empty" style={{ marginTop: '0.8rem' }}>
+                Pause, resume or delete them on Home, where any member can.
+              </p>
+            </>
+          )}
+        </div>
+      </section>
     </Shell>
   )
 }

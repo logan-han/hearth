@@ -18,6 +18,7 @@ vi.mock('next/headers', () => ({ cookies: jar.cookies }))
 
 const { GET } = await import('@/app/api/month/route')
 const { createSession } = await import('@/lib/auth/session')
+const { setSecret } = await import('@/lib/settings')
 
 let client: PGlite
 const get = (month?: string) =>
@@ -76,6 +77,32 @@ describe('the month API', () => {
     const ninth = calendar.days.find((d: { date: string }) => d.date === '2026-09-09')
     expect(ninth.events).toHaveLength(1)
     expect(ninth.events[0].title).toBe('Assembly')
+  })
+
+  it('places events in the zone the dashboard holds, on an instance still carrying the deployed one', async () => {
+    await createSession({ email: 'a@b.com', name: 'A', provider: 'google', role: 'admin' })
+    await setSecret('TIMEZONE', 'Europe/London', 'a@b.com')
+    // What an instance that has not read the store since the change still holds.
+    process.env.TIMEZONE = 'Australia/Melbourne'
+    await q.addFamilyEvent({
+      title: 'Late call',
+      startsAt: new Date('2026-09-08T22:30:00Z'),
+      endsAt: new Date('2026-09-08T23:00:00Z'),
+    })
+    const { calendar } = await (await get('2026-09')).json()
+    // 11:30pm on the 8th in London, where Melbourne would say the 9th.
+    const day = (date: string) => calendar.days.find((d: { date: string }) => d.date === date)
+    expect(day('2026-09-08').events.map((e: { title: string }) => e.title)).toEqual(['Late call'])
+    expect(day('2026-09-09').events).toEqual([])
+  })
+
+  it('says which month today is in, whichever month it serves, for Today and the bare address', async () => {
+    await createSession({ email: 'a@b.com', name: 'A', provider: 'google', role: 'admin' })
+    const now = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Australia/Melbourne', year: 'numeric', month: '2-digit',
+    }).format(new Date()).slice(0, 7)
+    const { calendar } = await (await get('2031-12')).json()
+    expect(calendar).toMatchObject({ key: '2031-12', isCurrent: false, thisMonth: now })
   })
 
   it('hands back neighbours so the client can prefetch them', async () => {

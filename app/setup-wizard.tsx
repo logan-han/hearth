@@ -85,11 +85,15 @@ export function SetupWizard({
     step(
       'family',
       async () => {
+        // Only what was filled in, so an id already here keeps its email and
+        // admin. Access is said outright: adding someone here is letting them
+        // in, and the list above shows only those who are.
         const data = await post('/api/admin/members', {
           telegramUserId: person.telegramUserId,
           name: person.name,
-          email: person.email,
-          isAdmin: personAdmin,
+          email: person.email.trim() || undefined,
+          allowed: true,
+          isAdmin: personAdmin || undefined,
         })
         setMembers(
           (data.members as (Person & { allowed: boolean })[])

@@ -76,8 +76,8 @@ export async function gatherStats(month?: string) {
       where not cancelled and ends_at > now() order by starts_at limit 6
     `),
     db().execute(sql`
-      select label, cron_expr, enabled, next_run_at, last_run_at, chat_id
-      from automations order by enabled desc, next_run_at limit 10
+      select id, label, cron_expr, enabled, next_run_at, last_run_at, chat_id
+      from automations order by enabled desc, next_run_at
     `),
     db().execute(sql`
       select l.name, count(i.id) filter (where not i.done) as open, count(i.id) as total
@@ -131,6 +131,7 @@ export async function gatherStats(month?: string) {
       allDay: Boolean(r.all_day),
     })),
     automations: rows(automations).map((r) => ({
+      id: n(r.id),
       label: String(r.label),
       cron: String(r.cron_expr),
       enabled: Boolean(r.enabled),
@@ -216,6 +217,9 @@ function safeStrangers(raw: unknown): number {
   }
 }
 
+/** How many ticked items Home carries per list, the most recently added; the rest are a click away. */
+const TICKED_SHOWN = 10
+
 /**
  * The subset any recognised family member may see: shared household things
  * only. No settings, no per-chat internals, no integration wiring.
@@ -233,14 +237,26 @@ export async function gatherFamilyStats(month?: string) {
       select id, title, starts_at, all_day from family_events
       where not cancelled and ends_at > now() order by starts_at limit 6
     `),
+    // Every one: Home is the only place a member can pause or delete one from
+    // the web, and a paused one sorts last, so a cut-off would hide it.
     db().execute(sql`
       select id, label, cron_expr, kind, enabled, next_run_at from automations
-      order by enabled desc, next_run_at limit 10
+      order by enabled desc, next_run_at
     `),
+    // Every open item, but only the latest ticked ones: a weekly shop ticks
+    // off over a thousand a year, and nothing prunes them unless asked to.
+    // Latest means added last, since nothing records when an item was ticked,
+    // so one that sat on the list a while can drop out as it is ticked; Home
+    // fetches the whole list from /api/family to reach it again.
     db().execute(sql`
-      select l.name, i.id, i.content, i.done
-      from lists l left join list_items i on i.list_id = l.id
-      order by l.name, i.done, i.id
+      select name, list_id, id, content, done, ticked from (
+        select l.name, l.id as list_id, i.id, i.content, i.done,
+               count(i.id) filter (where i.done) over (partition by l.id) as ticked,
+               row_number() over (partition by l.id, i.done order by i.id desc) as nth
+        from lists l left join list_items i on i.list_id = l.id
+      ) x
+      where not coalesce(done, false) or nth <= ${TICKED_SHOWN}
+      order by name, done, id
     `),
     db().execute(sql`
       select title, starts_at, ends_at, all_day from family_events
@@ -274,10 +290,10 @@ export async function gatherFamilyStats(month?: string) {
 
   // One row per item, empty lists included; fold into per-list shapes the
   // family can act on, not just count.
-  const lists = new Map<string, { name: string; items: { id: number; content: string; done: boolean }[] }>()
+  const lists = new Map<string, { id: number; name: string; ticked: number; items: { id: number; content: string; done: boolean }[] }>()
   for (const r of rows(listRows)) {
     const name = String(r.name)
-    const list = lists.get(name) ?? { name, items: [] }
+    const list = lists.get(name) ?? { id: n(r.list_id), name, ticked: n(r.ticked), items: [] }
     if (r.id != null) list.items.push({ id: n(r.id), content: String(r.content), done: Boolean(r.done) })
     lists.set(name, list)
   }
@@ -305,12 +321,11 @@ export async function gatherFamilyStats(month?: string) {
       builtin: isBuiltinKind(r.kind == null ? null : String(r.kind)),
       ...timing(grid, r),
     })),
-    lists: [...lists.values()].map((l) => ({
-      name: l.name,
-      open: l.items.filter((i) => !i.done).length,
-      total: l.items.length,
-      items: l.items,
-    })),
+    lists: [...lists.values()].map((l) => {
+      const open = l.items.filter((i) => !i.done).length
+      // Every ticked item, the older ones left out of items included.
+      return { id: l.id, name: l.name, open, ticked: l.ticked, total: open + l.ticked, items: l.items }
+    }),
     proposals: rows(proposalRows).map((r) => ({
       id: n(r.id),
       title: String(r.title),
@@ -433,6 +448,8 @@ function buildMonth(view: ReturnType<typeof monthView>, evented: Row[]) {
     prev: shiftMonth(view.key, -1),
     next: shiftMonth(view.key, 1),
     isCurrent: view.key === today.slice(0, 7),
+    // Where Today goes and what the bare address shows, whichever month this is.
+    thisMonth: today.slice(0, 7),
     days,
   }
 }

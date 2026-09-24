@@ -16,8 +16,10 @@ const jar = vi.hoisted(() => {
 })
 vi.mock('next/headers', () => ({ cookies: jar.cookies }))
 
-const { POST } = await import('@/app/api/family/route')
+const { GET, POST } = await import('@/app/api/family/route')
 const { createSession } = await import('@/lib/auth/session')
+const { setSecret } = await import('@/lib/settings')
+const { gatherFamilyStats } = await import('@/lib/stats')
 
 let client: PGlite
 
@@ -35,6 +37,8 @@ beforeEach(async () => {
   vi.clearAllMocks()
   jar.store.clear()
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
+  // The route reads the settings store now, which would take a zone left here as the deployment's.
+  delete process.env.TIMEZONE
   const { resetKeyCache } = await import('@/lib/crypto')
   resetKeyCache()
   client = (await freshDb()).client
@@ -116,6 +120,22 @@ describe('the family API', () => {
     expect(resumed.enabled).toBe(true)
     expect(resumed.nextRunAt.getTime()).toBeGreaterThan(Date.now())
     expect((await post({ action: 'pause_automation', id: 999, enabled: false })).status).toBe(404)
+  })
+
+  it('resumes a reminder on the zone the dashboard holds, on an instance still carrying the deployed one', async () => {
+    await asMember()
+    await setSecret('TIMEZONE', 'Europe/London', 'ada@hearth.example')
+    // What an instance that has not read the store since the change still holds.
+    process.env.TIMEZONE = 'Australia/Melbourne'
+    const a = await q.addAutomation({
+      chatId: '-100', memberId: null, label: 'wake up', cronExpr: '0 7 * * *',
+      instruction: 'x', nextRunAt: new Date('2026-09-07T09:00:00Z'),
+    })
+    await post({ action: 'pause_automation', id: a.id, enabled: false })
+    await post({ action: 'pause_automation', id: a.id, enabled: true })
+    const next = (await q.getAutomation(a.id))!.nextRunAt
+    const londonHour = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: '2-digit', hourCycle: 'h23' }).format(next)
+    expect(londonHour).toBe('07')
   })
 
   it('deletes a reminder for good', async () => {
@@ -200,6 +220,50 @@ describe('the family API', () => {
     const res = await post({ action: 'add_item', list: 'shopping', content: ' bread ' })
     expect(res.status).toBe(200)
     expect((await q.listContents(list.id)).map((i) => i.content)).toEqual(['bread'])
+  })
+
+  it('clears a list of its ticked items, leaving what is still to get', async () => {
+    await asMember()
+    const list = await q.findOrCreateList('shopping')
+    const [milk, , eggs] = await q.addListItems(list.id, ['milk', 'bread', 'eggs'])
+    await q.setListItemDone(milk.id, true)
+    await q.setListItemDone(eggs.id, true)
+    const other = await q.findOrCreateList('hardware')
+    const [nails] = await q.addListItems(other.id, ['nails'])
+    await q.setListItemDone(nails.id, true)
+
+    const res = await post({ action: 'clear_ticked', id: list.id })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ ok: true, cleared: 2 })
+    expect((await q.listContents(list.id)).map((i) => i.content)).toEqual(['bread'])
+    // Another list's ticked items are that list's to clear.
+    expect((await q.listContents(other.id)).map((i) => i.content)).toEqual(['nails'])
+  })
+
+  it('hands over a whole list, so an item just ticked that Home leaves out can be unticked', async () => {
+    const whole = (id: unknown) => GET(new Request(`https://hearth.example/api/family?list=${id}`))
+    const list = await q.findOrCreateList('shopping')
+    expect((await whole(list.id)).status).toBe(401)
+    await asMember()
+
+    // Batteries waited on the list while last week's ten were bought and ticked.
+    const [batteries] = await q.addListItems(list.id, ['batteries'])
+    for (const i of await q.addListItems(list.id, Array.from({ length: 10 }, (_, n) => `bought ${n + 1}`))) {
+      await q.setListItemDone(i.id, true)
+    }
+    await post({ action: 'toggle_item', id: batteries.id, done: true })
+    const home = (await gatherFamilyStats()).lists.find((l) => l.name === 'shopping')!
+    expect(home.items.some((i) => i.id === batteries.id)).toBe(false)
+    expect(home.ticked).toBe(11)
+
+    const res = await whole(list.id)
+    expect(res.status).toBe(200)
+    const { items } = await res.json()
+    expect(items).toHaveLength(11)
+    expect(items[0]).toEqual({ id: batteries.id, content: 'batteries', done: true })
+
+    expect((await whole('')).status).toBe(400)
+    expect((await whole('abc')).status).toBe(400)
   })
 
   it('starts a brand-new list on first add, and insists on both halves', async () => {

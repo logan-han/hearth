@@ -178,18 +178,67 @@ export function Reminders({
   )
 }
 
+type ListItem = { id: number; content: string; done: boolean }
+
 export function FamilyLists({
   lists,
 }: {
-  lists: { name: string; open: number; items: { id: number; content: string; done: boolean }[] }[]
+  lists: {
+    id: number
+    name: string
+    open: number
+    /** Every ticked item on the list; Home carries only the ten added last in items. */
+    ticked: number
+    items: ListItem[]
+  }[]
 }) {
   const { act, busy, error } = useFamilyActions()
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [newList, setNewList] = useState({ name: '', item: '' })
+  // The lists opened out to their older ticked items, fetched whole by id.
+  // Nothing records when an item was ticked, so one ticked just now can be
+  // among the older ones, and this is the way back to it. It is a copy, so
+  // every change made here fetches it again.
+  const [whole, setWhole] = useState<Record<number, ListItem[]>>({})
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  async function fetchWhole(ids: number[]) {
+    setLoadError(null)
+    try {
+      const got = await Promise.all(
+        ids.map(async (id) => {
+          const res = await fetch(`/api/family?list=${id}`)
+          if (!res.ok) throw new Error((await res.json()).error ?? 'Could not load that list.')
+          return [id, ((await res.json()) as { items: ListItem[] }).items] as const
+        }),
+      )
+      setWhole((w) => ({ ...w, ...Object.fromEntries(got) }))
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  function fold(id: number) {
+    setWhole((w) => {
+      const rest = { ...w }
+      delete rest[id]
+      return rest
+    })
+  }
+
+  async function change(body: Record<string, unknown>) {
+    const ok = await act(body)
+    const opened = Object.keys(whole).map(Number)
+    if (ok && opened.length > 0) await fetchWhole(opened)
+    return ok
+  }
+
+  // Ticked items Home left out of this list, which only the whole list shows.
+  const older = (l: { ticked: number; items: ListItem[] }) => l.ticked - l.items.filter((i) => i.done).length
 
   async function add(list: string, content: string) {
     if (!content.trim()) return
-    if (await act({ action: 'add_item', list, content })) {
+    if (await change({ action: 'add_item', list, content })) {
       setDrafts((d) => ({ ...d, [list]: '' }))
       setNewList({ name: '', item: '' })
     }
@@ -206,13 +255,13 @@ export function FamilyLists({
               {l.name} · {l.open} open
             </p>
             <ul className="listing doable">
-              {l.items.map((i) => (
+              {(whole[l.id] ?? l.items).map((i) => (
                 <li key={i.id} className={i.done ? 'done' : ''}>
                   <button
                     className={`tick${i.done ? ' on' : ''}`}
                     disabled={busy}
                     aria-label={i.done ? `Untick ${i.content}` : `Tick off ${i.content}`}
-                    onClick={() => act({ action: 'toggle_item', id: i.id, done: !i.done })}
+                    onClick={() => change({ action: 'toggle_item', id: i.id, done: !i.done })}
                   >
                     {i.done ? '✓' : ''}
                   </button>
@@ -220,13 +269,36 @@ export function FamilyLists({
                     <span className="title">{i.content}</span>
                   </span>
                   <span className="row-acts">
-                    <button disabled={busy} title="Remove item" onClick={() => act({ action: 'delete_item', id: i.id })}>
+                    <button disabled={busy} title="Remove item" onClick={() => change({ action: 'delete_item', id: i.id })}>
                       ×
                     </button>
                   </span>
                 </li>
               ))}
             </ul>
+            {l.ticked > 0 ? (
+              <p className="weblist-ticked">
+                {whole[l.id] ? (
+                  <button onClick={() => fold(l.id)}>Hide older ticked</button>
+                ) : older(l) > 0 ? (
+                  <button disabled={busy} title="Show every ticked item on this list" onClick={() => fetchWhole([l.id])}>
+                    Show {older(l)} older ticked
+                  </button>
+                ) : (
+                  <span />
+                )}
+                <button
+                  disabled={busy}
+                  title="Remove every ticked item from this list"
+                  onClick={() =>
+                    confirm(`Clear the ${l.ticked} ticked ${l.ticked === 1 ? 'item' : 'items'} from ${l.name}?`) &&
+                    change({ action: 'clear_ticked', id: l.id })
+                  }
+                >
+                  Clear ticked
+                </button>
+              </p>
+            ) : null}
             <div className="additem">
               <input
                 placeholder={`Add to ${l.name}…`}
@@ -260,7 +332,7 @@ export function FamilyLists({
           Start
         </button>
       </div>
-      {error ? <p className="flash bad">{error}</p> : null}
+      {error || loadError ? <p className="flash bad">{error ?? loadError}</p> : null}
     </div>
   )
 }

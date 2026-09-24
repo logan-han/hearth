@@ -148,7 +148,8 @@ describe('adding and editing a member', () => {
     expect(await q.strangersIn('-200')).toEqual([])
 
     await q.noteStranger('-200', { id: '999', name: 'Ada' })
-    await post({ telegramUserId: '999', name: 'Ada' })
+    // What the row's Allow button sends; a bare re-add keeps them revoked.
+    await post({ telegramUserId: '999', name: 'Ada', allowed: true })
     expect(await q.strangersIn('-100')).toEqual([])
     expect(await q.strangersIn('-200')).toEqual([])
   })
@@ -175,6 +176,37 @@ describe('adding and editing a member', () => {
     expect((await q.memberByTelegramId('999'))!.email).toBe('new@hearth.example')
     await post({ telegramUserId: '999', name: 'Ada', email: '' })
     expect((await q.memberByTelegramId('999'))!.email).toBeNull()
+  })
+
+  it('adding an id already here renames them and keeps the email and admin the add left out', async () => {
+    await post({ telegramUserId: '111', name: 'Boss', isAdmin: true })
+    await post({ telegramUserId: '999', name: 'Mun', email: 'mum@hearth.example', isAdmin: true })
+    // What the Add row sends when only the id and the corrected name are filled in.
+    expect((await post({ telegramUserId: '999', name: 'Mum' })).status).toBe(200)
+    expect(await q.memberByTelegramId('999')).toMatchObject({
+      name: 'Mum', email: 'mum@hearth.example', allowed: true, isAdmin: true,
+    })
+    // What was filled in still lands.
+    await post({ telegramUserId: '999', name: 'Mum', email: 'mum@else.example' })
+    expect((await q.memberByTelegramId('999'))!.email).toBe('mum@else.example')
+  })
+
+  it('adding an id already here does not let back in someone who was revoked', async () => {
+    await post({ telegramUserId: '999', name: 'Tom', email: 'tom@hearth.example' })
+    await post({ telegramUserId: '999', name: 'Tom', email: 'tom@hearth.example', allowed: false })
+    // The Add row fixing a spelling, with the email blank and admin unticked.
+    expect((await post({ telegramUserId: '999', name: 'Thomas' })).status).toBe(200)
+    expect(await q.memberByTelegramId('999')).toMatchObject({
+      name: 'Thomas', email: 'tom@hearth.example', allowed: false, isAdmin: false,
+    })
+    // Saying so outright, as Allow and /setup do, still lets them in.
+    await post({ telegramUserId: '999', name: 'Thomas', allowed: true })
+    expect((await q.memberByTelegramId('999'))!.allowed).toBe(true)
+  })
+
+  it('lets in someone new who is added without saying either way', async () => {
+    await post({ telegramUserId: '999', name: 'Kid' })
+    expect((await q.memberByTelegramId('999'))!.allowed).toBe(true)
   })
 
   it('returns the refreshed list with linked mailboxes shown', async () => {
@@ -246,6 +278,12 @@ describe('the last admin cannot lock the house out', () => {
     expect(res.status).toBe(400)
     expect(String((await res.json()).error)).toContain('only admin')
     expect(await q.memberByTelegramId('999')).toBeDefined()
+  })
+
+  it('renames the only admin from the Add row, which leaves admin out rather than saying no', async () => {
+    const res = await post({ telegramUserId: '999', name: 'Ada Han' })
+    expect(res.status).toBe(200)
+    expect(await q.memberByTelegramId('999')).toMatchObject({ name: 'Ada Han', allowed: true, isAdmin: true })
   })
 
   it('still edits the only admin in place — a new email is not a demotion', async () => {

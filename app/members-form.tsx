@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import type { MemberRow } from '@/lib/db/queries'
 
-const BLANK = { telegramUserId: '', name: '', email: '', allowed: true, isAdmin: false }
+const BLANK = { telegramUserId: '', name: '', email: '', isAdmin: false }
 
 export function MembersForm({ initial }: { initial: MemberRow[] }) {
   const [members, setMembers] = useState(initial)
@@ -34,9 +34,18 @@ export function MembersForm({ initial }: { initial: MemberRow[] }) {
     }
   }
 
+  // Only what was filled in: for an id already here, a blank email or an
+  // unticked admin box leaves theirs as it is, so this row can fix a name.
   async function add() {
-    if (await send('POST', draft)) {
-      setNote(`Added ${draft.name}.`)
+    const known = members.some((m) => m.telegramUserId === draft.telegramUserId)
+    const body = {
+      telegramUserId: draft.telegramUserId,
+      name: draft.name,
+      email: draft.email.trim() || undefined,
+      isAdmin: draft.isAdmin || undefined,
+    }
+    if (await send('POST', body)) {
+      setNote(known ? `Updated ${draft.name}.` : `Added ${draft.name}.`)
       setDraft(BLANK)
     }
   }
@@ -138,7 +147,9 @@ export function MembersForm({ initial }: { initial: MemberRow[] }) {
             <button
               disabled={busy || lastAdmin(m)}
               title={lastAdmin(m) ? 'The only admin cannot be removed. Make someone else an admin first.' : undefined}
-              onClick={() => send('DELETE', undefined, `?telegramUserId=${m.telegramUserId}`)}
+              onClick={() =>
+                confirm(`Remove ${m.name} from the family?`) && send('DELETE', undefined, `?telegramUserId=${m.telegramUserId}`)
+              }
             >
               Remove
             </button>
@@ -178,7 +189,9 @@ export function MembersForm({ initial }: { initial: MemberRow[] }) {
       <p className="empty" style={{ marginTop: '0.8rem' }}>
         The Telegram id lets someone talk to the bot; they can find theirs by sending it{' '}
         <span className="mono">/whoami</span>. The email lets them sign in here, and is optional:
-        anyone who has linked a mailbox can already sign in with that address.
+        anyone who has linked a mailbox can already sign in with that address. Adding an id that is
+        already here renames that person and changes only what you filled in; someone with no access
+        keeps none until you Allow them.
       </p>
       </div>
     </section>

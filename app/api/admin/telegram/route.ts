@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { NextResponse } from 'next/server'
 import { requireAdmin } from '@/lib/auth/session'
 import { hydrateSecrets, setSecret } from '@/lib/settings'
-import { telegramApi, telegramStatus, registerCommands } from '@/lib/telegram-admin'
+import { telegramApi, telegramStatus, registerCommands, botTokenProblem } from '@/lib/telegram-admin'
 import { appUrl } from '@/lib/env'
 
 export const runtime = 'nodejs'
@@ -36,19 +36,8 @@ export async function POST(req: Request) {
 
   if (body.token !== undefined) {
     const token = String(body.token).trim()
-    if (!/^\d+:[\w-]+$/.test(token)) {
-      return NextResponse.json(
-        { error: 'That does not look like a bot token. BotFather prints one like 123456:ABC-…' },
-        { status: 400 },
-      )
-    }
-    const me = await telegramApi<{ username?: string }>(token, 'getMe')
-    if (!me.ok) {
-      return NextResponse.json(
-        { error: `Telegram rejected that token: ${me.description ?? 'unknown error'}` },
-        { status: 400 },
-      )
-    }
+    const refused = await botTokenProblem(token)
+    if (refused) return NextResponse.json({ error: refused }, { status: 400 })
     await setSecret('TELEGRAM_BOT_TOKEN', token, session.email)
   }
 

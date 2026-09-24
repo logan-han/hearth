@@ -23,6 +23,17 @@ export async function telegramApi<T>(token: string, method: string, body?: unkno
 }
 
 /**
+ * Why a bot token cannot be saved, or null when Telegram itself vouches for
+ * it. Asked wherever a token is saved, its Settings row as well as /setup, so
+ * a paste error cannot silently kill the bot.
+ */
+export async function botTokenProblem(token: string): Promise<string | null> {
+  if (!/^\d+:[\w-]+$/.test(token)) return 'That does not look like a bot token. BotFather prints one like 123456:ABC-…'
+  const me = await telegramApi<{ username?: string }>(token, 'getMe')
+  return me.ok ? null : `Telegram rejected that token: ${me.description ?? 'unknown error'}`
+}
+
+/**
  * The everyday commands, registered with Telegram so the "/" menu lists them —
  * nobody should have to remember a command exists. Admin-only ones stay out.
  */

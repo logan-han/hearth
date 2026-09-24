@@ -75,6 +75,47 @@ describe('what System shows', () => {
   })
 })
 
+describe('how much Home and System carry', () => {
+  it('shows every open item but only the latest ticked ones, and counts them all', async () => {
+    const list = await q.findOrCreateList('shopping')
+    const items = await q.addListItems(list.id, Array.from({ length: 15 }, (_, i) => `ticked ${i + 1}`))
+    for (const i of items) await q.setListItemDone(i.id, true)
+    await q.addListItems(list.id, ['milk', 'bread'])
+    await q.findOrCreateList('camping')
+
+    const { lists } = await gatherFamilyStats()
+    const shopping = lists.find((l) => l.name === 'shopping')!
+    expect(shopping).toMatchObject({ id: list.id, open: 2, ticked: 15, total: 17 })
+    expect(shopping.items.filter((i) => !i.done).map((i) => i.content)).toEqual(['milk', 'bread'])
+    // The newest ten of the fifteen, still in the order they were added.
+    expect(shopping.items.filter((i) => i.done).map((i) => i.content)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `ticked ${i + 6}`),
+    )
+    // A list with nothing on it is still a list to add to.
+    expect(lists.find((l) => l.name === 'camping')).toMatchObject({ open: 0, ticked: 0, items: [] })
+  })
+
+  it('lists every reminder, the paused ones that sort last included, on Home and on System', async () => {
+    const made = []
+    for (let i = 1; i <= 11; i++) {
+      made.push(await q.addAutomation({
+        chatId: '-100', label: `reminder ${i}`, cronExpr: '0 7 * * *', instruction: 'x',
+        nextRunAt: new Date(Date.UTC(2030, 0, i)),
+      }))
+    }
+    const paused = made[0]
+    await q.setAutomationEnabled(paused.id, false)
+
+    const home = (await gatherFamilyStats()).automations
+    expect(home).toHaveLength(11)
+    expect(home.at(-1)).toMatchObject({ id: paused.id, label: 'reminder 1', enabled: false })
+
+    const system = (await gatherStats()).automations
+    expect(system).toHaveLength(11)
+    expect(system.at(-1)).toMatchObject({ id: paused.id, label: 'reminder 1', cron: '0 7 * * *', enabled: false, lastRun: null })
+  })
+})
+
 describe('readableLine', () => {
   it('passes over ids, links and labelled ids, and keeps words', () => {
     expect(readableLine(`Source: ${ID}\nBring water`)).toBe('Bring water')

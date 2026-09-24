@@ -8,7 +8,14 @@ import type { TelegramStatus } from '@/lib/telegram-admin'
  * bot and its webhook, and the one action the rows above cannot express —
  * pointing that webhook at this deployment.
  */
-export function TelegramPanel({ initial }: { initial?: TelegramStatus }) {
+export function TelegramPanel({
+  initial,
+  changed = 0,
+}: {
+  initial?: TelegramStatus
+  /** Goes up whenever a Telegram setting above is saved, which is a reason to ask again. */
+  changed?: number
+}) {
   const [status, setStatus] = useState<TelegramStatus | null>(initial ?? null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -23,8 +30,8 @@ export function TelegramPanel({ initial }: { initial?: TelegramStatus }) {
   }, [])
 
   useEffect(() => {
-    if (!initial) refresh()
-  }, [initial, refresh])
+    if (!initial || changed) refresh()
+  }, [initial, changed, refresh])
 
   async function connect() {
     setBusy(true)

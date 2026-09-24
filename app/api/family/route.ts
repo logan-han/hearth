@@ -9,6 +9,8 @@ import {
   setListItemDone,
   deleteListItem,
   addListItems,
+  clearList,
+  listContents,
   settleProposal,
   addFamilyEvent,
   listFamilyEvents,
@@ -16,10 +18,25 @@ import {
   answerQuestion,
 } from '@/lib/db/queries'
 import { nextRun } from '@/lib/cron'
+import { hydrateSecrets } from '@/lib/settings'
 import { isBuiltinKind } from '@/lib/watchers'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+
+/**
+ * One list in full, older ticked items included. Home carries only the ten
+ * ticked items added last, and nothing records when an item was ticked, so
+ * one ticked just now can be among those left out; this is how Home reaches
+ * it again, to untick or remove it.
+ */
+export async function GET(req: Request) {
+  if (!(await requireMember())) return NextResponse.json({ error: 'Not signed in' }, { status: 401 })
+  const id = Number(new URL(req.url).searchParams.get('list'))
+  if (!Number.isInteger(id) || id < 1) return NextResponse.json({ error: 'Which list?' }, { status: 400 })
+  const items = await listContents(id)
+  return NextResponse.json({ items: items.map((i) => ({ id: i.id, content: i.content, done: i.done })) })
+}
 
 /**
  * Household mutations from the Home page. Gated on being a recognised member,
@@ -29,6 +46,9 @@ export const dynamic = 'force-dynamic'
 export async function POST(req: Request) {
   const session = await requireMember()
   if (!session) return NextResponse.json({ error: 'Not signed in' }, { status: 401 })
+  // A resumed reminder's next run is worked out in the household's zone,
+  // which may live in the dashboard rather than this instance's environment.
+  await hydrateSecrets()
 
   let body: { action?: string; id?: number; enabled?: boolean; done?: boolean; list?: string; content?: string; fact?: string }
   try {
@@ -120,6 +140,12 @@ export async function POST(req: Request) {
     case 'delete_item': {
       if (!(await deleteListItem(id))) return NextResponse.json({ error: `No item ${id}.` }, { status: 404 })
       return NextResponse.json({ ok: true })
+    }
+
+    case 'clear_ticked': {
+      // The ticked ones only, as clearing a list does in the chat: nothing still to get goes.
+      const cleared = await clearList(id, true)
+      return NextResponse.json({ ok: true, cleared: cleared.length })
     }
 
     case 'add_item': {

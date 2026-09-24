@@ -263,6 +263,16 @@ h2 {
 .weblist { margin-bottom: 0.9rem; }
 .weblist:last-of-type { margin-bottom: 0; }
 .weblist .subhead { margin-top: 0; }
+.weblist-ticked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.weblist-ticked button { flex: none; padding: 0.12rem 0.45rem; font-size: 0.72rem; color: var(--muted); }
 .additem { display: flex; gap: 0.4rem; margin-top: 0.5rem; }
 .additem input { flex: 1; min-width: 0; }
 .additem.newlist { margin-top: 0.9rem; padding-top: 0.9rem; border-top: 1px solid var(--line-soft); }
@@ -551,6 +561,21 @@ footer { color: var(--muted); font-size: 0.8rem; margin-top: 2.5rem; }
 }
 .cal-event b { font-weight: 500; margin-right: 0.25rem; opacity: 0.85; }
 .cal-more { font-size: 0.66rem; color: var(--muted); padding-left: 0.3rem; }
+
+/* A day with events is a button that opens it beneath the grid, so it wears
+   the cell's look rather than a control's. */
+button.cal-day {
+  width: 100%;
+  border: none;
+  border-radius: 0;
+  font-size: inherit;
+  color: inherit;
+  text-align: left;
+}
+button.cal-day:hover:not(:disabled) { color: inherit; background: var(--panel-sunk); }
+button.cal-day:focus-visible { outline-offset: -2px; }
+.cal-day.chosen { box-shadow: inset 0 0 0 2px var(--ember); }
+.cal-detail { margin-top: 0.9rem; }
 
 @media (max-width: 46rem) {
   .cal-day { min-height: 4rem; }

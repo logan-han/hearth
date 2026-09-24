@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { requireMember } from '@/lib/auth/session'
+import { hydrateSecrets } from '@/lib/settings'
 import { gatherCalendar } from '@/lib/stats'
 
 export const runtime = 'nodejs'
@@ -12,6 +13,8 @@ export const dynamic = 'force-dynamic'
  */
 export async function GET(req: Request) {
   if (!(await requireMember())) return NextResponse.json({ error: 'Not signed in' }, { status: 401 })
+  // Events land on the household's days, and the household's zone may live in the dashboard.
+  await hydrateSecrets()
 
   const month = new URL(req.url).searchParams.get('month') ?? undefined
   const { calendar } = await gatherCalendar(month)
