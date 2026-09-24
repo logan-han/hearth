@@ -63,6 +63,8 @@ export type AgentResult = {
   facts?: string
   /** Cursor moves the turn's tools staged, for the caller to commit once the result has reached someone. */
   cursors?: StagedCursor[]
+  /** Writes this turn made that would double if done again; what they acted on must not be offered twice. */
+  wrote?: string[]
 }
 
 /** Memories are cheap to store and expensive to read; the chat sees the newest few dozen. */
@@ -632,19 +634,30 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           // A fragment is worse than nothing: it would go to the review as the
           // post. It is dropped here, and unless a tool already announced or
           // changed something, the failure below hands the turn to the next slot.
-          // A watcher's post is never sent cut off mid-bullet: the model after
-          // it gets the turn, and its sections that would have come last with it.
-          const truncated = r.finishReason === 'length' && (mode === 'watcher' || cleaned.text.length < TRUNCATED_REPLY_CHARS)
+          const truncated = r.finishReason === 'length' && cleaned.text.length < TRUNCATED_REPLY_CHARS
           if (truncated) {
             console.warn(`[agent] ${slot.name} ran out of output tokens after ${cleaned.text.length} characters of reply; dropped`)
             cleaned = { text: '', stripped: true }
+          } else if (r.finishReason === 'length' && mode === 'watcher') {
+            // A long post the cap cut off loses its broken last line rather
+            // than going out mid-bullet, and still faces the checks. Failing it
+            // instead would fail every run the same way, with nothing spent.
+            const cut = cleaned.text.lastIndexOf('\n')
+            // One cut-off line is a fragment, and goes the way of a short one.
+            const whole = cut > 0 ? cleaned.text.slice(0, cut).trimEnd() : ''
+            console.warn(`[agent] ${slot.name} ran out of output tokens after ${cleaned.text.length} characters; kept the complete lines`)
+            cleaned = { text: whole, stripped: true }
           }
 
           if (mode === 'chat' && (await claimsUnmadeAction(slot, cleaned.text, r.steps ?? [], ctx))) {
             console.warn(`[agent] ${slot.name} reported an action it never took; asking it to act or retract`)
             await recordModelEvent({ slot: slot.name, purpose: `hearth.${mode}`, outcome: 'claim_retry' })
             const changedBefore = ctx.changed?.length ?? 0
-            const stagedByFirst = ctx.pendingCursors?.length ?? 0
+            // The first reply's looks are set aside while the retry runs, so
+            // the retry sees the mail as new and can report it itself; they come
+            // back only if the first reply is the one that stands.
+            const firstLooks = ctx.pendingCursors?.splice(stagedBefore) ?? []
+            let replaced = false
             try {
               const again = await call([
                 ...messages,
@@ -654,8 +667,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
               const retried = cleanReply(again.text)
               if (retried.text || ctx.notices.length) {
                 cleaned = retried
-                // The reply that reported what was new is gone; so is its claim on it.
-                ctx.pendingCursors?.splice(stagedBefore, stagedByFirst - stagedBefore)
+                replaced = true
               }
               if (await claimsUnmadeAction(slot, cleaned.text, again.steps ?? [], ctx)) {
                 console.warn(`[agent] ${slot.name} still reported an untaken action; saying so`)
@@ -668,6 +680,12 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
               cleaned = (ctx.changed?.length ?? 0) > changedBefore
                 ? { text: `${cleaned.text}\n\n${CUT_OFF_MID_CHANGE}`, stripped: true }
                 : { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
+            }
+            // Only the reply that stands keeps its looks: a retry that failed,
+            // or whose reply was not used, showed its own to nobody.
+            if (!replaced) {
+              ctx.pendingCursors?.splice(stagedBefore)
+              if (firstLooks.length) (ctx.pendingCursors ??= []).push(...firstLooks)
             }
           }
 
@@ -683,7 +701,10 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
             evidence: mode === 'watcher' ? collectEvidence(r.steps ?? []) : undefined,
           }
         } catch (err) {
-          ctx.pendingCursors?.splice(stagedBefore)
+          // A failed slot's looks were shown to nobody, unless an unattended
+          // run wrote on the strength of them: then they are spent with it, or
+          // the next run would find the same mail and write it all again.
+          if (!ctx.wrote?.length || mode === 'chat') ctx.pendingCursors?.splice(stagedBefore)
           if (!ctx.wrote?.length) throw err
           console.error(`[agent] ${slot.name} failed after changing something, so no other slot gets the turn:`, describeError(err))
           if (mode === 'chat') return { text: doneLine(ctx), model: slot.name, evidence: undefined }
@@ -710,6 +731,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     // Only a reply the model wrote reports what was new. Notices alone (a
     // calendar line, a new ticket) say nothing about the mail it read.
     ...(result.text && ctx.pendingCursors?.length ? { cursors: ctx.pendingCursors } : {}),
+    ...(ctx.wrote?.length ? { wrote: ctx.wrote } : {}),
     ...(mode === 'watcher' ? { facts: context } : {}),
   }
 }

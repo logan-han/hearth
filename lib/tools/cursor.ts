@@ -66,7 +66,10 @@ export async function commitCursors(staged: readonly StagedCursor[] | undefined)
     const stored = await readCursor(s.key)
     const ahead = stored && Date.parse(stored.at) > Date.parse(s.at)
     const at = ahead ? stored.at : s.at
-    const ids = [...new Set([...s.ids, ...(stored?.ids ?? []), ...(s.prev?.ids ?? [])])].slice(0, CURSOR_MEMORY)
+    // Newest first, as CURSOR_MEMORY keeps the head: the ids at `at` are what
+    // stop the boundary message coming round again, so the run that set `at` leads.
+    const lead = ahead ? [...stored.ids, ...s.ids] : [...s.ids, ...(stored?.ids ?? [])]
+    const ids = [...new Set([...lead, ...(s.prev?.ids ?? [])])].slice(0, CURSOR_MEMORY)
     await setSetting(s.key, JSON.stringify({ at, ids } satisfies Cursor))
   }
 }

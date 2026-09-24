@@ -16,7 +16,7 @@ import type { ToolContext } from '@/lib/tools/context'
 import { WATCHERS, isWatcherKind, isGroupChat, watcherInstruction, type WatcherKind } from '@/lib/watchers'
 import { installBuiltins } from '@/lib/builtins'
 import { unaccountedIn } from '@/lib/headcount'
-import { commitCursors } from '@/lib/tools/cursor'
+import { commitCursors, type StagedCursor } from '@/lib/tools/cursor'
 import { send } from '@/lib/telegram'
 import { hydrateSecrets } from '@/lib/settings'
 import { flushTelemetry } from '@/lib/telemetry'
@@ -266,14 +266,14 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
   if (fetched.empty) {
     console.info(`[tick] ${a.label}: nothing new, no model call`)
     // Nothing new is still a look taken, and a first one sets the marker.
-    await commitCursors(ctx.pendingCursors)
+    await spentClean(a, ctx.pendingCursors ?? [])
     return
   }
 
   const watcher = WATCHERS[kind]
   const instruction = watcherInstruction(kind, a.chatId)
   const data = plainData(fetched.data)
-  const result = await runAgent({
+  const result = await counted(a, () => ctx.pendingCursors ?? [], () => runAgent({
     chatId: a.chatId,
     chatType: isGroupChat(a.chatId) ? 'group' : 'private',
     member: member ?? null,
@@ -283,12 +283,13 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
     ...(watcher.maxOutputTokens ? { maxOutputTokens: watcher.maxOutputTokens } : {}),
     history: false,
     text: `Scheduled check "${a.label}".\n\n${instruction}\n\nDATA (fetched just now):\n${data}`,
-  })
-  await deliver(
+  }))
+  const staged = () => [...(ctx.pendingCursors ?? []), ...(result.cursors ?? [])]
+  await counted(a, staged, () => deliver(
     a, member, result,
     `INSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`,
-    () => commitCursors([...(ctx.pendingCursors ?? []), ...(result.cursors ?? [])]),
-  )
+    () => spentClean(a, staged()),
+  ))
   // Asked once: whatever became of the post, Home keeps the question until it is answered.
   if (fetched.asked?.length) await markQuestionsAsked(fetched.asked)
 }
@@ -308,11 +309,33 @@ async function runCustom(a: Automation, member: Member | undefined): Promise<voi
       'If a tool fails or errors, never post the failure to the chat: write PROBLEM: followed by a one-line diagnosis, then SKIP on its own line. That, and only that, reaches the admins privately. ' +
       'Reply with the post alone: no preamble, no planning notes, no handover line such as "now the post:", no commentary about what the tools returned.',
   })
-  await deliver(
+  // What the model looked at before it failed is not known here; its own
+  // looks go unspent, and the next run looks again.
+  const staged = () => result.cursors ?? []
+  await counted(a, staged, () => deliver(
     a, member, result,
     `INSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`,
-    () => commitCursors(result.cursors),
-  )
+    () => spentClean(a, staged()),
+  ))
+}
+
+/**
+ * Run one step of a watcher, counting it against the stuck guard when it
+ * leaves what the run read unspent: a throw, or deliver() reporting a PROBLEM.
+ * The guard's own failure never hides the run's.
+ */
+async function counted<T>(a: Automation, staged: () => StagedCursor[], step: () => Promise<T>): Promise<T> {
+  let out: T
+  try {
+    out = await step()
+  } catch (err) {
+    await unspent(a, staged(), describeError(err)).catch((e) => console.error('[tick] stuck guard failed:', e))
+    throw err
+  }
+  if (out === 'problem') {
+    await unspent(a, staged(), 'the run reported a problem').catch((e) => console.error('[tick] stuck guard failed:', e))
+  }
+  return out
 }
 
 /**
@@ -391,7 +414,10 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
  * admin. `spent` marks what the run read as seen, and is called only once that
  * has reached the chat, or was deliberately kept from it: a plain SKIP, or a
  * draft the checks held back (an admin has it). A PROBLEM, a post the hourly
- * cap held back, or a send that fails leaves it new for the next run.
+ * cap held back, or a send that fails leaves it new for the next run, with one
+ * exception: a run that wrote something unrepeatable on the strength of it (a
+ * list item, a reminder) spends it whatever else happened, or the next run
+ * would write it again. Says which it was.
  */
 async function deliver(
   a: Automation,
@@ -399,7 +425,7 @@ async function deliver(
   result: AgentResult,
   evidence: string,
   spent: () => Promise<void>,
-): Promise<void> {
+): Promise<'spent' | 'problem' | 'capped'> {
   const split = (part: string) => {
     const lines = part.split('\n')
     const skip = lines.some(isSkipLine)
@@ -439,8 +465,11 @@ async function deliver(
   if (!message) {
     // Quiet by choice, or held back on purpose, is the run done with what it
     // read. A run that could not do its job (a PROBLEM) leaves it for the next.
-    if (heldBack || problems.length === 0) await spent()
-    return
+    if (heldBack || problems.length === 0 || result.wrote?.length) {
+      await spent()
+      return 'spent'
+    }
+    return 'problem'
   }
 
   // The last guard: however the run got here, a chat hears from its watchers
@@ -457,7 +486,11 @@ async function deliver(
         `Watcher **${a.label}** was held back: this chat has had ${PROACTIVE_POSTS_PER_HOUR} scheduled posts in the last hour. A schedule may be too eager.`,
       )
     }
-    return
+    if (result.wrote?.length) {
+      await spent()
+      return 'spent'
+    }
+    return 'capped'
   }
 
   await send(a.chatId, message)
@@ -470,12 +503,56 @@ async function deliver(
     content: message,
     model: result.model,
   })
+  return 'spent'
+}
+
+/** How many runs in a row may leave the same new items unspent before they are moved past. */
+const STUCK_RUNS = 3
+
+/**
+ * Leaving what a run read unspent is right when the run failed for a reason
+ * that passes: a model outage, a flaky send. A failure that is the same every
+ * time (an attachment no tool can read, a mailbox whose link has lapsed) would
+ * otherwise keep every later run on the same items for good, posting nothing
+ * and telling an admin each hour. So the same unspent position is allowed
+ * STUCK_RUNS runs, and then moved past with one message saying so.
+ */
+async function unspent(a: Automation, staged: StagedCursor[], why: string): Promise<void> {
+  if (staged.length === 0) return
+  const key = `unspent:${a.id}`
+  const at = staged.map((s) => `${s.key}@${s.prev?.at ?? '-'}`).sort().join('|')
+  let before: { at: string; runs: number } | null = null
+  try {
+    before = JSON.parse((await getSetting(key)) || 'null')
+  } catch {
+    // An unreadable record counts as none.
+  }
+  const runs = before?.at === at ? before.runs + 1 : 1
+  if (runs < STUCK_RUNS) {
+    await setSetting(key, JSON.stringify({ at, runs }))
+    return
+  }
+  await commitCursors(staged)
+  await setSetting(key, '')
+  await tellAdminQuietly(
+    undefined,
+    `**${a.label}** failed on the same new items ${runs} runs running (${why}), so I have moved past them. ` +
+      'They were not posted; the last failure above says why.',
+  )
+}
+
+/** A run that spent what it read clears its count of runs that did not. */
+async function spentClean(a: Automation, staged: StagedCursor[]): Promise<void> {
+  await commitCursors(staged)
+  if (await getSetting(`unspent:${a.id}`)) await setSetting(`unspent:${a.id}`, '')
 }
 
 /** Telegram turning the chat itself away, rather than failing this once. */
 const refusedChat = (err: unknown) =>
   err instanceof GrammyError &&
-  (err.error_code === 403 || (err.error_code === 400 && /chat not found|upgraded to a supergroup|not enough rights to send/i.test(err.description)))
+  (err.error_code === 403 ||
+    (err.error_code === 400 &&
+      /chat not found|upgraded to a supergroup|rights to send|CHAT_WRITE_FORBIDDEN|CHAT_RESTRICTED|TOPIC_CLOSED/i.test(err.description)))
 
 /** Allowed by the env seed or by an admin's grant, as the webhook judges it. */
 async function allowedPerson(telegramUserId: string): Promise<boolean> {

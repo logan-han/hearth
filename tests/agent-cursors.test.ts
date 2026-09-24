@@ -104,6 +104,42 @@ describe('a turn that looks at new mail', () => {
     expect(r.cursors).toBeUndefined()
   })
 
+  it('lets the claim retry see the mail as new, and keeps the first look when the first reply stands', async () => {
+    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+    listMail.mockResolvedValue([mail('a')])
+    let retrySaw = -1
+    generateText
+      .mockImplementationOnce(async (opts: { tools: Tools }) => {
+        await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+        return reply('One email from the school, and I have replied to it.')
+      })
+      .mockResolvedValueOnce({ text: '', output: 'claims_change', steps: [], usage: {} })
+      .mockImplementationOnce(async (opts: { tools: Tools }) => {
+        const r = await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+        retrySaw = (r.accounts as { messages: unknown[] }[])[0].messages.length
+        throw new Error('429 quota')
+      })
+    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', text: 'any new mail? reply to the school' })
+    // The retry could see the email; it failed, so the first reply stands with its claim on the mail.
+    expect(retrySaw).toBe(1)
+    expect(r.text).toContain('One email from the school')
+    expect(r.cursors?.map((c) => c.ids)).toEqual([['a']])
+  })
+
+  it('spends an unattended run\'s looks along with an unrepeatable write it made on them, even as it fails', async () => {
+    listMail.mockResolvedValue([mail('a')])
+    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+      await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+      await opts.tools.add_to_list.execute({ items: ['gold coin'], list: 'shopping' }, {})
+      throw new Error('429 quota')
+    })
+    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', mode: 'watcher', tools: ['new_mail', 'add_to_list'], text: 'add what school mail asks us to buy' })
+    expect(r.text).toMatch(/^PROBLEM: .*added to a list/)
+    expect(r.wrote).toEqual(['add_to_list'])
+    expect(r.cursors?.map((c) => c.ids)).toEqual([['a']])
+  })
+
   it('stages nothing for a failed look when the turn then ends on a write', async () => {
     const member = await q.upsertMember('111', 'Rowan', { allowed: true })
     listMail.mockResolvedValue([mail('a')])

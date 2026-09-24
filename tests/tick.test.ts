@@ -400,6 +400,22 @@ describe('running due automations', () => {
     expect(send).toHaveBeenCalledWith('900', expect.stringContaining('Paused **bin night**: Telegram will not let me post in chat 111'))
   })
 
+  it('pauses one Telegram will not let post in a group it has muted the bot in', async () => {
+    const { GrammyError } = await import('grammy')
+    dueAutomations.mockResolvedValue([automation()])
+    send.mockRejectedValueOnce(new GrammyError('Call to sendMessage failed!', { ok: false, error_code: 400, description: 'Bad Request: have no rights to send a message' }, 'sendMessage', {}))
+    await authed()
+    expect(setAutomationEnabled).toHaveBeenCalledWith(1, false)
+  })
+
+  it('does not pause on a 400 that is about the message, not the chat', async () => {
+    const { GrammyError } = await import('grammy')
+    dueAutomations.mockResolvedValue([automation()])
+    send.mockRejectedValueOnce(new GrammyError('Call to sendMessage failed!', { ok: false, error_code: 400, description: "Bad Request: can't parse entities" }, 'sendMessage', {}))
+    await authed()
+    expect(setAutomationEnabled).not.toHaveBeenCalled()
+  })
+
   it('reports an ordinary send failure without pausing anything', async () => {
     dueAutomations.mockResolvedValue([automation()])
     send.mockRejectedValueOnce(new Error('socket hang up'))
@@ -877,6 +893,126 @@ describe('ready-made watchers', () => {
     await authed()
     expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
     expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+    // The cap clears on its own, so it is not a run stuck on the mail.
+    expect(setSetting).not.toHaveBeenCalledWith('unspent:1', expect.anything())
+  })
+
+  it('spends the mail with a PROBLEM when the run already wrote something unrepeatable on it', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    stagingMail()
+    newMail.mockResolvedValue(mailWaiting)
+    runAgent.mockResolvedValue({ text: 'PROBLEM: read_email failed after adding to the list\nSKIP', notices: [], model: 'primary:test', wrote: ['add_to_list'] })
+    await authed()
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('read_email failed'))
+    expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.stringContaining('m1'))
+  })
+
+  it('spends it too when the hourly cap holds back a post the run already wrote on', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    stagingMail()
+    newMail.mockResolvedValue(mailWaiting)
+    runAgent.mockResolvedValue({ text: '**To do**\n- Added the slip to the list.', notices: [], model: 'primary:test', wrote: ['add_to_list'] })
+    const recent = Array.from({ length: 6 }, (_, i) => new Date(Date.now() - (i + 1) * 60_000).toISOString())
+    getSetting.mockImplementation(async (key: string) =>
+      key === 'proactive_posts:-100999' ? JSON.stringify({ posts: recent }) : key === 'memory_sweep_day' ? today() : null,
+    )
+    await authed()
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+    expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.stringContaining('m1'))
+  })
+
+  describe('the stuck guard', () => {
+    const position = 'mail_cursor:-100999:1:google@-'
+    const counting = (runs: number | null) =>
+      getSetting.mockImplementation(async (key: string) =>
+        key === 'unspent:1' ? (runs === null ? null : JSON.stringify({ at: position, runs })) : key === 'memory_sweep_day' ? today() : null,
+      )
+
+    it('counts a run that leaves the mail unspent, and says nothing more yet', async () => {
+      dueAutomations.mockResolvedValue([brief()])
+      stagingMail()
+      newMail.mockResolvedValue(mailWaiting)
+      counting(null)
+      runAgent.mockResolvedValue({ text: 'PROBLEM: read_email failed for the school message\nSKIP', notices: [], model: 'primary:test' })
+      await authed()
+      expect(setSetting).toHaveBeenCalledWith('unspent:1', JSON.stringify({ at: position, runs: 1 }))
+      expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+      expect(send).not.toHaveBeenCalledWith('900', expect.stringContaining('moved past'))
+    })
+
+    it('counts on from the last run when it is stuck at the same place', async () => {
+      dueAutomations.mockResolvedValue([brief()])
+      stagingMail()
+      newMail.mockResolvedValue(mailWaiting)
+      counting(1)
+      runAgent.mockRejectedValueOnce(new Error('429 quota'))
+      await authed()
+      expect(setSetting).toHaveBeenCalledWith('unspent:1', JSON.stringify({ at: position, runs: 2 }))
+      expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+    })
+
+    it('starts the count again when the run is stuck somewhere new', async () => {
+      dueAutomations.mockResolvedValue([brief()])
+      stagingMail()
+      newMail.mockResolvedValue(mailWaiting)
+      getSetting.mockImplementation(async (key: string) =>
+        key === 'unspent:1' ? JSON.stringify({ at: 'mail_cursor:-100999:1:google@2026-09-20T00:00:00.000Z', runs: 2 }) : key === 'memory_sweep_day' ? today() : null,
+      )
+      runAgent.mockResolvedValue({ text: 'PROBLEM: read_email failed for the school message\nSKIP', notices: [], model: 'primary:test' })
+      await authed()
+      expect(setSetting).toHaveBeenCalledWith('unspent:1', JSON.stringify({ at: position, runs: 1 }))
+      expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+    })
+
+    it('moves past the mail on the third run stuck on it, and tells an admin once', async () => {
+      dueAutomations.mockResolvedValue([brief()])
+      stagingMail()
+      newMail.mockResolvedValue(mailWaiting)
+      counting(2)
+      runAgent.mockResolvedValue({ text: 'PROBLEM: read_email failed for the school message\nSKIP', notices: [], model: 'primary:test' })
+      await authed()
+      expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.stringContaining('m1'))
+      expect(setSetting).toHaveBeenCalledWith('unspent:1', '')
+      expect(send).toHaveBeenCalledWith('900', expect.stringContaining('**Morning brief** failed on the same new items 3 runs running (the run reported a problem), so I have moved past them'))
+    })
+
+    it('moves past it on a third failure outright too, and still reports that failure', async () => {
+      dueAutomations.mockResolvedValue([brief()])
+      stagingMail()
+      newMail.mockResolvedValue(mailWaiting)
+      counting(2)
+      runAgent.mockRejectedValueOnce(new Error('the attachment cannot be read'))
+      await authed()
+      expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.stringContaining('m1'))
+      expect(send).toHaveBeenCalledWith('900', expect.stringContaining('(the attachment cannot be read), so I have moved past them'))
+      expect(send).toHaveBeenCalledWith('900', expect.stringContaining('failed: the attachment cannot be read'))
+    })
+
+    it('clears the count once a run spends what it read', async () => {
+      dueAutomations.mockResolvedValue([brief()])
+      stagingMail()
+      newMail.mockResolvedValue(mailWaiting)
+      counting(2)
+      runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.', notices: [], model: 'primary:test' })
+      await authed()
+      expect(send).toHaveBeenCalledWith('-100999', expect.stringContaining('permission slip'))
+      expect(setSetting).toHaveBeenCalledWith('unspent:1', '')
+      expect(send).not.toHaveBeenCalledWith('900', expect.stringContaining('moved past'))
+    })
+
+    it('keeps the run going when the guard itself cannot be written', async () => {
+      dueAutomations.mockResolvedValue([brief()])
+      stagingMail()
+      newMail.mockResolvedValue(mailWaiting)
+      counting(null)
+      setSetting.mockImplementation(async (key: string) => {
+        if (key === 'unspent:1') throw new Error('db down')
+      })
+      runAgent.mockRejectedValueOnce(new Error('429 quota'))
+      await authed()
+      expect(console.error).toHaveBeenCalledWith('[tick] stuck guard failed:', expect.any(Error))
+      expect(send).toHaveBeenCalledWith('900', expect.stringContaining('failed: 429 quota'))
+    })
   })
 
   it('sets the first marker even on a quiet morning that needs no model', async () => {

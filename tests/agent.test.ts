@@ -523,14 +523,22 @@ describe('runAgent', () => {
     expect(r.text).toMatch(/^PROBLEM: gemini:gemini-3\.5-flash-lite failed \(429 quota\) after it had added to a list, so this run posted nothing\.\nSKIP$/)
   })
 
-  it('never lets a watcher post go out cut off by the output cap, however long it got', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    const long = '**To do**\n' + Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`).join('\n')
-    generateText
-      .mockResolvedValueOnce({ ...reply(long), finishReason: 'length' })
-      .mockResolvedValueOnce(reply('**To do**\n- Item 0: something to attend to by Friday'))
+  it('never lets a watcher post go out cut mid-line, keeping the complete lines of a long one', async () => {
+    const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
+    // Cut off by the cap in the middle of its last bullet.
+    generateText.mockResolvedValueOnce({ ...reply(`**To do**\n${lines.join('\n')}\n- Item 40: somethi`), finishReason: 'length' })
     const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })
-    expect(r.text).toBe('**To do**\n- Item 0: something to attend to by Friday')
+    expect(r.text).toBe(`**To do**\n${lines.join('\n')}`)
+    expect(generateText).toHaveBeenCalledTimes(1)
+  })
+
+  it('hands a watcher\'s single cut-off line to the next model, being a fragment', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText
+      .mockResolvedValueOnce({ ...reply('x'.repeat(400)), finishReason: 'length' })
+      .mockResolvedValueOnce(reply('Bins out tonight.'))
+    const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })
+    expect(r.text).toBe('Bins out tonight.')
     expect(r.model).toContain('openrouter')
   })
 

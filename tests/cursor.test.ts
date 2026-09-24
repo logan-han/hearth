@@ -92,7 +92,17 @@ describe('staged cursor moves', () => {
     // The brief staged 06:40; a chat turn meanwhile committed 07:00:20.
     stored.set('k', JSON.stringify({ at: '2026-09-24T07:00:20.000Z', ids: ['m2', 'm1'] }))
     await commitCursors([{ key: 'k', at: '2026-09-24T06:40:00.000Z', ids: ['m1'], prev: { at: '2026-09-23T21:00:00.000Z', ids: ['m0'] } }])
-    expect(read('k')).toEqual({ at: '2026-09-24T07:00:20.000Z', ids: ['m1', 'm2', 'm0'] })
+    // The run that set the time leads, so the id at that time survives the trim.
+    expect(read('k')).toEqual({ at: '2026-09-24T07:00:20.000Z', ids: ['m2', 'm1', 'm0'] })
+  })
+
+  it('keeps the boundary id when another run moved ahead and this one staged a full memory of its own', async () => {
+    const mine = Array.from({ length: 32 }, (_, i) => `m${i + 1}`)
+    stored.set('k', JSON.stringify({ at: '2026-09-24T07:00:20.000Z', ids: ['n1', ...mine.slice(0, 29)] }))
+    await commitCursors([{ key: 'k', at: '2026-09-24T06:40:00.000Z', ids: mine, prev: null }])
+    const ids = read('k').ids as string[]
+    expect(ids[0]).toBe('n1')
+    expect(ids).toHaveLength(30)
   })
 
   it('does nothing with nothing staged', async () => {

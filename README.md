@@ -472,6 +472,18 @@ templates don't cover is a sentence away:
 describe a schedule in plain words and it becomes a custom automation with
 read-only tools, the same right to stay silent, and the same post decision.
 
+What a watcher read counts as seen only once it has reached someone. A run
+that fails, reports a PROBLEM or has its post refused leaves the mail and the
+transactions new, so the next run tries them again; one that wrote something
+it cannot take back on the strength of them (a list item, a reminder) spends
+them whatever else happened, or the next run would write it twice. A failure
+that is the same every time would otherwise hold every later run on the same
+items for good, so three runs in a row stuck at the same place move past them,
+and an admin is told once what was skipped. A post longer than the model's
+output allowance loses its cut-off last line rather than going out mid-bullet,
+and still faces the checks; a reply cut off inside its first line is dropped
+as the fragment it is.
+
 ## Sweeping email onto the calendar
 
 The morning brief already does this for the family group: each day's mail
@@ -548,8 +560,9 @@ what was found has reached someone, or was held back on purpose: a scheduled
 post that fails, one the hourly cap holds back, a run that reports a PROBLEM,
 a reply Telegram refuses or a model that gives out leaves it where it was, so
 the next run reports the same transactions (and the same mail) rather than
-skipping them unseen. A chat Telegram refuses outright (the bot removed, or
-blocked) pauses its automation rather than failing every hour. The first run looks back only 24 hours, so switching it on does not
+skipping them unseen, up to three runs stuck on the same ones (see Keeping
+watch). A chat Telegram refuses outright (the bot removed, blocked or muted
+in the group) pauses its automation rather than failing every hour. The first run looks back only 24 hours, so switching it on does not
 dump months of history into the chat.
 
 Ask for it once and it keeps happening:
