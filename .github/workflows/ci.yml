@@ -20,7 +20,7 @@ jobs:
 
       # The Node version is `engines` in package.json, which Vercel reads too,
       # so CI tests on the runtime production runs.
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version-file: package.json
           cache: npm
