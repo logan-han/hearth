@@ -842,7 +842,9 @@ ingestion goes over OpenTelemetry through `@langfuse/otel` 5.4 or later, trace
 attributes are propagated before each model call so every child observation
 carries them, and nothing uses the legacy `langfuse` SDK, the old ingestion
 endpoint or trace-level input/output setters. `tests/langfuse-v4.test.ts`
-guards that contract.
+guards that contract, down to every model call in the code sitting inside
+`traced()`, and `tests/telemetry.test.ts` checks what `traced()` propagates
+and what reaches Langfuse with content recording on and off.
 
 Inside Langfuse, an LLM-as-a-judge rule ("Groundedness of watcher posts")
 scores every `hearth.watcher` and `hearth.decision` trace, the draft and the
@@ -950,7 +952,7 @@ is judged on cases rather than by feel.
 ```bash
 npm run dev           # http://localhost:3000
 npm test              # vitest
-npm run test:coverage # vitest + coverage, thresholds at 80%
+npm run test:coverage # vitest + coverage, thresholds at 98% (lines 98.5%, branches 96.5%)
 npm run typecheck
 npm run db:generate   # after editing lib/db/schema.ts
 ```
@@ -961,10 +963,14 @@ as a partial and holds it against the total. Judge changes against the badge,
 since it is the stricter of the two.
 
 Query-layer tests run against a real Postgres, in process, via PGlite. The
-harness in `tests/helpers/db.ts` applies every migration in `drizzle/` to a
-fresh database per test, so constraints, defaults and the claim-by-predicate updates
-that stop double-sends behave exactly as they do on Neon. `lib/db/index.ts`
-exposes `__setDb` purely so that instance can be swapped in.
+harness in `tests/helpers/db.ts` builds one database per test file with
+drizzle's migrator, the one the deploy runs, so the migrations in `drizzle/`
+go in as they will in production: in journal order, in one transaction. Each
+test starts from that database emptied, and a test that changed the schema
+leaves the next one a database built afresh. Constraints, defaults and the
+claim-by-predicate updates that stop double-sends behave exactly as they do
+on Neon. `lib/db/index.ts` exposes `__setDb` purely so that instance can be
+swapped in.
 
 To test the webhook locally, tunnel port 3000 and point `APP_URL` at the tunnel
 before running `npm run set-webhook`.

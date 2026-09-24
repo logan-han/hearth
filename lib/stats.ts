@@ -57,13 +57,15 @@ export async function gatherStats(month?: string) {
     // Which model actually answered, which is how the fallback chain is judged:
     // chat replies and watcher runs, read from the chain's own record, which
     // is kept for the whole month. Stored messages are not: the history is
-    // only sure to reach back a fortnight.
+    // only sure to reach back a fortnight. That record is a diagnostic, like
+    // the chain's health below, so a table that cannot be read leaves the
+    // shares empty rather than taking the page down.
     db().execute(sql`
       select slot as model, count(*) as n
       from model_events where outcome = 'answered' and purpose in ('hearth.chat', 'hearth.watcher')
         and created_at > now() - interval '30 days'
       group by 1 order by 2 desc limit 8
-    `),
+    `).catch(() => ({ rows: [] as Row[] })),
     db().execute(sql`
       select c.chat_id, c.type, c.title, c.strangers,
              (select count(*) from messages m where m.chat_id = c.chat_id) as messages,

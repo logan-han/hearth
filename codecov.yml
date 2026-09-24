@@ -17,5 +17,4 @@ ignore:
   - "tests/**"
   - "drizzle/**"
   - "scripts/**"
-  - "app/**/page.tsx"
   - "app/**/layout.tsx"
