@@ -322,7 +322,7 @@ describe('running due automations', () => {
     await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 0, skipped: 1 })
     expect(runAgent).not.toHaveBeenCalled()
     expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
-    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('Telegram counts 2 people there I do not recognise'))
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('Telegram counts 2 people there I cannot match to an allowed member'))
     expect(setSetting).toHaveBeenCalledWith('unaccounted:-100999', '2')
 
     // The next hour, the same count: logged, not said again.
@@ -1030,8 +1030,9 @@ describe('the corners of a run', () => {
     expect(send).toHaveBeenCalledWith('900', expect.stringContaining('PROBLEM: calendar unreachable'))
   })
 
-  it('looks the creator up when the automation has one, and runs without them if they are gone', async () => {
-    dueAutomations.mockResolvedValue([automation({ memberId: 9 })])
+  it('looks the creator up when the automation has one, and runs a watcher without them if they are gone', async () => {
+    dueAutomations.mockResolvedValue([automation({ memberId: 9, kind: 'money', label: '2Up transactions' })])
+    newTransactions.mockResolvedValue({ account: '2Up', count: 1, transactions: [{ description: 'CAFE', amount: '$4.50', when: 'Mon', status: 'SETTLED' }] })
     await authed()
     expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ member: null, memberName: 'the family' }))
   })
