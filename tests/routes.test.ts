@@ -213,6 +213,12 @@ describe('GET /api/calendar/[token]', () => {
     expect(body).toContain('SUMMARY:Bin night')
   })
 
+  it('lets the edge answer repeat polls for an hour, as long as the feed asks clients to wait', async () => {
+    const res = await request('s3cret-feed-token')
+    expect(res.headers.get('cache-control')).toBe('public, max-age=300, s-maxage=3600')
+    expect(await res.text()).toContain('REFRESH-INTERVAL;VALUE=DURATION:PT1H')
+  })
+
   it('tolerates the .ics suffix calendar apps append', async () => {
     expect((await request('s3cret-feed-token.ics')).status).toBe(200)
   })

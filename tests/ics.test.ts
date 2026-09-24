@@ -93,7 +93,7 @@ describe('buildCalendar', () => {
     expect(ics.match(/X-WR-CALNAME:/g)).toHaveLength(1)
     expect(ics.match(/X-PUBLISHED-TTL:/g)).toHaveLength(1)
     expect(ics).toContain(`X-WR-TIMEZONE:${MEL}`)
-    expect(ics).toContain('REFRESH-INTERVAL;VALUE=DURATION:PT15M')
+    expect(ics).toContain('REFRESH-INTERVAL;VALUE=DURATION:PT1H')
   })
 
   it('returns a valid empty calendar when there are no events', () => {
@@ -101,6 +101,7 @@ describe('buildCalendar', () => {
     expect(ics).toContain('BEGIN:VCALENDAR')
     expect(ics).toContain('END:VCALENDAR')
     expect(ics).not.toContain('BEGIN:VEVENT')
+    expect(ics).toContain('REFRESH-INTERVAL;VALUE=DURATION:PT1H')
   })
 
   it('escapes special characters in text fields', () => {
@@ -143,6 +144,6 @@ describe('buildCalendar', () => {
     mockedCreateEvents.mockReturnValueOnce({ error: null, value: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n' })
     const ics = buildCalendar([event()], 'Family', MEL)
     expect(ics).toContain('BEGIN:VCALENDAR\r\nX-WR-TIMEZONE:')
-    expect(ics).toContain('X-PUBLISHED-TTL:PT15M')
+    expect(ics).toContain('X-PUBLISHED-TTL:PT1H')
   })
 })

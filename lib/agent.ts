@@ -262,7 +262,7 @@ function sortAttachments(attachments: AgentAttachment[]): {
     if (isCalendar) {
       const parsed = parseIcs(raw)
       calendarFiles.push({ filename: name, parsed })
-      texts.push(describeIcs(parsed, name))
+      texts.push(describeIcs(parsed, name, timezone(), TEXT_FILE_CHARS))
     } else {
       const clipped = raw.length > TEXT_FILE_CHARS ? `${raw.slice(0, TEXT_FILE_CHARS)}\n[cut off here]` : raw
       texts.push(`Attached file "${name}" (${a.mediaType}):\n${clipped}`)

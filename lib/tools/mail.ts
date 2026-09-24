@@ -11,6 +11,7 @@ import type { ToolContext } from './context'
 import { requireMember } from './context'
 import { providerConfig, type Provider } from '../oauth/providers'
 import { describeError } from '../errors'
+import { timezone } from '../env'
 
 const providerEnum = z.enum(['google', 'microsoft'])
 
@@ -378,7 +379,7 @@ export async function fileToText(file: MailFile): Promise<Record<string, unknown
       : { filename, type: 'pdf', pages: totalPages, text: '', note: 'This PDF has no text layer (a scan), so nothing could be read from it.' }
   }
   if (mimeType === 'text/calendar' || ext === 'ics') {
-    return { filename, type: 'calendar', text: describeIcs(parseIcs(new TextDecoder().decode(file.bytes)), filename) }
+    return { filename, type: 'calendar', text: describeIcs(parseIcs(new TextDecoder().decode(file.bytes)), filename, timezone(), MAX_ATTACHMENT_CHARS) }
   }
   if (mimeType.startsWith('text/') || ['txt', 'csv', 'md'].includes(ext)) {
     return { filename, type: 'text', text: clip(new TextDecoder().decode(file.bytes)) }

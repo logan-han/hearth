@@ -6,7 +6,7 @@ import {
 import { localToUtc, formatLocal, formatLocalDate, localDateKey, resolveSpan, nextLocalMidnight } from '../cron'
 import { timezone } from '../env'
 import { announce, type ToolContext } from './context'
-import { FEED_LAG } from './familycal'
+import { FEED_LAG, ALL_DAY_END } from './familycal'
 
 const LOCAL_DATETIME = z
   .string()
@@ -36,7 +36,7 @@ export function proposalTools(ctx: ToolContext) {
       inputSchema: z.object({
         title: z.string(),
         start: LOCAL_DATETIME,
-        end: LOCAL_DATETIME.optional().describe('Defaults to one hour after start'),
+        end: LOCAL_DATETIME.optional().describe(`Defaults to one hour after start. ${ALL_DAY_END}`),
         all_day: z.boolean().default(false),
         location: z.string().optional(),
         description: z

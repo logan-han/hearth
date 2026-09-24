@@ -69,9 +69,12 @@ export async function GET(_req: Request, { params }: { params: Promise<{ token: 
       'content-type': 'text/calendar; charset=utf-8',
       'content-disposition': 'inline; filename="family.ics"',
       // Calendar apps poll on their own clocks, some every few minutes. The
-      // edge answers repeat polls for half an hour so a keen client cannot
-      // keep the Neon compute awake: every miss here wakes it for five minutes.
-      'cache-control': 'public, max-age=300, s-maxage=1800',
+      // edge answers repeat polls for an hour so a keen client cannot keep
+      // the Neon compute awake: every miss here wakes it for five minutes,
+      // and each edge region misses on its own. No stale-while-revalidate:
+      // Google polls a few times a day, and would always be handed the copy
+      // from its last visit.
+      'cache-control': 'public, max-age=300, s-maxage=3600',
     },
   })
 }

@@ -3,7 +3,7 @@ import { z } from 'zod'
 import {
   addFamilyEvent, listFamilyEvents, cancelFamilyEvent, updateFamilyEvent, getFamilyEvent, calendarToken,
 } from '../db/queries'
-import { localToUtc, localDateKey, formatLocal, formatLocalDate, dayAfter, nextLocalMidnight, resolveSpan, rangeEnd } from '../cron'
+import { localToUtc, localDateKey, formatLocal, formatLocalDate, dayAfter, nextLocalMidnight, resolveSpan, rangeEnd, lastDay } from '../cron'
 import { timezone, appUrl } from '../env'
 import { announce, type ToolContext } from './context'
 
@@ -35,6 +35,9 @@ async function findClash(title: string, startsAt: Date, endsAt: Date, ignoreId?:
 
 export const FEED_LAG = 'Subscribed calendars may take a few hours to show this.'
 
+/** How every tool that makes an event reads an all-day end, said in its schema. */
+export const ALL_DAY_END = 'For an all-day event, the last day it covers: Fri 9 to Sun 11 October ends 2026-10-11.'
+
 export function familyCalendarTools(ctx: ToolContext) {
   return {
     add_family_event: tool({
@@ -45,7 +48,7 @@ export function familyCalendarTools(ctx: ToolContext) {
       inputSchema: z.object({
         title: z.string(),
         start: LOCAL_DATETIME,
-        end: LOCAL_DATETIME.optional().describe('Defaults to one hour after start'),
+        end: LOCAL_DATETIME.optional().describe(`Defaults to one hour after start. ${ALL_DAY_END}`),
         all_day: z
           .boolean()
           .default(false)
@@ -91,12 +94,12 @@ export function familyCalendarTools(ctx: ToolContext) {
       description:
         'Change an event already on the shared family calendar: its title, date, time, location or description. ' +
         'This is how to "replace", "rename", "move" or "reschedule" something: one call, and every subscribed calendar updates that entry instead of showing a cancellation beside a new event. ' +
-        'Take the id from list_family_events. Only the fields given change; a new start keeps the old duration unless an end is given too.',
+        'Take the id from list_family_events. Only the fields given change; a new start keeps the old length (its days, for an all-day event) unless an end is given too, and one that turns an all-day event into a timed one, or back, takes the default length.',
       inputSchema: z.object({
         id: z.number().int(),
         title: z.string().optional(),
         start: LOCAL_DATETIME.optional(),
-        end: LOCAL_DATETIME.optional(),
+        end: LOCAL_DATETIME.optional().describe(ALL_DAY_END),
         all_day: z.boolean().optional(),
         location: z.string().nullable().optional().describe('Pass null to clear it'),
         description: z.string().nullable().optional().describe('Pass null to clear it'),
@@ -114,11 +117,22 @@ export function familyCalendarTools(ctx: ToolContext) {
           const allDay = all_day ?? (start !== undefined ? DATE_ONLY.test(start.trim()) : existing.allDay)
           if (start !== undefined) {
             const times = resolveSpan({ start, end, allDay })
-            // A moved event keeps its length unless told otherwise.
-            const endsAt = end !== undefined || allDay
-              ? times.endsAt
-              : new Date(times.startsAt.getTime() + (existing.endsAt.getTime() - existing.startsAt.getTime()))
-            Object.assign(patch, { startsAt: times.startsAt, endsAt, allDay })
+            // A moved event keeps its length unless told otherwise: its hours
+            // when timed, its days when all-day, counted by the calendar. One
+            // that changes between the two has no length that fits and takes
+            // the default, so an all-day dentist given 9am is 9 to 10, not 9am
+            // to 9am the next day.
+            let endsAt = times.endsAt
+            if (end === undefined && times.allDay === existing.allDay) {
+              if (times.allDay) {
+                const moved = Date.parse(localDateKey(times.startsAt)) - Date.parse(localDateKey(existing.startsAt))
+                const until = Date.parse(dayAfter(lastDay(existing.startsAt, existing.endsAt))) + moved
+                endsAt = localToUtc(new Date(until).toISOString().slice(0, 10))
+              } else {
+                endsAt = new Date(times.startsAt.getTime() + (existing.endsAt.getTime() - existing.startsAt.getTime()))
+              }
+            }
+            Object.assign(patch, { startsAt: times.startsAt, endsAt, allDay: times.allDay })
           } else {
             // Made all-day with no new start, a timed event covers the days it
             // was on, not its old hours under an all-day flag (09:00 to 10:00
@@ -126,7 +140,7 @@ export function familyCalendarTools(ctx: ToolContext) {
             const toWholeDays = allDay && !existing.allDay
             const startsAt = toWholeDays ? localToUtc(localDateKey(existing.startsAt)) : existing.startsAt
             const endsAt = end !== undefined
-              ? (allDay ? localToUtc(end.trim().slice(0, 10)) : localToUtc(end))
+              ? (allDay ? localToUtc(dayAfter(end.trim().slice(0, 10))) : localToUtc(end))
               : toWholeDays
                 ? localToUtc(dayAfter(localDateKey(new Date(existing.endsAt.getTime() - 1))))
                 : existing.endsAt
@@ -196,8 +210,10 @@ export function familyCalendarTools(ctx: ToolContext) {
         const alreadyThere: string[] = []
         const repeating: string[] = []
         let leftOut = 0
+        let overLimit = 0
         for (const file of files) {
           leftOut += file.parsed.skipped
+          overLimit += file.parsed.overCap
           for (const e of file.parsed.events) {
             if (!matches(e.title)) continue
             if (e.repeats) {
@@ -226,6 +242,7 @@ export function familyCalendarTools(ctx: ToolContext) {
           already_on_calendar: alreadyThere,
           repeating_not_added: repeating,
           unreadable_or_cancelled: leftOut,
+          ...(overLimit ? { left_out_over_the_limit: overLimit } : {}),
           ...(added.length > 0
             ? announce(
                 ctx,
@@ -256,8 +273,10 @@ export function familyCalendarTools(ctx: ToolContext) {
             .map((e) => ({
               id: e.id,
               title: e.title,
-              start_local: formatLocal(e.startsAt),
-              end_local: formatLocal(e.endsAt),
+              start_local: whenLabel(e.startsAt, e.allDay),
+              // An all-day end is given as its last day, the way the tools
+              // take it back: its midnight after would read as a day more.
+              end_local: e.allDay ? formatLocalDate(localToUtc(lastDay(e.startsAt, e.endsAt))) : formatLocal(e.endsAt),
               all_day: e.allDay,
               location: e.location,
               ...(e.cancelled ? { cancelled: true } : {}),

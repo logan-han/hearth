@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { nextRun, isValidCron, localToUtc, tzOffsetMs, localDateKey } from '@/lib/cron'
+import { nextRun, isValidCron, localToUtc, tzOffsetMs, localDateKey, lastDay } from '@/lib/cron'
 
 const MEL = 'Australia/Melbourne'
 
@@ -71,6 +71,27 @@ describe('localToUtc', () => {
 
   it('rejects unparseable input', () => {
     expect(() => localToUtc('next tuesday', MEL)).toThrow()
+  })
+
+  it('takes a time that carries its own Z or offset as that instant, not as household time', () => {
+    // Microsoft's raw start for 9am on 14 October in Melbourne, copied across by the model.
+    expect(localToUtc('2026-10-13T22:00:00.0000000Z', MEL).toISOString()).toBe('2026-10-13T22:00:00.000Z')
+    expect(localToUtc('2026-10-14T09:00:00+11:00', MEL).toISOString()).toBe('2026-10-13T22:00:00.000Z')
+    expect(localToUtc('2026-10-13T18:00-0400', MEL).toISOString()).toBe('2026-10-13T22:00:00.000Z')
+  })
+
+  it('refuses anything else after the time rather than dropping it', () => {
+    expect(() => localToUtc('2026-10-14T09:00 AEDT', MEL)).toThrow()
+    expect(() => localToUtc('2026-10-14T09:00pm', MEL)).toThrow()
+  })
+})
+
+describe('lastDay', () => {
+  it('is the day before an all-day end, and the start day for one that ends where it begins', () => {
+    // 5 April 2026 in Melbourne runs 25 hours, midnight 13:00Z to midnight 14:00Z.
+    expect(lastDay(new Date('2026-04-04T13:00:00Z'), new Date('2026-04-05T14:00:00Z'), MEL)).toBe('2026-04-05')
+    expect(lastDay(new Date('2026-09-09T14:00:00Z'), new Date('2026-09-12T14:00:00Z'), MEL)).toBe('2026-09-12')
+    expect(lastDay(new Date('2026-09-09T14:00:00Z'), new Date('2026-09-09T14:00:00Z'), MEL)).toBe('2026-09-10')
   })
 })
 

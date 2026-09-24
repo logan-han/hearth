@@ -63,13 +63,20 @@ export function nextLocalMidnight(d: Date, tz: string = timezone()): Date {
   return localToUtc(dayAfter(localDateKey(d, tz)), tz)
 }
 
+/** The last local day an all-day span covers, its end being the midnight after that day. */
+export function lastDay(startsAt: Date, endsAt: Date, tz: string = timezone()): string {
+  return localDateKey(new Date(Math.max(startsAt.getTime(), endsAt.getTime() - 1)), tz)
+}
+
 /**
  * Read a start and optional end the way the model gives them, for every tool
  * that makes an event. A date with no time IS an all-day event: the model
  * omitted the time because it does not know one, and midnight would be an
- * invention. All-day ends are exclusive and taken as the household's dates, so
- * a one-day event runs to the next local midnight, by the calendar: the day
- * the clocks go back is 25 hours long, and 24 would end it where it began.
+ * invention. An all-day end is the last day the event covers, as people say
+ * it: "the 9th to the 11th" includes the 11th, and an end on the start day is
+ * that one day. It is stored as the local midnight after that day, by the
+ * calendar: the day the clocks go back is 25 hours long, and 24 would end it
+ * where it began.
  */
 export function resolveSpan(input: { start: string; end?: string; allDay: boolean }): {
   startsAt: Date
@@ -80,7 +87,7 @@ export function resolveSpan(input: { start: string; end?: string; allDay: boolea
   if (input.allDay || DATE_ONLY.test(start)) {
     const first = start.slice(0, 10)
     const until = input.end?.trim().slice(0, 10)
-    return { startsAt: localToUtc(first), endsAt: localToUtc(until && until > first ? until : dayAfter(first)), allDay: true }
+    return { startsAt: localToUtc(first), endsAt: localToUtc(dayAfter(until && until > first ? until : first)), allDay: true }
   }
   const startsAt = localToUtc(start)
   const endsAt = input.end ? localToUtc(input.end) : new Date(startsAt.getTime() + 60 * 60 * 1000)
@@ -99,15 +106,24 @@ export function localDateKey(d: Date, tz: string = timezone()): string {
 
 /**
  * Interpret a wall-clock local string ("2026-09-01T09:00" or "2026-09-01 09:00")
- * in `tz` and return the corresponding UTC instant.
+ * in `tz` and return the corresponding UTC instant. A time that carries its
+ * own Z or offset, as a provider's raw start does when the model copies one
+ * across, is that instant instead. Anything else after the time is refused
+ * rather than ignored: an ignored offset moves the time by that much.
  */
 export function localToUtc(local: string, tz: string = timezone()): Date {
   const m = local
     .trim()
-    .match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2}))?)?/)
+    .match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/i)
   if (!m) throw new Error(`Unparseable local datetime: ${local}`)
-  const [, y, mo, d, h = '0', mi = '0', s = '0'] = m
+  const [, y, mo, d, h = '0', mi = '0', s = '0', zone] = m
   const asUtc = Date.UTC(+y, +mo - 1, +d, +h, +mi, +s)
+  if (zone) {
+    // Z is UTC itself; +11:00 is eleven hours ahead of it.
+    const o = zone.match(/^([+-])(\d{2}):?(\d{2})$/)
+    const ahead = o ? (o[1] === '-' ? -1 : 1) * (+o[2] * 60 + +o[3]) * 60_000 : 0
+    return new Date(asUtc - ahead)
+  }
   // Offset is itself a function of the instant, so resolve it twice for DST edges.
   let guess = asUtc - tzOffsetMs(new Date(asUtc), tz)
   guess = asUtc - tzOffsetMs(new Date(guess), tz)

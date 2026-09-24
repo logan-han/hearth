@@ -671,6 +671,13 @@ describe('calendar tools', () => {
     expect(acct.events[0].start_local).toMatch(/Aug/)
   })
 
+  it('gives a timed event its local end too', async () => {
+    listEvents.mockResolvedValue([{ id: 'e', title: 'Dentist', start: '2026-10-13T22:00:00.0000000Z', end: '2026-10-13T23:00:00.0000000Z', allDay: false }])
+    const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-10-14', to: '2026-10-14' })
+    const [e] = (r.accounts as { events: Record<string, string>[] }[])[0].events
+    expect(e).toMatchObject({ start_local: 'Wed, 14 Oct 2026, 9:00 am', end_local: 'Wed, 14 Oct 2026, 10:00 am' })
+  })
+
   it('defaults an event to one hour', async () => {
     createEvent.mockResolvedValue({ id: 'e', title: 'T', start: '', end: '', allDay: false })
     await call(calendarTools(ctx), 'create_calendar_event', { title: 'T', start: '2026-08-27T09:00', all_day: false })
@@ -689,13 +696,24 @@ describe('calendar tools', () => {
     expect(r.start_local).toBe('Sat, 10 Oct 2026')
   })
 
-  it('keeps an all-day end that is later, and makes one that is not a single day', async () => {
+  it('reads an all-day end as the last day it covers, and one on the start day as that day', async () => {
     createEvent.mockResolvedValue({ id: 'e', title: 'Camp', start: '', end: '', allDay: true })
     await call(calendarTools(ctx), 'create_calendar_event', { title: 'Camp', start: '2026-09-25', end: '2026-09-28', all_day: true })
     await call(calendarTools(ctx), 'create_calendar_event', { title: 'Fete', start: '2026-09-26T09:00', end: '2026-09-26', all_day: true })
     const [camp, fete] = createEvent.mock.calls.map(([a]) => a as { start: Date; end: Date })
-    expect([camp.start.toISOString(), camp.end.toISOString()]).toEqual(['2026-09-24T14:00:00.000Z', '2026-09-27T14:00:00.000Z'])
+    // Friday the 25th to Monday the 28th, the Monday included: it ends at midnight going into the 29th.
+    expect([camp.start.toISOString(), camp.end.toISOString()]).toEqual(['2026-09-24T14:00:00.000Z', '2026-09-28T14:00:00.000Z'])
     expect([fete.start.toISOString(), fete.end.toISOString()]).toEqual(['2026-09-25T14:00:00.000Z', '2026-09-26T14:00:00.000Z'])
+  })
+
+  it('hands back a created all-day event ending on its last day, not the provider\'s day after', async () => {
+    // As Google and Microsoft each return "Fri 9 to Sun 11 Oct".
+    createEvent.mockResolvedValueOnce({ id: 'g', title: 'Camp', start: '2026-10-09', end: '2026-10-12', allDay: true })
+    createEvent.mockResolvedValueOnce({ id: 'm', title: 'Camp', start: '2026-10-09T00:00:00.0000000Z', end: '2026-10-12T00:00:00.0000000Z', allDay: true })
+    for (const provider of ['google', 'microsoft'] as const) {
+      const r = await call(calendarTools(ctx), 'create_calendar_event', { title: 'Camp', start: '2026-10-09', end: '2026-10-11', all_day: true, provider })
+      expect(r.created).toMatchObject({ start: '2026-10-09', end: '2026-10-11', end_local: 'Sun, 11 Oct 2026' })
+    }
   })
 
   it('makes the day the clocks go back a whole day, not 24 hours of it', async () => {
@@ -726,6 +744,23 @@ describe('calendar tools', () => {
     const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-09-01T00:00', to: '2026-09-07T00:00' })
     const shown = (r.accounts as { events: { start_local: string }[] }[])[0].events.map((e) => e.start_local)
     expect(shown).toEqual(['Wed, 2 Sept 2026', 'Fri, 4 Sept 2026'])
+  })
+
+  it('gives an all-day entry its first and last day, as the tools that make events take them', async () => {
+    // Both providers end an all-day entry on the day after; copied across as
+    // an end, that would add a day.
+    listEvents.mockResolvedValue([
+      { id: 'g', title: 'Camp', start: '2026-10-09', end: '2026-10-12', allDay: true },
+      { id: 'm', title: 'Pupil free day', start: '2026-09-04T00:00:00.0000000Z', end: '2026-09-05T00:00:00.0000000Z', allDay: true },
+      { id: 'x', title: 'No end given', start: '2026-09-06', end: '', allDay: true },
+    ])
+    const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-09-01', to: '2026-10-31' })
+    const shown = (r.accounts as { events: Record<string, string>[] }[])[0].events
+    expect(shown.map(({ start, end, end_local }) => ({ start, end, end_local }))).toEqual([
+      { start: '2026-10-09', end: '2026-10-11', end_local: 'Sun, 11 Oct 2026' },
+      { start: '2026-09-04', end: '2026-09-04', end_local: 'Fri, 4 Sept 2026' },
+      { start: '2026-09-06', end: '2026-09-06', end_local: 'Sun, 6 Sept 2026' },
+    ])
   })
 
   it('turns a missing link into the /connect nudge', async () => {
@@ -795,10 +830,17 @@ describe('family calendar tools', () => {
     expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(25 * 3_600_000)
   })
 
-  it('spans several days when an all-day event is given an explicit later end', async () => {
+  it('spans several days when an all-day event is given a later end, that last day included', async () => {
     await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Cuboree', start: '2026-08-29', end: '2026-09-01', all_day: true })
     const [e] = await q.listFamilyEvents(new Date('2026-08-28'), new Date('2026-09-03'))
-    expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(3 * 86_400_000)
+    expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(4 * 86_400_000)
+  })
+
+  it('reads a time that carries its own offset as that instant', async () => {
+    // A Microsoft event's raw start, copied across: 9am on 14 October in Melbourne.
+    await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Dentist', start: '2026-10-13T22:00:00.0000000Z', all_day: false })
+    const [e] = await q.listFamilyEvents(new Date('2026-10-01'), new Date('2026-10-31'))
+    expect(e).toMatchObject({ allDay: false, startsAt: new Date('2026-10-13T22:00:00Z'), endsAt: new Date('2026-10-13T23:00:00Z') })
   })
 
   it('treats a date with no time as all-day, never a midnight event', async () => {
@@ -864,6 +906,14 @@ describe('family calendar tools', () => {
     expect((weekend.events as { title: string }[]).map((e) => e.title)).toEqual(['Camp', 'Soccer'])
   })
 
+  it('lists an all-day event by its dates, the end being the last day it covers', async () => {
+    await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Camping', start: '2026-10-09', end: '2026-10-11', all_day: true })
+    const r = await call(familyCalendarTools(ctx), 'list_family_events', { from: '2026-10-01', to: '2026-10-31' })
+    expect((r.events as Record<string, unknown>[])[0]).toMatchObject({
+      title: 'Camping', start_local: 'Fri, 9 Oct 2026', end_local: 'Sun, 11 Oct 2026', all_day: true,
+    })
+  })
+
   it('refuses to cancel something that is not there', async () => {
     expect((await call(familyCalendarTools(ctx), 'cancel_family_event', { id: 999 })).error).toBeDefined()
   })
@@ -904,6 +954,31 @@ describe('family calendar tools', () => {
     expect(e.endsAt.toISOString()).toBe('2026-09-02T06:00:00.000Z')
   })
 
+  it('gives an all-day event given a time the default hour, not its old whole day', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Dentist', start: '2026-10-14', all_day: true })
+    const r = await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, start: '2026-10-14T09:00' })
+    expect(r.all_day).toBe(false)
+    const [e] = await q.listFamilyEvents(new Date('2026-10-13'), new Date('2026-10-16'))
+    // 9am on 14 October in Melbourne (AEDT, UTC+11) is 22:00 UTC the day before.
+    expect(e).toMatchObject({ allDay: false, startsAt: new Date('2026-10-13T22:00:00Z'), endsAt: new Date('2026-10-13T23:00:00Z') })
+  })
+
+  it('moves an all-day event keeping its days, by the calendar, across the clocks going forward', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Camp', start: '2026-09-10', end: '2026-09-12', all_day: true })
+    // 4 October 2026 is 23 hours long in Melbourne; three days from the 2nd end at midnight into the 5th.
+    await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, start: '2026-10-02' })
+    const [e] = await q.listFamilyEvents(new Date('2026-09-30'), new Date('2026-10-08'))
+    expect(e).toMatchObject({ allDay: true, startsAt: new Date('2026-10-01T14:00:00Z'), endsAt: new Date('2026-10-04T13:00:00Z') })
+  })
+
+  it('stores a bare-date start as all-day even when all_day is given as false', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Swim', start: '2026-09-01T09:00', all_day: false })
+    const r = await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, start: '2026-09-03', all_day: false })
+    expect(r.all_day).toBe(true)
+    const [e] = await q.listFamilyEvents(new Date('2026-08-30'), new Date('2026-09-06'))
+    expect(e).toMatchObject({ allDay: true, startsAt: new Date('2026-09-02T14:00:00Z'), endsAt: new Date('2026-09-03T14:00:00Z') })
+  })
+
   it('makes a timed event all-day from a bare date, and will not double another event', async () => {
     const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Camp', start: '2026-09-10T09:00', all_day: false })
     const r = await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, start: '2026-09-11' })
@@ -932,12 +1007,12 @@ describe('family calendar tools', () => {
     expect(e.description).toBeNull()
   })
 
-  it('changes only the end of an all-day event, keeping it all-day', async () => {
+  it('changes only the end of an all-day event, keeping it all-day and that last day included', async () => {
     const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Camp', start: '2026-09-10', all_day: true })
     const r = await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, end: '2026-09-13' })
     expect(r.all_day).toBe(true)
     const [e] = await q.listFamilyEvents(new Date('2026-09-09'), new Date('2026-09-15'))
-    expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(3 * 86_400_000)
+    expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(4 * 86_400_000)
   })
 
   it('keeps the times when all_day is restated unchanged beside another edit', async () => {
@@ -978,7 +1053,7 @@ describe('family calendar tools', () => {
     const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Swim', start: '2026-09-01T09:00', all_day: false })
     await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, all_day: true, end: '2026-09-03' })
     const [e] = await q.listFamilyEvents(new Date('2026-08-30'), new Date('2026-09-05'))
-    expect(e).toMatchObject({ allDay: true, startsAt: new Date('2026-08-31T14:00:00Z'), endsAt: new Date('2026-09-02T14:00:00Z') })
+    expect(e).toMatchObject({ allDay: true, startsAt: new Date('2026-08-31T14:00:00Z'), endsAt: new Date('2026-09-03T14:00:00Z') })
   })
 
   it('falls back to a default length when a new end is not after the start', async () => {
@@ -1036,6 +1111,14 @@ describe('import_calendar_file', () => {
     expect(rows[1].location).toBe('Hall')
     expect(c.notices.at(-1)).toContain('Added to the family calendar from school.ics')
     expect(c.notices.at(-1)).toContain('**Assembly**')
+  })
+
+  it('says how many events were left out over the limit, apart from unreadable ones', async () => {
+    const { parseIcs } = await import('@/lib/ics-parse')
+    const text = ics(...Array.from({ length: 203 }, (_, i) => ev(`SUMMARY:Night ${i}`, `DTSTART:2027${String(1 + (i % 12)).padStart(2, '0')}01T090000Z`)))
+    const c: ToolContext = { ...ctx, calendarFiles: [{ filename: 'big.ics', parsed: parseIcs(text, 'Australia/Melbourne', new Date('2026-09-01T00:00:00Z')) }] }
+    const r = await call(familyCalendarTools(c), 'import_calendar_file', { only: ['Night 0'] })
+    expect(r).toMatchObject({ unreadable_or_cancelled: 0, left_out_over_the_limit: 3 })
   })
 
   it('leaves alone what is already there, and honours a title filter', async () => {

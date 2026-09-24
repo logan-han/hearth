@@ -58,9 +58,11 @@ export function buildCalendar(events: FamilyEvent[], calName = 'Family', tz: str
   })
   if (error || !value) throw error ?? new Error('ICS generation produced no output')
 
-  // `ics` writes X-WR-CALNAME and a 1-hour TTL for us. Tighten the refresh hint
-  // and add the timezone label that Google and Apple use for a subscribed feed.
-  const extras = `X-WR-TIMEZONE:${tz}\r\nX-PUBLISHED-TTL:PT15M\r\nREFRESH-INTERVAL;VALUE=DURATION:PT15M\r\n`
+  // `ics` writes X-WR-CALNAME and a 1-hour TTL for us. Add the standard
+  // refresh hint beside it and the timezone label that Google and Apple use
+  // for a subscribed feed. An hour, because the edge serves the same copy for
+  // that long: a client asked to come back sooner only wakes the database.
+  const extras = `X-WR-TIMEZONE:${tz}\r\nX-PUBLISHED-TTL:PT1H\r\nREFRESH-INTERVAL;VALUE=DURATION:PT1H\r\n`
   if (value.includes('X-PUBLISHED-TTL:')) {
     return value.replace(/X-PUBLISHED-TTL:[^\r\n]*\r\n/, extras)
   }
@@ -79,8 +81,8 @@ function emptyCalendar(calName: string): string {
     'PRODID:-//hearth//ics//EN',
     `X-WR-CALNAME:${escapeText(calName)}`,
     `X-WR-TIMEZONE:${timezone()}`,
-    'X-PUBLISHED-TTL:PT15M',
-    'REFRESH-INTERVAL;VALUE=DURATION:PT15M',
+    'X-PUBLISHED-TTL:PT1H',
+    'REFRESH-INTERVAL;VALUE=DURATION:PT1H',
     'END:VCALENDAR',
     '',
   ].join('\r\n')

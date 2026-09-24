@@ -89,6 +89,12 @@ describe('propose_family_event', () => {
     expect(rows[0].endsAt.getTime() - rows[0].startsAt.getTime()).toBe(86_400_000)
   })
 
+  it('reads an all-day end as the last day the event covers', async () => {
+    // A notice's "Fri 9 to Sun 11 October" includes the Sunday.
+    await run('propose_family_event', { ...NOTICE, start: '2026-10-09', end: '2026-10-11', all_day: true })
+    expect(rows[0]).toMatchObject({ allDay: true, startsAt: new Date('2026-10-08T13:00:00Z'), endsAt: new Date('2026-10-11T13:00:00Z') })
+  })
+
   it('refuses to propose the same email twice', async () => {
     await run('propose_family_event', NOTICE)
     const again = await run('propose_family_event', NOTICE)

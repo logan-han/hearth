@@ -2,10 +2,12 @@ import { tool } from 'ai'
 import { z } from 'zod'
 import { clientFor, clientsFor } from '../providers'
 import { NotConnectedError, ReconnectNeededError } from '../providers/token'
-import { localToUtc, formatLocal, formatLocalDate, resolveSpan, rangeEnd } from '../cron'
+import type { CalendarEvent } from '../providers/types'
+import { localToUtc, formatLocal, formatLocalDate, resolveSpan, rangeEnd, lastDay } from '../cron'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
 import { requireMember } from './context'
+import { ALL_DAY_END } from './familycal'
 import { describeError } from '../errors'
 
 const providerEnum = z.enum(['google', 'microsoft'])
@@ -39,12 +41,7 @@ export function calendarTools(ctx: ToolContext) {
               const events = await c.listEvents(start, end)
               return {
                 provider: c.provider,
-                events: events.map((e) => ({
-                  ...e,
-                  // An all-day entry has a date, not a time: read as a UTC
-                  // instant it would show as 10am, or the day before west of Greenwich.
-                  start_local: !e.start ? '' : e.allDay ? formatLocalDate(localToUtc(e.start.slice(0, 10))) : formatLocal(new Date(e.start)),
-                })),
+                events: events.map(asShown),
               }
             } catch (e) {
               return { provider: c.provider, error: describe(e) }
@@ -61,7 +58,7 @@ export function calendarTools(ctx: ToolContext) {
       inputSchema: z.object({
         title: z.string(),
         start: LOCAL_DATETIME,
-        end: LOCAL_DATETIME.optional().describe('Defaults to one hour after start, or the one day for an all-day event'),
+        end: LOCAL_DATETIME.optional().describe(`Defaults to one hour after start, or the one day for an all-day event. ${ALL_DAY_END}`),
         all_day: z.boolean().default(false).describe('True when the event has no particular time. A date-only start implies this.'),
         location: z.string().optional(),
         description: z.string().optional(),
@@ -96,7 +93,10 @@ export function calendarTools(ctx: ToolContext) {
             attendees,
           })
           return {
-            created,
+            // Shown as list_calendar shows it: the provider hands back an
+            // all-day end as the day after, which would contradict the end
+            // just given.
+            created: asShown(created),
             provider: clients[0].provider,
             start_local: span.allDay ? formatLocalDate(span.startsAt) : formatLocal(span.startsAt),
           }
@@ -105,6 +105,29 @@ export function calendarTools(ctx: ToolContext) {
         }
       },
     }),
+  }
+}
+
+/**
+ * An event as the model is shown it, with local times beside the raw ones.
+ * An all-day entry has dates, not times: read as UTC instants they would show
+ * as 10am, or the day before west of Greenwich. Its end is given as the last
+ * day, the way the tools that make events take it; the provider's own end is
+ * the day after, and copied across would add a day.
+ */
+function asShown(e: CalendarEvent) {
+  if (!e.allDay || !e.start) {
+    const local = (at: string) => (at ? formatLocal(new Date(at)) : '')
+    return { ...e, start_local: local(e.start), end_local: local(e.end) }
+  }
+  const first = e.start.slice(0, 10)
+  const last = e.end ? lastDay(localToUtc(first), localToUtc(e.end.slice(0, 10))) : first
+  return {
+    ...e,
+    start: first,
+    end: last,
+    start_local: formatLocalDate(localToUtc(first)),
+    end_local: formatLocalDate(localToUtc(last)),
   }
 }
 
