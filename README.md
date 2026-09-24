@@ -414,7 +414,7 @@ worth saying**:
   family calendar; anything overdue on the board; and the weather. In the
   group it sweeps every member's linked mailbox, each on its own cursor via
   `new_mail`, and says whose each item was by name (Sam's Outlook), never by
-  provider. It reads exactly what arrived since the last brief, up to 30 a
+  provider. It reads exactly what arrived since the last brief, up to 20 a
   mailbox, and says how many more there were rather than dropping them without
   a word. "Today" means anything on during the day, so the third day of a
   camp is on it too. A day with nothing on, no new mail and nothing due gets
@@ -544,10 +544,12 @@ flag, so an Up-sourced summary is the raw number and will read higher.
 The third example is a scheduled announcement, and `new_transactions` is built
 for it. Each chat keeps its own marker of what it has already seen, so however
 often the automation runs nothing is posted twice. The marker moves only once
-what was found has reached someone: a scheduled post that fails, a reply
-Telegram refuses or a model that gives out leaves it where it was, so the next
-run reports the same transactions (and the same mail) rather than skipping them
-unseen. The first run looks back only 24 hours, so switching it on does not
+what was found has reached someone, or was held back on purpose: a scheduled
+post that fails, one the hourly cap holds back, a run that reports a PROBLEM,
+a reply Telegram refuses or a model that gives out leaves it where it was, so
+the next run reports the same transactions (and the same mail) rather than
+skipping them unseen. A chat Telegram refuses outright (the bot removed, or
+blocked) pauses its automation rather than failing every hour. The first run looks back only 24 hours, so switching it on does not
 dump months of history into the chat.
 
 Ask for it once and it keeps happening:
@@ -730,7 +732,10 @@ open questions with the ids the other tools want.
 Nothing changes about how the household hears of it. A tool that announces
 itself still says so in the family chat, so an event added through Claude turns
 up in the group and not only on the calendar, and mail still waits for a yes.
-Nobody in the group asked for that line, so it is held to the watchers' rule:
+What an MCP client has seen is its own: `new_mail` and `new_transactions` keep
+a marker per member's client, so asking Claude "any new mail?" never spends
+what the morning brief was going to tell the family. Nobody in the group asked
+for a posted line, so it is held to the watchers' rule:
 while Telegram's head count there includes people the household cannot account
 for, it goes to the member's own chat with the bot instead.
 The room is the household's own group, or the member's DM with the bot while

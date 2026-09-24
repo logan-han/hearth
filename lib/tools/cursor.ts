@@ -52,9 +52,21 @@ export async function currentCursor(ctx: Staging, key: string): Promise<Cursor |
   return readCursor(key)
 }
 
-/** Make the staged moves, the last per key: a later look this turn already includes an earlier one. */
+/**
+ * Make the staged moves, the last per key: a later look this turn already
+ * includes an earlier one. A move only ever goes forward. Between staging and
+ * committing another run may have moved the same cursor (a chat turn while the
+ * brief was being written), so the stored one is read again, the later time
+ * kept and both sets of ids remembered.
+ */
 export async function commitCursors(staged: readonly StagedCursor[] | undefined): Promise<void> {
   const last = new Map<string, StagedCursor>()
   for (const s of staged ?? []) last.set(s.key, s)
-  for (const s of last.values()) await writeCursor(s.key, s.at, s.ids, s.prev)
+  for (const s of last.values()) {
+    const stored = await readCursor(s.key)
+    const ahead = stored && Date.parse(stored.at) > Date.parse(s.at)
+    const at = ahead ? stored.at : s.at
+    const ids = [...new Set([...s.ids, ...(stored?.ids ?? []), ...(s.prev?.ids ?? [])])].slice(0, CURSOR_MEMORY)
+    await setSetting(s.key, JSON.stringify({ at, ids } satisfies Cursor))
+  }
 }

@@ -79,6 +79,7 @@ export function mailTools(ctx: ToolContext) {
       description:
         'Email that has arrived since this chat last checked. Advances its own marker per person, so the same ' +
         'message is never reported twice — built for scheduled sweeps. Returns empty lists when there is nothing new. ' +
+        'Only the newest `limit` are listed; the rest are counted in more_not_shown and will not be listed again, so ask for a higher limit up front if they matter. ' +
         "Acts on the asker's own mailbox(es); set everyone for a family-wide sweep across every linked member.",
       inputSchema: z.object({
         limit: z.number().int().min(1).max(30).default(10).describe('Per mailbox'),
@@ -101,7 +102,7 @@ export function mailTools(ctx: ToolContext) {
           const clients = await clientsFor(member.id)
           for (const c of clients) {
             try {
-              const key = `mail_cursor:${ctx.chatId}:${member.id}:${c.provider}`
+              const key = `mail_cursor:${ctx.cursorScope ?? ctx.chatId}:${member.id}:${c.provider}`
               const cursor = await currentCursor(ctx, key)
               // The first look reaches back only a few hours, so switching a
               // sweep on does not replay the whole inbox into the chat.

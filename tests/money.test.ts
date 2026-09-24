@@ -385,6 +385,15 @@ describe('new_transactions', () => {
     expect(new Date(cursor.at).toISOString()).toBe(new Date('2026-08-27T14:00:00+10:00').toISOString())
   })
 
+  it('says the count is a floor when the look read as far as it goes', async () => {
+    const txns = Array.from({ length: 51 }, (_, i) => upTxn(`t${i}`, '-1.00', new Date(Date.parse('2026-08-27T01:00:00Z') + i * 60_000).toISOString()))
+    wire(txns.reverse())
+    const r = await call('new_transactions', { account: '2up', limit: 1 })
+    expect(r.count).toBe(1)
+    expect(r.more_not_shown).toBe(50)
+    expect(r.more_not_shown_is_at_least).toBe(true)
+  })
+
   it('never posts the same transaction twice', async () => {
     wire([upTxn('t1', '-10.00', '2026-08-27T11:00:00+10:00')])
     expect((await call('new_transactions', { account: '2up', limit: 10 })).count).toBe(1)

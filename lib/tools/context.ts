@@ -43,6 +43,13 @@ export type ToolContext = {
   changed?: string[]
   /** Cursor moves waiting on this turn's result reaching someone; see StagedCursor. */
   pendingCursors?: StagedCursor[]
+  /**
+   * Whose "what's new" markers this turn reads and moves, when not the chat's
+   * own. A member's MCP client acts in the family group, but what it has seen
+   * is not what the family has: its own scope stops it spending the group's
+   * morning brief and 2Up posts.
+   */
+  cursorScope?: string
 }
 
 export function requireMember(ctx: ToolContext): Member {

@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { GrammyError } from 'grammy'
 import { Receiver } from '@upstash/qstash'
 import {
   dueAutomations, claimAutomation, allowedMembers, recordMessage, strangersIn,
@@ -181,8 +182,9 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
       const [events, mail, board, weather, questions] = await Promise.all([
         // The whole day, and anything on during it: day three of a camp is news too.
         runTool(tools, 'list_family_events', { from: day, to: day, include_cancelled: false }),
-        // A day's mail, not an hour's: the brief runs once a morning.
-        runTool(tools, 'new_mail', { limit: 30, everyone: isGroupChat(a.chatId) }),
+        // A day's mail, not an hour's: the brief runs once a morning. What
+        // does not fit is counted in the brief rather than dropped.
+        runTool(tools, 'new_mail', { limit: 20, everyone: isGroupChat(a.chatId) }),
         runTool(tools, 'jira_board_summary', {}),
         runTool(tools, 'weather', {}),
         isGroupChat(a.chatId) ? unaskedQuestions().catch(() => []) : Promise.resolve([]),
@@ -278,13 +280,15 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
     memberName,
     mode: 'watcher',
     tools: watcher.tools,
+    ...(watcher.maxOutputTokens ? { maxOutputTokens: watcher.maxOutputTokens } : {}),
     history: false,
     text: `Scheduled check "${a.label}".\n\n${instruction}\n\nDATA (fetched just now):\n${data}`,
   })
-  await deliver(a, member, result, `INSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`)
-  // Only now is the mail this run read spent: posted, or deliberately held
-  // back. A failed model or send throws before here and leaves it for the next run.
-  await commitCursors([...(ctx.pendingCursors ?? []), ...(result.cursors ?? [])])
+  await deliver(
+    a, member, result,
+    `INSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`,
+    () => commitCursors([...(ctx.pendingCursors ?? []), ...(result.cursors ?? [])]),
+  )
   // Asked once: whatever became of the post, Home keeps the question until it is answered.
   if (fetched.asked?.length) await markQuestionsAsked(fetched.asked)
 }
@@ -304,8 +308,11 @@ async function runCustom(a: Automation, member: Member | undefined): Promise<voi
       'If a tool fails or errors, never post the failure to the chat: write PROBLEM: followed by a one-line diagnosis, then SKIP on its own line. That, and only that, reaches the admins privately. ' +
       'Reply with the post alone: no preamble, no planning notes, no handover line such as "now the post:", no commentary about what the tools returned.',
   })
-  await deliver(a, member, result, `INSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`)
-  await commitCursors(result.cursors)
+  await deliver(
+    a, member, result,
+    `INSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`,
+    () => commitCursors(result.cursors),
+  )
 }
 
 /**
@@ -379,7 +386,20 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
  * the admins; the draft itself posts only once approved; tool notices report
  * actions already taken, so they always post.
  */
-async function deliver(a: Automation, member: Member | undefined, result: AgentResult, evidence: string): Promise<void> {
+/**
+ * Post a watcher's result, checked, capped and with its problems routed to an
+ * admin. `spent` marks what the run read as seen, and is called only once that
+ * has reached the chat, or was deliberately kept from it: a plain SKIP, or a
+ * draft the checks held back (an admin has it). A PROBLEM, a post the hourly
+ * cap held back, or a send that fails leaves it new for the next run.
+ */
+async function deliver(
+  a: Automation,
+  member: Member | undefined,
+  result: AgentResult,
+  evidence: string,
+  spent: () => Promise<void>,
+): Promise<void> {
   const split = (part: string) => {
     const lines = part.split('\n')
     const skip = lines.some(isSkipLine)
@@ -407,14 +427,21 @@ async function deliver(a: Automation, member: Member | undefined, result: AgentR
   }
 
   const parts: string[] = []
+  let heldBack = false
   if (!draft.skip && draft.rest) {
     const approved = await approve(a, member, draft.rest, evidence)
     if (approved) parts.push(approved)
+    else heldBack = true
   }
   parts.push(...unsaid(parts.join('\n\n'), notices))
 
   const message = parts.join('\n\n').trim()
-  if (!message) return
+  if (!message) {
+    // Quiet by choice, or held back on purpose, is the run done with what it
+    // read. A run that could not do its job (a PROBLEM) leaves it for the next.
+    if (heldBack || problems.length === 0) await spent()
+    return
+  }
 
   // The last guard: however the run got here, a chat hears from its watchers
   // only so often. An admin hears about the first held-back post each hour.
@@ -434,6 +461,8 @@ async function deliver(a: Automation, member: Member | undefined, result: AgentR
   }
 
   await send(a.chatId, message)
+  // Spent the moment it is posted, before the bookkeeping below can fail and bring it round again.
+  await spent()
   await setSetting(capKey, JSON.stringify(recordPost(log, now)))
   await db().insert(schema.messages).values({
     chatId: a.chatId,
@@ -442,6 +471,11 @@ async function deliver(a: Automation, member: Member | undefined, result: AgentR
     model: result.model,
   })
 }
+
+/** Telegram turning the chat itself away, rather than failing this once. */
+const refusedChat = (err: unknown) =>
+  err instanceof GrammyError &&
+  (err.error_code === 403 || (err.error_code === 400 && /chat not found|upgraded to a supergroup|not enough rights to send/i.test(err.description)))
 
 /** Allowed by the env seed or by an admin's grant, as the webhook judges it. */
 async function allowedPerson(telegramUserId: string): Promise<boolean> {
@@ -553,7 +587,18 @@ async function runDue(): Promise<{ ran: number; skipped: number }> {
       console.error(`[tick] automation ${a.id} failed:`, err)
       const reason = describeError(err)
       try {
-        await tellAdminQuietly(undefined, `Watcher **${a.label}** failed: ${reason}`)
+        if (refusedChat(err)) {
+          // Telegram will refuse this chat every hour from now on (the bot was
+          // removed, or the person blocked it), and what the run read stays
+          // unspent, so each hour would fetch, write and fail again. Paused, once.
+          await setAutomationEnabled(a.id, false)
+          await tellAdminQuietly(
+            undefined,
+            `Paused **${a.label}**: Telegram will not let me post in chat ${a.chatId} (${reason}). Resume it from Home once I can post there again.`,
+          )
+        } else {
+          await tellAdminQuietly(undefined, `Watcher **${a.label}** failed: ${reason}`)
+        }
       } catch (sendErr) {
         // One broken automation must not stop the rest of the tick.
         console.error(`[tick] could not report automation ${a.id} failure:`, sendErr)

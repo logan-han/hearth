@@ -88,7 +88,8 @@ describe('google mail', () => {
 
   it('asks for exactly what arrived since a time, when given one', async () => {
     fetchMock.mockResolvedValueOnce(reply({ messages: [] }))
-    await googleClient(1).listMail({ limit: 30, since: new Date('2026-09-23T21:00:00Z') })
+    // Gmail takes whole seconds; the fraction is floored, never rounded up past a message.
+    await googleClient(1).listMail({ limit: 30, since: new Date('2026-09-23T21:00:00.750Z') })
     const url = new URL(lastCall()[0])
     expect(url.searchParams.get('q')).toBe(`in:inbox after:${Date.parse('2026-09-23T21:00:00Z') / 1000}`)
     expect(url.searchParams.get('maxResults')).toBe('30')

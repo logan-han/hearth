@@ -114,7 +114,7 @@ export async function callTool(name: string, input: unknown, member: Member): Pr
     if (name === CONTEXT_TOOL) return answer(await context(member, chatId))
 
     if (!(MCP_TOOLS as string[]).includes(name)) return answer(`Hearth has no tool called ${name}.`, true)
-    const ctx: ToolContext = { chatId, member, memberName: member.name, now: new Date(), notices: [] }
+    const ctx: ToolContext = { chatId, member, memberName: member.name, now: new Date(), notices: [], cursorScope: `mcp:${member.id}` }
     const entry = registry(ctx)[name]
     if (!entry?.execute) return answer(`Hearth has no tool called ${name}.`, true)
 

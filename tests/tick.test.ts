@@ -376,6 +376,38 @@ describe('running due automations', () => {
     expect(setSetting).toHaveBeenCalledWith('unaccounted:-100999', '0')
   })
 
+  it('spends what a custom automation read once its post has gone, and not when the model fails', async () => {
+    const staged = [{ key: 'up_cursor:-100999:joint', at: '2026-09-24T01:00:00.000Z', ids: ['t1'], prev: null }]
+    dueAutomations.mockResolvedValue([automation()])
+    runAgent.mockResolvedValueOnce({ text: 'CAFE $4.50', notices: [], model: 'primary:test', cursors: staged })
+    await authed()
+    expect(setSetting).toHaveBeenCalledWith('up_cursor:-100999:joint', expect.stringContaining('t1'))
+
+    setSetting.mockClear()
+    runAgent.mockRejectedValueOnce(new Error('429 quota'))
+    await authed()
+    expect(setSetting).not.toHaveBeenCalledWith('up_cursor:-100999:joint', expect.anything())
+  })
+
+  it('pauses an automation Telegram refuses the chat for, rather than failing every hour', async () => {
+    const { GrammyError } = await import('grammy')
+    dueAutomations.mockResolvedValue([automation({ chatId: '111' })])
+    // The post is the first thing said, and Telegram turns the chat away.
+    send.mockRejectedValueOnce(new GrammyError('Call to sendMessage failed!', { ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' }, 'sendMessage', {}))
+    await authed()
+    expect(send.mock.calls[0][0]).toBe('111')
+    expect(setAutomationEnabled).toHaveBeenCalledWith(1, false)
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('Paused **bin night**: Telegram will not let me post in chat 111'))
+  })
+
+  it('reports an ordinary send failure without pausing anything', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    send.mockRejectedValueOnce(new Error('socket hang up'))
+    await authed()
+    expect(setAutomationEnabled).not.toHaveBeenCalled()
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('failed: socket hang up'))
+  })
+
   it('reports a failing automation to an admin DM, never the chat, and keeps going', async () => {
     dueAutomations.mockResolvedValue([automation({ id: 1 }), automation({ id: 2 })])
     runAgent.mockRejectedValueOnce(new Error('model exploded'))
@@ -791,6 +823,80 @@ describe('ready-made watchers', () => {
     await authed()
     expect(send.mock.calls[0][0]).toBe('-100999')
     expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+  })
+
+  it('spends it before the bookkeeping after the post, so a failed write there cannot bring the post round again', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    stagingMail()
+    newMail.mockResolvedValue(mailWaiting)
+    runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.', notices: [], model: 'primary:test' })
+    await authed()
+    const order = (key: string) => setSetting.mock.invocationCallOrder[setSetting.mock.calls.findIndex(([k]) => String(k).startsWith(key))]
+    expect(order('mail_cursor:')).toBeLessThan(order('proactive_posts:'))
+  })
+
+  it('leaves the mail new when the run could only report a PROBLEM', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    stagingMail()
+    newMail.mockResolvedValue(mailWaiting)
+    runAgent.mockResolvedValue({ text: 'PROBLEM: read_email failed for the school message\nSKIP', notices: [], model: 'primary:test' })
+    await authed()
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('read_email failed'))
+    expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+  })
+
+  it('spends it on a plain SKIP, which is the run deciding there is nothing to say', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    stagingMail()
+    newMail.mockResolvedValue(mailWaiting)
+    runAgent.mockResolvedValue({ text: 'SKIP', notices: [], model: 'primary:test' })
+    await authed()
+    expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.stringContaining('m1'))
+  })
+
+  it('spends it when the checks hold the draft back, since an admin has the draft', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    stagingMail()
+    newMail.mockResolvedValue(mailWaiting)
+    runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.', notices: [], model: 'primary:test' })
+    decideWatcherPost.mockResolvedValue({ decision: 'skip', confidence: 0.9, model: 'primary:test', reason: 'a date the evidence does not give' })
+    await authed()
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+    expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.stringContaining('m1'))
+  })
+
+  it('leaves it new when the hourly cap holds the post back, for the next run under the cap', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    stagingMail()
+    newMail.mockResolvedValue(mailWaiting)
+    runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.', notices: [], model: 'primary:test' })
+    const recent = Array.from({ length: 6 }, (_, i) => new Date(Date.now() - (i + 1) * 60_000).toISOString())
+    getSetting.mockImplementation(async (key: string) =>
+      key === 'proactive_posts:-100999' ? JSON.stringify({ posts: recent }) : key === 'memory_sweep_day' ? today() : null,
+    )
+    await authed()
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+    expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+  })
+
+  it('sets the first marker even on a quiet morning that needs no model', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    stagingMail()
+    newMail.mockResolvedValue({ accounts: [{ member: 'Rowan', mailbox: "Rowan's Gmail", provider: 'google', first_check: true, messages: [] }] })
+    await authed()
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+  })
+
+  it('asks for the whole day\'s events and a day\'s mail, with room to write it all', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    newMail.mockResolvedValue(mailWaiting)
+    runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.', notices: [], model: 'primary:test' })
+    await authed()
+    const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Melbourne' }).format(new Date())
+    expect(listEvents).toHaveBeenCalledWith(expect.objectContaining({ from: day, to: day }), expect.anything())
+    expect(newMail).toHaveBeenCalledWith(expect.objectContaining({ limit: 20 }), expect.anything())
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ maxOutputTokens: 2400 }))
   })
 
   it('sweeps every mailbox into the brief from a group and only the owner\'s from a DM', async () => {

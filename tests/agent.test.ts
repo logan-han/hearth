@@ -523,6 +523,17 @@ describe('runAgent', () => {
     expect(r.text).toMatch(/^PROBLEM: gemini:gemini-3\.5-flash-lite failed \(429 quota\) after it had added to a list, so this run posted nothing\.\nSKIP$/)
   })
 
+  it('never lets a watcher post go out cut off by the output cap, however long it got', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    const long = '**To do**\n' + Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`).join('\n')
+    generateText
+      .mockResolvedValueOnce({ ...reply(long), finishReason: 'length' })
+      .mockResolvedValueOnce(reply('**To do**\n- Item 0: something to attend to by Friday'))
+    const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })
+    expect(r.text).toBe('**To do**\n- Item 0: something to attend to by Friday')
+    expect(r.model).toContain('openrouter')
+  })
+
   it('treats an empty completion as a failure worth retrying', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     generateText.mockResolvedValueOnce(reply('   ')).mockResolvedValueOnce(reply('Proper answer.'))

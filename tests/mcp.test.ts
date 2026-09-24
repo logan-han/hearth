@@ -153,6 +153,9 @@ describe('calling a tool', () => {
     expect(first.accounts[0].messages).toHaveLength(1)
     const again = JSON.parse(text(await callTool('new_mail', { limit: 10 }, member)))
     expect(again.accounts[0].messages).toEqual([])
+    // Its own marker: what the client saw is still new to the family's brief.
+    expect(await q.getSetting(`mail_cursor:mcp:${member.id}:${member.id}:google`)).not.toBeNull()
+    expect(await q.getSetting(`mail_cursor:-100:${member.id}:google`)).toBeNull()
   })
 
   it('stays quiet in the chat when the tool only read something', async () => {

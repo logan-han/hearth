@@ -49,6 +49,8 @@ export type AgentInput = {
   mode?: AgentMode
   /** Narrow the tools the model may call this run. Defaults per mode. */
   tools?: ToolName[]
+  /** A larger output budget than the mode's, for a run known to write at length (the morning brief). */
+  maxOutputTokens?: number
 }
 
 export type AgentResult = {
@@ -610,7 +612,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
               : {}),
             stopWhen: isStepCount(MAX_STEPS),
             timeout: { stepMs: STEP_TIMEOUT_MS },
-            maxOutputTokens: settings.maxOutputTokens,
+            maxOutputTokens: input.maxOutputTokens ?? settings.maxOutputTokens,
             ...(settings.temperature !== undefined ? { temperature: settings.temperature } : {}),
             ...(reasoning ? { reasoning } : {}),
             telemetry: callTelemetry(`hearth.${mode}`),
@@ -630,7 +632,9 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           // A fragment is worse than nothing: it would go to the review as the
           // post. It is dropped here, and unless a tool already announced or
           // changed something, the failure below hands the turn to the next slot.
-          const truncated = r.finishReason === 'length' && cleaned.text.length < TRUNCATED_REPLY_CHARS
+          // A watcher's post is never sent cut off mid-bullet: the model after
+          // it gets the turn, and its sections that would have come last with it.
+          const truncated = r.finishReason === 'length' && (mode === 'watcher' || cleaned.text.length < TRUNCATED_REPLY_CHARS)
           if (truncated) {
             console.warn(`[agent] ${slot.name} ran out of output tokens after ${cleaned.text.length} characters of reply; dropped`)
             cleaned = { text: '', stripped: true }
@@ -640,6 +644,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
             console.warn(`[agent] ${slot.name} reported an action it never took; asking it to act or retract`)
             await recordModelEvent({ slot: slot.name, purpose: `hearth.${mode}`, outcome: 'claim_retry' })
             const changedBefore = ctx.changed?.length ?? 0
+            const stagedByFirst = ctx.pendingCursors?.length ?? 0
             try {
               const again = await call([
                 ...messages,
@@ -647,7 +652,11 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
                 { role: 'user', content: unmadeActionNote(input.memberName) },
               ])
               const retried = cleanReply(again.text)
-              if (retried.text || ctx.notices.length) cleaned = retried
+              if (retried.text || ctx.notices.length) {
+                cleaned = retried
+                // The reply that reported what was new is gone; so is its claim on it.
+                ctx.pendingCursors?.splice(stagedBefore, stagedByFirst - stagedBefore)
+              }
               if (await claimsUnmadeAction(slot, cleaned.text, again.steps ?? [], ctx)) {
                 console.warn(`[agent] ${slot.name} still reported an untaken action; saying so`)
                 cleaned = { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
@@ -698,7 +707,9 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     notices: ctx.notices,
     model: result.model,
     ...(result.evidence !== undefined ? { evidence: result.evidence } : {}),
-    ...(ctx.pendingCursors?.length ? { cursors: ctx.pendingCursors } : {}),
+    // Only a reply the model wrote reports what was new. Notices alone (a
+    // calendar line, a new ticket) say nothing about the mail it read.
+    ...(result.text && ctx.pendingCursors?.length ? { cursors: ctx.pendingCursors } : {}),
     ...(mode === 'watcher' ? { facts: context } : {}),
   }
 }

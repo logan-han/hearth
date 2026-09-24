@@ -75,6 +75,35 @@ describe('a turn that looks at new mail', () => {
     expect(r.cursors).toHaveLength(1)
   })
 
+  it('claims nothing when the reply is only notices, which say nothing of the mail', async () => {
+    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+    listMail.mockResolvedValue([mail('a')])
+    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+      await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+      await opts.tools.add_family_event.execute({ title: 'Swimming', start: '2026-10-03T09:00', all_day: false }, {})
+      return reply('')
+    })
+    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', text: 'add swimming, and any new mail?' })
+    expect(r.text).toContain('Added to the family calendar')
+    expect(r.cursors).toBeUndefined()
+  })
+
+  it('drops the first reply\'s claim on the mail when the claim retry replaces that reply', async () => {
+    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+    listMail.mockResolvedValue([mail('a')])
+    generateText
+      .mockImplementationOnce(async (opts: { tools: Tools }) => {
+        await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+        return reply('One email from the school, and I have replied to it.')
+      })
+      .mockResolvedValueOnce({ text: '', output: 'claims_change', steps: [], usage: {} })
+      .mockResolvedValueOnce(reply('I have not replied to anything; I can draft a reply if you like.'))
+      .mockResolvedValueOnce({ text: '', output: 'no_change_claimed', steps: [], usage: {} })
+    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', text: 'any new mail? reply to the school' })
+    expect(r.text).toBe('I have not replied to anything; I can draft a reply if you like.')
+    expect(r.cursors).toBeUndefined()
+  })
+
   it('stages nothing for a failed look when the turn then ends on a write', async () => {
     const member = await q.upsertMember('111', 'Rowan', { allowed: true })
     listMail.mockResolvedValue([mail('a')])

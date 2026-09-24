@@ -251,7 +251,7 @@ export function moneyTools(ctx: ToolContext) {
           const acct = await up.findAccount(account)
           if (!acct) return { error: `No Up account matching "${account}".` }
 
-          const key = `up_cursor:${ctx.chatId}:${acct.id}`
+          const key = `up_cursor:${ctx.cursorScope ?? ctx.chatId}:${acct.id}`
           const cursor = await currentCursor(ctx, key)
           // First run has no marker. Look back only a little, so switching this
           // on does not dump months of history into the chat.

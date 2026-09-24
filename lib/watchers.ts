@@ -24,6 +24,8 @@ export type Watcher = {
   instruction: string
   /** The few tools the model may call for context while phrasing. */
   tools: ToolName[]
+  /** More room than a watcher's usual output budget, for one that writes at length. */
+  maxOutputTokens?: number
 }
 
 export const WATCHERS: Record<WatcherKind, Watcher> = {
@@ -44,6 +46,9 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
       'If DATA lists questions, end with "Not sure about:" and each question on its own line, worded as given, and say that anyone can answer here or on Home. Nothing under DATA answers them, so do not guess.',
     ].join(' '),
     tools: ['recall', 'read_email', 'propose_family_event', 'list_family_events'],
+    // A bullet an email across every mailbox, and the sections after the mail,
+    // with room for a thinking model's reasoning, which the budget also counts.
+    maxOutputTokens: 2400,
   },
   snapshot: {
     kind: 'snapshot',

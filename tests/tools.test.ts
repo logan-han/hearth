@@ -420,6 +420,8 @@ describe('new_mail', () => {
     const acct = (r.accounts as { messages: unknown[]; more_not_shown?: number }[])[0]
     expect(acct.messages).toHaveLength(10)
     expect(acct.more_not_shown).toBe(2)
+    // Twelve is all there was, so the count is exact.
+    expect((acct as { more_not_shown_is_at_least?: boolean }).more_not_shown_is_at_least).toBeUndefined()
   })
 
   it('asks the mailbox for what arrived since the last look, not the newest few of a fortnight', async () => {

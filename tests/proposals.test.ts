@@ -63,6 +63,16 @@ describe('propose_family_event', () => {
     expect(r).toMatchObject({ all_day: true, start_local: 'Sun, 5 Apr 2026' })
   })
 
+  it('checks the whole local day for what is already on, by the calendar and by overlap', async () => {
+    rows.push({ id: 50, status: 'pending', title: 'Camp', startsAt: new Date('2026-04-03T13:00:00Z'), endsAt: new Date('2026-04-06T14:00:00Z'), source: 'x' } as unknown as EventProposal)
+    const r = await run('propose_family_event', { title: 'Swap day', start: '2026-04-05', all_day: true, source: 'google:swap2' })
+    // The day the clocks go back runs 25 hours, midnight to midnight.
+    expect(listFamilyEvents).toHaveBeenCalledWith(new Date('2026-04-04T13:00:00Z'), new Date('2026-04-05T14:00:00Z'))
+    // A proposal that began two days earlier is on that day too.
+    expect(r.not_proposed_yet).toBe(true)
+    expect((r.that_day_already_has as { awaiting_yes: { title: string }[] }).awaiting_yes.map((p) => p.title)).toEqual(['Camp'])
+  })
+
   it('reads the local time as Melbourne, not UTC', async () => {
     await run('propose_family_event', NOTICE)
     // 9am on 9 Sep in Melbourne is 23:00 UTC the day before (AEST, UTC+10).

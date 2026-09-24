@@ -23,7 +23,7 @@ async function sameDay(chatId: string, dayStart: Date) {
   // By the calendar, and anything on at any point that day, a camp that began earlier included.
   const dayEnd = nextLocalMidnight(dayStart)
   const events = (await listFamilyEvents(dayStart, dayEnd)).filter((e) => !e.cancelled)
-  const proposals = (await pendingProposals(chatId)).filter((p) => p.startsAt >= dayStart && p.startsAt < dayEnd)
+  const proposals = (await pendingProposals(chatId)).filter((p) => p.startsAt < dayEnd && p.endsAt > dayStart)
   return { events, proposals }
 }
 

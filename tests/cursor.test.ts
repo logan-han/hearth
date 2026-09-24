@@ -6,7 +6,8 @@ const { getSetting, setSetting } = vi.hoisted(() => ({
 }))
 vi.mock('@/lib/db/queries', () => ({ getSetting, setSetting }))
 
-const { readCursor, writeCursor, CURSOR_MEMORY } = await import('@/lib/tools/cursor')
+const { readCursor, writeCursor, CURSOR_MEMORY, stageCursor, currentCursor, commitCursors } = await import('@/lib/tools/cursor')
+type StagedCursor = import('@/lib/tools/cursor').StagedCursor
 
 beforeEach(() => vi.clearAllMocks())
 
@@ -54,5 +55,49 @@ describe('writeCursor', () => {
     await writeCursor('k', 'new-at', ['a'], null)
     const stored = JSON.parse(setSetting.mock.calls[0][1])
     expect(stored).toEqual({ at: 'new-at', ids: ['a'] })
+  })
+})
+
+describe('staged cursor moves', () => {
+  const stored = new Map<string, string>()
+  beforeEach(() => {
+    stored.clear()
+    getSetting.mockImplementation(async (k: string) => stored.get(k) ?? null)
+    setSetting.mockImplementation(async (k: string, v: string) => void stored.set(k, v))
+  })
+  const read = (k: string) => JSON.parse(stored.get(k)!)
+
+  it('reads the turn\'s own staged move before the stored one, so a second look this turn sees nothing twice', async () => {
+    stored.set('k', JSON.stringify({ at: '2026-09-24T00:00:00.000Z', ids: ['old'] }))
+    const ctx: { pendingCursors?: StagedCursor[] } = {}
+    const prev = await currentCursor(ctx, 'k')
+    stageCursor(ctx, 'k', '2026-09-24T01:00:00.000Z', ['new'], prev)
+    expect(await currentCursor(ctx, 'k')).toEqual({ at: '2026-09-24T01:00:00.000Z', ids: ['new', 'old'] })
+    // Nothing is written until the result is delivered.
+    expect(read('k').at).toBe('2026-09-24T00:00:00.000Z')
+  })
+
+  it('makes the last move per key, once', async () => {
+    await commitCursors([
+      { key: 'k', at: '2026-09-24T01:00:00.000Z', ids: ['a'], prev: null },
+      { key: 'k', at: '2026-09-24T02:00:00.000Z', ids: ['b', 'a'], prev: null },
+      { key: 'j', at: '2026-09-24T01:30:00.000Z', ids: ['x'], prev: null },
+    ])
+    expect(read('k')).toEqual({ at: '2026-09-24T02:00:00.000Z', ids: ['b', 'a'] })
+    expect(read('j').at).toBe('2026-09-24T01:30:00.000Z')
+    expect(setSetting).toHaveBeenCalledTimes(2)
+  })
+
+  it('never moves a cursor back past where another run already took it, and keeps both runs\' ids', async () => {
+    // The brief staged 06:40; a chat turn meanwhile committed 07:00:20.
+    stored.set('k', JSON.stringify({ at: '2026-09-24T07:00:20.000Z', ids: ['m2', 'm1'] }))
+    await commitCursors([{ key: 'k', at: '2026-09-24T06:40:00.000Z', ids: ['m1'], prev: { at: '2026-09-23T21:00:00.000Z', ids: ['m0'] } }])
+    expect(read('k')).toEqual({ at: '2026-09-24T07:00:20.000Z', ids: ['m1', 'm2', 'm0'] })
+  })
+
+  it('does nothing with nothing staged', async () => {
+    await commitCursors(undefined)
+    await commitCursors([])
+    expect(setSetting).not.toHaveBeenCalled()
   })
 })
