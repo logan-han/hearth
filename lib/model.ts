@@ -154,6 +154,20 @@ export async function structuredChain(chain: ModelSlot[] = modelChain()): Promis
 }
 
 /**
+ * A slot that failed, but whose turn has to end with it anyway (it had
+ * already changed something, so another slot would do it all again), and what
+ * to return. The chain records it as the failure it was and stops there.
+ */
+export class EndOnFailure<T> extends Error {
+  constructor(
+    readonly value: T,
+    failure: unknown,
+  ) {
+    super(describeError(failure))
+  }
+}
+
+/**
  * Run `fn` against each model in turn, returning the first success. Every
  * failure mode collapses to the same behaviour: rate limit, timeout, provider
  * outage, or a model that cannot drive tools all just move to the next slot.
@@ -182,6 +196,7 @@ export async function withModelFallback<T>(
       const message = describeError(err)
       console.error(`[model] ${slot.name} failed:`, message)
       await recordModelEvent({ slot: slot.name, purpose, outcome: 'failed', ms: Date.now() - started, error: message })
+      if (err instanceof EndOnFailure) return err.value as T
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError))

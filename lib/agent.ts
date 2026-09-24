@@ -8,7 +8,7 @@ import {
   type UserContent,
 } from 'ai'
 import { z } from 'zod'
-import { withModelFallback, structuredChain, type ModelSlot } from './model'
+import { withModelFallback, structuredChain, modelChain, EndOnFailure, type ModelSlot } from './model'
 import { jevConfigured, wantsAssistant, claimsChange, checkClaims, decidePost, POST_REASONS } from './jev'
 import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, WRITE_TOOLS, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
 import type { ToolContext } from './tools/context'
@@ -65,7 +65,18 @@ export type AgentResult = {
   cursors?: StagedCursor[]
   /** Writes this turn made that would double if done again; what they acted on must not be offered twice. */
   wrote?: string[]
+  /** Watcher runs: the output allowance cut the post short, and it lost its unfinished end. */
+  cutShort?: boolean
 }
+
+/**
+ * What an unattended run's failed slot had looked at, kept against the error
+ * it threw: the caller holds nothing else to say which new items a run that
+ * keeps failing is stuck on.
+ */
+const failedLooks = new WeakMap<object, StagedCursor[]>()
+export const looksBefore = (err: unknown): StagedCursor[] =>
+  (err && typeof err === 'object' ? failedLooks.get(err) : undefined) ?? []
 
 /** Memories are cheap to store and expensive to read; the chat sees the newest few dozen. */
 const CHAT_MEMORY_LIMIT = 50
@@ -588,6 +599,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const settings = MODE_SETTINGS[mode]
   const reasoning = reasoningLevel()
 
+  const chain = modelChain()
   const result = await withModelFallback(async (slot: ModelSlot) =>
     traced(
       {
@@ -634,19 +646,28 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           // A fragment is worse than nothing: it would go to the review as the
           // post. It is dropped here, and unless a tool already announced or
           // changed something, the failure below hands the turn to the next slot.
-          const truncated = r.finishReason === 'length' && cleaned.text.length < TRUNCATED_REPLY_CHARS
+          let truncated = r.finishReason === 'length' && cleaned.text.length < TRUNCATED_REPLY_CHARS
+          let cutShort = false
           if (truncated) {
             console.warn(`[agent] ${slot.name} ran out of output tokens after ${cleaned.text.length} characters of reply; dropped`)
             cleaned = { text: '', stripped: true }
           } else if (r.finishReason === 'length' && mode === 'watcher') {
-            // A long post the cap cut off loses its broken last line rather
-            // than going out mid-bullet, and still faces the checks. Failing it
-            // instead would fail every run the same way, with nothing spent.
+            // A long post the cap cut off goes to the next model first, which
+            // may say it in fewer words: what it would have lost is spent with
+            // the rest once the post is out. The last model's (or one written
+            // after a change, which ends the turn here anyway) loses its
+            // broken last line rather than going out mid-bullet, and still
+            // faces the checks; failing it would fail every run the same way.
+            if (slot !== chain.at(-1) && !ctx.wrote?.length) {
+              throw new Error(`${slot.name} ran out of output tokens after ${cleaned.text.length} characters of post`)
+            }
             const cut = cleaned.text.lastIndexOf('\n')
-            // One cut-off line is a fragment, and goes the way of a short one.
             const whole = cut > 0 ? cleaned.text.slice(0, cut).trimEnd() : ''
-            console.warn(`[agent] ${slot.name} ran out of output tokens after ${cleaned.text.length} characters; kept the complete lines`)
-            cleaned = { text: whole, stripped: true }
+            // What is left of a post cut off early is a fragment, and goes the way of a short one.
+            truncated = whole.length < TRUNCATED_REPLY_CHARS
+            console.warn(`[agent] ${slot.name} ran out of output tokens after ${cleaned.text.length} characters; ${truncated ? 'dropped' : 'kept the complete lines'}`)
+            cleaned = { text: truncated ? '' : whole, stripped: true }
+            cutShort = !truncated
           }
 
           if (mode === 'chat' && (await claimsUnmadeAction(slot, cleaned.text, r.steps ?? [], ctx))) {
@@ -699,27 +720,31 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
             text: cleaned.text,
             model: slot.name,
             evidence: mode === 'watcher' ? collectEvidence(r.steps ?? []) : undefined,
+            cutShort,
           }
         } catch (err) {
           // A failed slot's looks were shown to nobody, unless an unattended
           // run wrote on the strength of them: then they are spent with it, or
           // the next run would find the same mail and write it all again.
+          if (mode !== 'chat' && err && typeof err === 'object') failedLooks.set(err, ctx.pendingCursors?.slice(stagedBefore) ?? [])
           if (!ctx.wrote?.length || mode === 'chat') ctx.pendingCursors?.splice(stagedBefore)
           if (!ctx.wrote?.length) throw err
           console.error(`[agent] ${slot.name} failed after changing something, so no other slot gets the turn:`, describeError(err))
-          if (mode === 'chat') return { text: doneLine(ctx), model: slot.name, evidence: undefined }
+          // Ended here, and recorded as the failure it was.
+          if (mode === 'chat') throw new EndOnFailure({ text: doneLine(ctx), model: slot.name, evidence: undefined, cutShort: false }, err)
           // Unattended, the run posts nothing and an admin hears why, the way a
           // watcher's own PROBLEM line reaches them.
           const done = doneSoFar(ctx) || 'changed something'
-          return {
+          throw new EndOnFailure({
             text: `PROBLEM: ${slot.name} failed (${describeError(err)}) after it had ${done}, so this run posted nothing.\nSKIP`,
             model: slot.name,
             evidence: undefined,
-          }
+            cutShort: false,
+          }, err)
         }
       },
     ),
-  undefined,
+  chain,
   `hearth.${mode}`,
   )
 
@@ -732,6 +757,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     // calendar line, a new ticket) say nothing about the mail it read.
     ...(result.text && ctx.pendingCursors?.length ? { cursors: ctx.pendingCursors } : {}),
     ...(ctx.wrote?.length ? { wrote: ctx.wrote } : {}),
+    ...(result.cutShort ? { cutShort: true } : {}),
     ...(mode === 'watcher' ? { facts: context } : {}),
   }
 }

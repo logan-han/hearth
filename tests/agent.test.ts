@@ -521,6 +521,10 @@ describe('runAgent', () => {
     const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['add_to_list', 'recall'] })
     expect(generateText).toHaveBeenCalledTimes(1)
     expect(r.text).toMatch(/^PROBLEM: gemini:gemini-3\.5-flash-lite failed \(429 quota\) after it had added to a list, so this run posted nothing\.\nSKIP$/)
+    // The System page sees the slot fail, not answer.
+    const { chainHealth } = await import('@/lib/model-events')
+    const gemini = (await chainHealth(1)).slots.find((x) => x.slot.startsWith('gemini:'))
+    expect(gemini).toMatchObject({ answered: 0, failed: 1 })
   })
 
   it('never lets a watcher post go out cut mid-line, keeping the complete lines of a long one', async () => {
@@ -528,8 +532,42 @@ describe('runAgent', () => {
     // Cut off by the cap in the middle of its last bullet.
     generateText.mockResolvedValueOnce({ ...reply(`**To do**\n${lines.join('\n')}\n- Item 40: somethi`), finishReason: 'length' })
     const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })
+    // The only model in the chain: nobody else could say it shorter.
     expect(r.text).toBe(`**To do**\n${lines.join('\n')}`)
+    expect(r.cutShort).toBe(true)
     expect(generateText).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives a long watcher post the cap cut off to the next model first, which may fit it', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
+    generateText
+      .mockResolvedValueOnce({ ...reply(`**To do**\n${lines.join('\n')}\n- Item 40: somethi`), finishReason: 'length' })
+      .mockResolvedValueOnce(reply('**To do**\n- Forty things by Friday.'))
+    const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })
+    expect(r.text).toBe('**To do**\n- Forty things by Friday.')
+    expect(r.model).toContain('openrouter')
+    expect(r.cutShort).toBeUndefined()
+  })
+
+  it('trims on the first model when it already wrote something, since no other model gets the turn', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
+    generateText.mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
+      await opts.tools.add_to_list.execute({ items: ['bin bags'], list: 'shopping' }, {})
+      return { ...reply(`**To do**\n${lines.join('\n')}\n- Item 40: somethi`), finishReason: 'length' }
+    })
+    const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['add_to_list', 'recall'] })
+    expect(generateText).toHaveBeenCalledTimes(1)
+    expect(r.text).toContain('- Item 39:')
+    expect(r.text).not.toContain('Item 40')
+    expect(r.cutShort).toBe(true)
+  })
+
+  it('drops what is left of a post cut off early, when its complete lines are only a heading', async () => {
+    // Long enough to be kept, but its only complete line is the heading.
+    generateText.mockResolvedValueOnce({ ...reply(`**To do**\n${'x'.repeat(300)}`), finishReason: 'length' })
+    await expect(runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })).rejects.toThrow(/ran out of output tokens before answering/)
   })
 
   it('hands a watcher\'s single cut-off line to the next model, being a fragment', async () => {

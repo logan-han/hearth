@@ -13,7 +13,7 @@ vi.mock('@/lib/providers', async (orig) => ({
   clientsFor: async () => [{ provider: 'google', listMail }],
 }))
 
-const { runAgent } = await import('@/lib/agent')
+const { runAgent, looksBefore } = await import('@/lib/agent')
 const { commitCursors } = await import('@/lib/tools/cursor')
 
 let client: PGlite
@@ -138,6 +138,34 @@ describe('a turn that looks at new mail', () => {
     expect(r.text).toMatch(/^PROBLEM: .*added to a list/)
     expect(r.wrote).toEqual(['add_to_list'])
     expect(r.cursors?.map((c) => c.ids)).toEqual([['a']])
+  })
+
+  it('keeps what a failed unattended run looked at against the error, for the tick to count it by', async () => {
+    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+    listMail.mockResolvedValue([mail('a')])
+    process.env.OPENROUTER_API_KEY = ''
+    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+      await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+      throw new Error('the attachment cannot be read')
+    })
+    const err = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', mode: 'watcher', tools: ['new_mail'], text: 'post new school mail' }).catch((e: unknown) => e)
+    expect((err as Error).message).toBe('the attachment cannot be read')
+    expect(looksBefore(err).map((c) => c.ids)).toEqual([['a']])
+    // Nothing was spent: the looks ride on the error, not the cursor.
+    expect(await q.getSetting(`mail_cursor:111:${member.id}:google`)).toBeNull()
+    expect(looksBefore('not an error')).toEqual([])
+  })
+
+  it('keeps nothing against a failed chat turn, whose reply the member is still waiting on', async () => {
+    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+    listMail.mockResolvedValue([mail('a')])
+    process.env.OPENROUTER_API_KEY = ''
+    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+      await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+      throw new Error('the attachment cannot be read')
+    })
+    const err = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', text: 'any new mail?' }).catch((e: unknown) => e)
+    expect(looksBefore(err)).toEqual([])
   })
 
   it('stages nothing for a failed look when the turn then ends on a write', async () => {

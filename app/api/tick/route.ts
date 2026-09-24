@@ -6,11 +6,11 @@ import {
   messagesSince, getSetting, setSetting, retireStaleProposals, recordTick,
   unaskedQuestions, markQuestionsAsked, memberByTelegramId, setAutomationEnabled,
 } from '@/lib/db/queries'
-import { localDateKey, tzOffsetMs, nextRun } from '@/lib/cron'
+import { localDateKey, tzOffsetMs, nextRun, formatLocal } from '@/lib/cron'
 import { timezone, idSet } from '@/lib/env'
 import { db, schema } from '@/lib/db'
 import { eq } from 'drizzle-orm'
-import { runAgent, decideWatcherPost, reviewDraft, type AgentResult } from '@/lib/agent'
+import { runAgent, decideWatcherPost, reviewDraft, looksBefore, type AgentResult } from '@/lib/agent'
 import { buildTools, type ToolName } from '@/lib/tools'
 import type { ToolContext } from '@/lib/tools/context'
 import { WATCHERS, isWatcherKind, isGroupChat, watcherInstruction, type WatcherKind } from '@/lib/watchers'
@@ -20,7 +20,7 @@ import { commitCursors, type StagedCursor } from '@/lib/tools/cursor'
 import { send } from '@/lib/telegram'
 import { hydrateSecrets } from '@/lib/settings'
 import { flushTelemetry } from '@/lib/telemetry'
-import { pruneModelEvents } from '@/lib/model-events'
+import { pruneModelEvents, failureKind } from '@/lib/model-events'
 import { parseLog, prune, underCap, recordPost, shouldWarn, markWarned, PROACTIVE_POSTS_PER_HOUR } from '@/lib/rate-cap'
 import type { Automation, Member } from '@/lib/db/schema'
 import { describeError } from '@/lib/errors'
@@ -273,7 +273,7 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
   const watcher = WATCHERS[kind]
   const instruction = watcherInstruction(kind, a.chatId)
   const data = plainData(fetched.data)
-  const result = await counted(a, () => ctx.pendingCursors ?? [], () => runAgent({
+  const result = await counted(a, member, (err) => [...(ctx.pendingCursors ?? []), ...looksBefore(err)], () => runAgent({
     chatId: a.chatId,
     chatType: isGroupChat(a.chatId) ? 'group' : 'private',
     member: member ?? null,
@@ -285,7 +285,7 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
     text: `Scheduled check "${a.label}".\n\n${instruction}\n\nDATA (fetched just now):\n${data}`,
   }))
   const staged = () => [...(ctx.pendingCursors ?? []), ...(result.cursors ?? [])]
-  await counted(a, staged, () => deliver(
+  await counted(a, member, staged, () => deliver(
     a, member, result,
     `INSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`,
     () => spentClean(a, staged()),
@@ -296,7 +296,7 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
 
 /** A member's own scheduled instruction: the model decides what to fetch, with read-only tools. */
 async function runCustom(a: Automation, member: Member | undefined): Promise<void> {
-  const result = await runAgent({
+  const result = await counted(a, member, looksBefore, () => runAgent({
     chatId: a.chatId,
     chatType: isGroupChat(a.chatId) ? 'group' : 'private',
     member: member ?? null,
@@ -308,11 +308,9 @@ async function runCustom(a: Automation, member: Member | undefined): Promise<voi
       'If the instruction only wants a post under some condition and that condition is not met (nothing new, nothing to report), reply with exactly SKIP and nothing will be posted. Write nothing beside it: a quiet run needs no explanation of why it was quiet. ' +
       'If a tool fails or errors, never post the failure to the chat: write PROBLEM: followed by a one-line diagnosis, then SKIP on its own line. That, and only that, reaches the admins privately. ' +
       'Reply with the post alone: no preamble, no planning notes, no handover line such as "now the post:", no commentary about what the tools returned.',
-  })
-  // What the model looked at before it failed is not known here; its own
-  // looks go unspent, and the next run looks again.
+  }))
   const staged = () => result.cursors ?? []
-  await counted(a, staged, () => deliver(
+  await counted(a, member, staged, () => deliver(
     a, member, result,
     `INSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`,
     () => spentClean(a, staged()),
@@ -322,21 +320,32 @@ async function runCustom(a: Automation, member: Member | undefined): Promise<voi
 /**
  * Run one step of a watcher, counting it against the stuck guard when it
  * leaves what the run read unspent: a throw, or deliver() reporting a PROBLEM.
- * The guard's own failure never hides the run's.
+ * A failure of the model chain or the network passes, and says nothing about
+ * the items, so it is not counted. The guard's own failure never hides the run's.
  */
-async function counted<T>(a: Automation, staged: () => StagedCursor[], step: () => Promise<T>): Promise<T> {
+async function counted<T>(
+  a: Automation,
+  member: Member | undefined,
+  staged: (err?: unknown) => StagedCursor[],
+  step: () => Promise<T>,
+): Promise<T> {
   let out: T
   try {
     out = await step()
   } catch (err) {
-    await unspent(a, staged(), describeError(err)).catch((e) => console.error('[tick] stuck guard failed:', e))
+    const why = describeError(err)
+    if (!passing(why)) await unspent(a, member, staged(err), why).catch((e) => console.error('[tick] stuck guard failed:', e))
     throw err
   }
   if (out === 'problem') {
-    await unspent(a, staged(), 'the run reported a problem').catch((e) => console.error('[tick] stuck guard failed:', e))
+    await unspent(a, member, staged(), 'the run reported a problem').catch((e) => console.error('[tick] stuck guard failed:', e))
   }
   return out
 }
+
+/** A model chain or a network that is down, rate limited or refusing the key, which will pass or needs fixing, not skipping. */
+const passing = (why: string) =>
+  ['rate limited', 'timed out', 'provider error', 'refused'].includes(failureKind(why)) || /no llm configured/i.test(why)
 
 /**
  * Post-or-skip is decided in a fresh context against the evidence, by a
@@ -453,11 +462,11 @@ async function deliver(
   }
 
   const parts: string[] = []
-  let heldBack = false
+  let withheld = false
   if (!draft.skip && draft.rest) {
     const approved = await approve(a, member, draft.rest, evidence)
     if (approved) parts.push(approved)
-    else heldBack = true
+    else withheld = true
   }
   parts.push(...unsaid(parts.join('\n\n'), notices))
 
@@ -465,7 +474,7 @@ async function deliver(
   if (!message) {
     // Quiet by choice, or held back on purpose, is the run done with what it
     // read. A run that could not do its job (a PROBLEM) leaves it for the next.
-    if (heldBack || problems.length === 0 || result.wrote?.length) {
+    if (withheld || problems.length === 0 || result.wrote?.length) {
       await spent()
       return 'spent'
     }
@@ -487,7 +496,10 @@ async function deliver(
       )
     }
     if (result.wrote?.length) {
+      // Spent, or the next run would write it all again; so the draft is all
+      // there is of what it read, and an admin gets it.
       await spent()
+      await tellAdminQuietly(member, heldBack(a, 'the hourly cap was reached after the run had already acted on what it read.', message))
       return 'spent'
     }
     return 'capped'
@@ -503,48 +515,107 @@ async function deliver(
     content: message,
     model: result.model,
   })
+  if (result.cutShort) {
+    await tellAdminQuietly(
+      member,
+      `Watcher **${a.label}** ran out of room: the model's output allowance cut its post short, so it went out without its unfinished end, and whatever that held was not posted. A shorter instruction, or a larger allowance for this watcher, stops it.`,
+    )
+  }
   return 'spent'
 }
 
-/** How many runs in a row may leave the same new items unspent before they are moved past. */
+/**
+ * How many runs in a row, and over how long, may leave the same new items
+ * unspent before they are moved past. The span keeps an hourly watcher from
+ * skipping anything over a bad morning.
+ */
 const STUCK_RUNS = 3
+const STUCK_FOR_MS = 12 * 3600_000
+
+/** One cursor held at the same place: since when, how many runs, and the first stuck run's move. */
+type Stuck = { from: string; since: string; runs: number; move: StagedCursor }
+
+async function readStuck(a: Automation): Promise<Record<string, Stuck>> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse((await getSetting(`unspent:${a.id}`)) || '{}')
+  } catch {
+    return {}
+  }
+  if (!parsed || typeof parsed !== 'object') return {}
+  // Anything unreadable counts as never stuck.
+  return Object.fromEntries(
+    Object.entries(parsed).filter(([, v]) => typeof v?.from === 'string' && typeof v?.move?.key === 'string'),
+  ) as Record<string, Stuck>
+}
+
+const writeStuck = (a: Automation, stuck: Record<string, Stuck>) =>
+  setSetting(`unspent:${a.id}`, Object.keys(stuck).length ? JSON.stringify(stuck) : '')
+
+/** The source and the span skipped, which is what an admin can go and look at. */
+const describeMove = (m: Stuck) => {
+  const [kind, , ...rest] = m.move.key.split(':')
+  const provider = rest.at(-1)
+  const what =
+    kind === 'mail_cursor' ? `mail in a linked ${provider === 'google' ? 'Gmail' : provider === 'microsoft' ? 'Outlook' : String(provider)} mailbox`
+    : kind === 'up_cursor' ? 'Up transactions'
+    : 'new items'
+  const from = m.from === '-' ? 'up' : `from ${formatLocal(new Date(m.from))}`
+  return `${what} ${from} to ${formatLocal(new Date(m.move.at))}`
+}
 
 /**
  * Leaving what a run read unspent is right when the run failed for a reason
- * that passes: a model outage, a flaky send. A failure that is the same every
- * time (an attachment no tool can read, a mailbox whose link has lapsed) would
- * otherwise keep every later run on the same items for good, posting nothing
- * and telling an admin each hour. So the same unspent position is allowed
- * STUCK_RUNS runs, and then moved past with one message saying so.
+ * that passes. A failure that is the same every time (an attachment no model
+ * will take, a reply Telegram will not parse) would otherwise keep every later
+ * run on the same items for good, posting nothing and telling an admin each
+ * time. So each cursor held at the same place for STUCK_RUNS runs and
+ * STUCK_FOR_MS is moved past what the first of those runs saw, and no
+ * further: anything that arrived since gets its own chance. One message says so.
  */
-async function unspent(a: Automation, staged: StagedCursor[], why: string): Promise<void> {
-  if (staged.length === 0) return
-  const key = `unspent:${a.id}`
-  const at = staged.map((s) => `${s.key}@${s.prev?.at ?? '-'}`).sort().join('|')
-  let before: { at: string; runs: number } | null = null
-  try {
-    before = JSON.parse((await getSetting(key)) || 'null')
-  } catch {
-    // An unreadable record counts as none.
+async function unspent(a: Automation, member: Member | undefined, staged: StagedCursor[], why: string): Promise<void> {
+  const last = new Map<string, StagedCursor>()
+  for (const s of staged) last.set(s.key, s)
+  if (last.size === 0) return
+  const now = Date.now()
+  const stuck = await readStuck(a)
+  const moved: Stuck[] = []
+  // Per cursor: a mailbox whose fetch fails some runs, and so stages nothing
+  // then, neither resets nor stands in for another held at the same place.
+  for (const s of last.values()) {
+    const from = s.prev?.at ?? '-'
+    const was = stuck[s.key]
+    const entry: Stuck = was?.from === from ? { ...was, runs: was.runs + 1 } : { from, since: new Date(now).toISOString(), runs: 1, move: s }
+    if (entry.runs >= STUCK_RUNS && now - Date.parse(entry.since) >= STUCK_FOR_MS) {
+      moved.push(entry)
+      delete stuck[s.key]
+    } else {
+      stuck[s.key] = entry
+    }
   }
-  const runs = before?.at === at ? before.runs + 1 : 1
-  if (runs < STUCK_RUNS) {
-    await setSetting(key, JSON.stringify({ at, runs }))
-    return
-  }
-  await commitCursors(staged)
-  await setSetting(key, '')
+  if (moved.length) await commitCursors(moved.map((m) => m.move))
+  await writeStuck(a, stuck)
+  if (!moved.length) return
+  const runs = Math.max(...moved.map((m) => m.runs))
   await tellAdminQuietly(
-    undefined,
-    `**${a.label}** failed on the same new items ${runs} runs running (${why}), so I have moved past them. ` +
-      'They were not posted; the last failure above says why.',
+    member,
+    `**${a.label}** failed on the same new items ${runs} runs running (${why}), so I have moved past them without posting them: ` +
+      `${moved.map(describeMove).join('; ')}. The failures above say why; anything since then is still new.`,
   )
 }
 
-/** A run that spent what it read clears its count of runs that did not. */
+/** A run that spent what it read clears those cursors from the stuck guard. Best effort: the post is what matters. */
 async function spentClean(a: Automation, staged: StagedCursor[]): Promise<void> {
   await commitCursors(staged)
-  if (await getSetting(`unspent:${a.id}`)) await setSetting(`unspent:${a.id}`, '')
+  try {
+    const stuck = await readStuck(a)
+    const held = staged.filter((s) => stuck[s.key])
+    if (!held.length) return
+    for (const s of held) delete stuck[s.key]
+    await writeStuck(a, stuck)
+  } catch (err) {
+    console.error('[tick] stuck guard failed:', describeError(err))
+  }
 }
 
 /** Telegram turning the chat itself away, rather than failing this once. */

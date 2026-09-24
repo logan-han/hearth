@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   withModelFallback, modelChain, localSlots, geminiSlots, openrouterSlots, gateSlot, orderForStructured,
-  type ModelSlot,
+  EndOnFailure, type ModelSlot,
 } from '@/lib/model'
 
 const slot = (name: string): ModelSlot => ({ name, model: {} as ModelSlot['model'] })
@@ -124,6 +124,15 @@ describe('withModelFallback', () => {
       throw new Error(`${s.name} down`)
     })
     await expect(withModelFallback(fn, [slot('a'), slot('b')])).rejects.toThrow('b down')
+  })
+
+  it('ends on a slot that failed but must not be retried, returning what it carries', async () => {
+    const fn = vi.fn(async (s: ModelSlot) => {
+      throw new EndOnFailure(`salvaged from ${s.name}`, new Error('429 quota'))
+    })
+    await expect(withModelFallback(fn, [slot('a'), slot('b')])).resolves.toBe('salvaged from a')
+    expect(fn).toHaveBeenCalledTimes(1)
+    expect(new EndOnFailure(null, new Error('429 quota')).message).toBe('429 quota')
   })
 
   it('names the env vars when nothing is configured', async () => {

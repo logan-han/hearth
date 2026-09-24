@@ -476,13 +476,18 @@ What a watcher read counts as seen only once it has reached someone. A run
 that fails, reports a PROBLEM or has its post refused leaves the mail and the
 transactions new, so the next run tries them again; one that wrote something
 it cannot take back on the strength of them (a list item, a reminder) spends
-them whatever else happened, or the next run would write it twice. A failure
-that is the same every time would otherwise hold every later run on the same
-items for good, so three runs in a row stuck at the same place move past them,
-and an admin is told once what was skipped. A post longer than the model's
-output allowance loses its cut-off last line rather than going out mid-bullet,
-and still faces the checks; a reply cut off inside its first line is dropped
-as the fragment it is.
+them whatever else happened, or the next run would write it twice, and a post
+the hourly cap then holds back goes to an admin as a draft. A failure that is
+the same every time would otherwise hold every later run on the same items for
+good, so a mailbox or account held at the same place for three runs and at
+least twelve hours is moved past what the first of those runs saw (anything
+newer keeps its chance), and an admin is told once which source and which span
+were skipped. A model chain that is down, rate limited or refusing its key
+does not count towards that: it says nothing about the items. A post longer
+than the model's output allowance goes to the next model in the chain first;
+the last one's loses its cut-off last line rather than going out mid-bullet,
+still faces the checks, and an admin is told it went out short. A reply cut
+off before a whole line of any length is dropped as the fragment it is.
 
 ## Sweeping email onto the calendar
 
@@ -560,9 +565,10 @@ what was found has reached someone, or was held back on purpose: a scheduled
 post that fails, one the hourly cap holds back, a run that reports a PROBLEM,
 a reply Telegram refuses or a model that gives out leaves it where it was, so
 the next run reports the same transactions (and the same mail) rather than
-skipping them unseen, up to three runs stuck on the same ones (see Keeping
-watch). A chat Telegram refuses outright (the bot removed, blocked or muted
-in the group) pauses its automation rather than failing every hour. The first run looks back only 24 hours, so switching it on does not
+skipping them unseen, short of runs stuck on the same ones for half a day
+(see Keeping watch). A chat Telegram refuses outright (the bot removed,
+blocked or muted in the group) pauses its automation rather than failing every
+hour. The first run looks back only 24 hours, so switching it on does not
 dump months of history into the chat.
 
 Ask for it once and it keeps happening:
