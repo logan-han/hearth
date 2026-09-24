@@ -347,6 +347,8 @@ describe('the time a turn has', () => {
       await processUpdate(photoUpdate('add these dates'))
       // A minute short of the ceiling, whenever the turn itself began.
       expect(runAgent.mock.calls[0][0].deadline).toBe(arrived + 240_000)
+      // And the wait leaves the turn its minute, as the downloads do.
+      expect(vi.mocked(awaitTurn).mock.calls[0][2]).toBe(arrived + 180_000)
     } finally {
       vi.useRealTimers()
     }

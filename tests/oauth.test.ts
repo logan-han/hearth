@@ -68,6 +68,18 @@ describe('oauth state', () => {
     expect(await verifyState(await signState(payload))).toEqual({ ...payload, purpose: 'link' })
   })
 
+  it('turns a made-up state away, and hands out a sign-in state, without reading the store', async () => {
+    const { SignJWT } = await import('jose')
+    const { __setDb } = await import('@/lib/db')
+    let reads = 0
+    __setDb(new Proxy({}, { get: () => { reads++; throw new Error('the store was read') } }))
+    const forged = await new SignJWT({ ...payload }).setProtectedHeader({ alg: 'HS256' }).setExpirationTime('5m').sign(new TextEncoder().encode('made up'))
+    await expect(verifyState(forged)).rejects.toThrow(/signature verification failed/)
+    const signin = await signState({ tg: '', name: '', chat: '', purpose: 'signin' })
+    expect((await verifyState(signin, 'signin')).purpose).toBe('signin')
+    expect(reads).toBe(0)
+  })
+
   it('rejects an expired token', async () => {
     const token = await signState(payload, '0s')
     await new Promise((r) => setTimeout(r, 1100))

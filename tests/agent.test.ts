@@ -948,6 +948,55 @@ describe('a reply that reports a change no tool made', () => {
     }
   })
 
+  describe('after a write that ran out of time', () => {
+    beforeEach(() => {
+      Object.assign(process.env, { JIRA_BASE_URL: 'https://example.atlassian.net', JIRA_EMAIL: 'r@hearth.example', JIRA_API_TOKEN: 'token' })
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+      }))
+    })
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      for (const k of ['JIRA_BASE_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN']) delete process.env[k]
+    })
+    const asked = { ...input, text: 'note on HTL-12 that the plumber is booked' }
+    /** A reply written after a comment whose request ran out of time, so it may or may not be on the issue. */
+    const timedOut = (text: string) => async (opts: { tools: Tools }) => {
+      const input = { key: 'HTL-12', text: 'The plumber is booked' }
+      const output = await opts.tools.jira_comment.execute(input, {})
+      expect(output).toMatchObject({ maybe_done: true })
+      return { text, steps: [{ toolCalls: [{ toolName: 'jira_comment', input }], toolResults: [{ toolName: 'jira_comment', input, output }] }], usage: {} }
+    }
+
+    it('still judges a reply that says it was done, and asks for it told as unconfirmed rather than done again', async () => {
+      const told = 'The comment on HTL-12 may not have gone through, so check the issue before asking again.'
+      generateText
+        .mockImplementationOnce(timedOut('Done, commented on HTL-12.'))
+        .mockResolvedValueOnce(judged('claims_change'))
+        .mockResolvedValueOnce(reply(told))
+        .mockResolvedValueOnce(judged('no_change_claimed'))
+      expect((await runAgent(asked)).text).toBe(told)
+      expect(generateText.mock.calls[1][0].telemetry.functionId).toBe('hearth.claim')
+      const note = String(generateText.mock.calls[2][0].messages.at(-1).content)
+      expect(note).toContain('may or may not have gone through: do not try it again')
+      expect(note).not.toContain('Nothing has changed')
+    })
+
+    it('says the change could not be confirmed, not that nothing changed, when the model insists or cannot be asked again', async () => {
+      generateText
+        .mockImplementationOnce(timedOut('Done, commented on HTL-12.'))
+        .mockResolvedValueOnce(judged('claims_change'))
+        .mockResolvedValueOnce(reply('Yes, commented.'))
+        .mockResolvedValueOnce(judged('claims_change'))
+      expect((await runAgent(asked)).text).toBe('Yes, commented.\n\nI could not confirm that change went through, so check whether it did before asking again.')
+
+      generateText.mockReset()
+      generateText.mockImplementationOnce(timedOut('Done, commented on HTL-12.')).mockResolvedValueOnce(judged('claims_change'))
+      const r = await runAgent({ ...asked, deadline: Date.now() + 20_000 })
+      expect(r.text).toBe('Done, commented on HTL-12.\n\nI could not confirm that change went through, so check whether it did before asking again.')
+    })
+  })
+
   it('tells the judge a reply that shows a draft and asks for the yes claims nothing, and sends it as written', async () => {
     const member = await q.upsertMember('111', 'Rowan', { allowed: true })
     await q.saveConnection({ memberId: member.id, provider: 'google', email: 'r@example.com', refreshToken: 'r', scopes: null })
@@ -1482,6 +1531,16 @@ describe('reviewDraft', () => {
     const r = await reviewDraft({ label: 'x', draft: 'Looks like a trip to Lisbon!', evidence: 'DATA ...' })
     expect(r.message).toBeNull()
     expect(generateText).toHaveBeenCalledTimes(3)
+  })
+
+  it('hands back what failed, not a throw, when the rewrite cannot finish', async () => {
+    generateText
+      .mockResolvedValueOnce(out({ claims: ['$389.60 to FARESAVER', 'a trip to Lisbon was booked'] }))
+      .mockResolvedValueOnce(out({ supported: true }))
+      .mockResolvedValueOnce(out({ supported: false }))
+      .mockRejectedValueOnce(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+    const r = await reviewDraft({ label: 'x', draft: '2Up: $389.60 FARESAVER LISBON. Looks like a trip to Lisbon!', evidence: 'DATA ...' })
+    expect(r).toMatchObject({ unsupported: ['a trip to Lisbon was booked'], message: null, rewriteFailed: expect.stringMatching(/timeout/i) })
   })
 
   it('asks for at most six claims, checks no more than that, and keeps the draft when they hold', async () => {

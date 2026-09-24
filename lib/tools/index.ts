@@ -111,8 +111,9 @@ const UNSEEN_LINK =
  * tool also marks the turn as having read something untrusted, and a write
  * records itself once it has succeeded (a result with an `error` changed
  * nothing), or once it may have: one with `maybe_done` ran out of time and
- * could have gone through all the same. Once something untrusted has been
- * read, read_url opens only a link that was there to be read.
+ * could have gone through all the same, and is kept apart from those that
+ * did. Once something untrusted has been read, read_url opens only a link
+ * that was there to be read.
  */
 function instrument<T extends Record<string, { execute?: (...args: never[]) => unknown }>>(ctx: ToolContext, tools: T): T {
   const out: Record<string, unknown> = { ...tools }
@@ -139,7 +140,8 @@ function instrument<T extends Record<string, { execute?: (...args: never[]) => u
         ;(ctx.seen ??= []).push({ text: JSON.stringify(result) ?? '', typed: typed.length })
         const failed = typeof result === 'object' && result !== null && 'error' in result
         const maybe = failed && (result as { maybe_done?: unknown }).maybe_done === true
-        if (writes && (!failed || maybe)) (ctx.changed ??= []).push(name)
+        if (writes && !failed) (ctx.changed ??= []).push(name)
+        if (writes && maybe) (ctx.maybeChanged ??= []).push(name)
         if (unrepeatable && (!failed || maybe)) (ctx.wrote ??= []).push(name)
         if (unrepeatable && maybe) (ctx.unconfirmed ??= []).push(name)
         return result

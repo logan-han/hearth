@@ -5,7 +5,7 @@ import { db } from '../db'
 import { members, connections } from '../db/schema'
 import { idSet } from '../env'
 import type { Member } from '../db/schema'
-import { signingSecret } from './keys'
+import { signingSecret, epochMark, inThisEpoch } from './keys'
 
 const COOKIE = 'hearth_session'
 const ALG = 'HS256'
@@ -47,7 +47,7 @@ export async function resolveRole(email: string): Promise<{ role: Role; member: 
 }
 
 export async function createSession(session: Session): Promise<void> {
-  const token = await new SignJWT({ ...session })
+  const token = await new SignJWT({ ...session, ep: await epochMark() })
     .setProtectedHeader({ alg: ALG })
     .setIssuedAt()
     .setExpirationTime(`${TTL_HOURS}h`)
@@ -68,8 +68,10 @@ export async function readSession(): Promise<Session | null> {
   if (!token) return null
   try {
     const { payload } = await jwtVerify(token, await secret(), { algorithms: [ALG] })
-    const { email, name, provider, role } = payload as Record<string, unknown>
+    const { email, name, provider, role, ep } = payload as Record<string, unknown>
     if (typeof email !== 'string') return null
+    // Only a cookie this deployment signed gets this far, so only one costs a read.
+    if (!(await inThisEpoch(ep))) return null
     return {
       email,
       name: typeof name === 'string' ? name : email,

@@ -36,8 +36,9 @@ const buildTools = vi.fn(
     }) as Record<string, { execute?: (...args: unknown[]) => unknown }>,
 )
 
-const { unaccountedIn, memberByTelegramId, creatorRows, setAutomationEnabled } = vi.hoisted(() => ({
+const { unaccountedIn, memberByTelegramId, creatorRows, setAutomationEnabled, moveChat } = vi.hoisted(() => ({
   setAutomationEnabled: vi.fn(async (_id: number, _enabled: boolean) => ({})),
+  moveChat: vi.fn(async (_from: string, _to: string) => {}),
   unaccountedIn: vi.fn<(chatId: string) => Promise<number | null>>(async () => 0),
   memberByTelegramId: vi.fn<(id: string) => Promise<{ allowed: boolean } | undefined>>(async () => ({ allowed: true })),
   creatorRows: vi.fn(async () => [] as unknown[]),
@@ -75,6 +76,7 @@ vi.mock('@/lib/db/queries', () => ({
   allowedMembers,
   memberByTelegramId,
   setAutomationEnabled,
+  moveChat,
 }))
 vi.mock('@/lib/builtins', () => ({ installBuiltins }))
 vi.mock('@/lib/agent', async (orig) => ({
@@ -565,6 +567,24 @@ describe('running due automations', () => {
     expect(setAutomationEnabled).toHaveBeenCalledWith(1, false)
   })
 
+  it('follows a group made a supergroup mid-run to its new id, and leaves its automation on', async () => {
+    const { GrammyError } = await import('grammy')
+    dueAutomations.mockResolvedValue([automation()])
+    send.mockRejectedValueOnce(
+      new GrammyError(
+        'Call to sendMessage failed!',
+        { ok: false, error_code: 400, description: 'Bad Request: group chat was upgraded to a supergroup chat', parameters: { migrate_to_chat_id: -1001234 } },
+        'sendMessage',
+        {},
+      ),
+    )
+    await authed()
+    expect(moveChat).toHaveBeenCalledWith('-100999', '-1001234')
+    expect(setAutomationEnabled).not.toHaveBeenCalled()
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('has just become a supergroup'))
+    expect(send).not.toHaveBeenCalledWith('900', expect.stringContaining('Paused'))
+  })
+
   it('does not pause on a 400 that is about the message, not the chat', async () => {
     const { GrammyError } = await import('grammy')
     dueAutomations.mockResolvedValue([automation()])
@@ -935,6 +955,17 @@ describe('the post decision', () => {
     expect(send).toHaveBeenCalledWith('900', expect.stringContaining('no claim survived the check: a trip to Lisbon'))
   })
 
+  it('holds the draft back, never deciding on it as written, when what failed the check could not be cut out', async () => {
+    reviewDraft.mockResolvedValue({
+      claims: ['bins tonight', 'a trip to Lisbon'], unsupported: ['a trip to Lisbon'], message: null,
+      rewriteFailed: 'Timed out before any model was asked',
+    })
+    await authed()
+    expect(decideWatcherPost).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('could not be cut out (Timed out before any model was asked): a trip to Lisbon'))
+  })
+
   it('falls back to deciding on the raw draft when the check itself fails', async () => {
     reviewDraft.mockRejectedValue(new Error('No object generated'))
     await authed()
@@ -1116,6 +1147,29 @@ describe('ready-made watchers', () => {
     await authed()
     expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
     expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.stringContaining('m1'))
+  })
+
+  it('leaves it new when the tick ran out of time to judge the draft, since no judge ruled on it', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const start = Date.now()
+      dueAutomations.mockResolvedValue([brief()])
+      stagingMail()
+      newMail.mockResolvedValue(mailWaiting)
+      runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.', notices: [], model: 'primary:test' })
+      decideWatcherPost.mockImplementation(async () => {
+        vi.setSystemTime(start + 280_000)
+        throw new Error('The operation was aborted due to timeout')
+      })
+      await authed()
+      expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+      expect(send).toHaveBeenCalledWith('900', expect.stringContaining('the tick ran out of time before the post check could answer'))
+      expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+      // The clock passes, so it is not a run stuck on the mail.
+      expect(setSetting).not.toHaveBeenCalledWith('unspent:1', expect.anything())
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('leaves it new when the hourly cap holds the post back, for the next run under the cap', async () => {

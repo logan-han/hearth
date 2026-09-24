@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { NextResponse } from 'next/server'
 import { requireAdmin } from '@/lib/auth/session'
 import { hydrateSecrets, setSecret } from '@/lib/settings'
-import { telegramApi, telegramStatus, registerCommands, botTokenProblem } from '@/lib/telegram-admin'
+import { telegramApi, telegramStatus, registerCommands, botTokenProblem, WEBHOOK_UPDATES } from '@/lib/telegram-admin'
 import { appUrl } from '@/lib/env'
 
 export const runtime = 'nodejs'
@@ -54,7 +54,7 @@ export async function POST(req: Request) {
     const hook = await telegramApi(token, 'setWebhook', {
       url: `${appUrl()}/api/telegram`,
       secret_token: secret,
-      allowed_updates: ['message', 'my_chat_member'],
+      allowed_updates: WEBHOOK_UPDATES,
     })
     if (!hook.ok) {
       return NextResponse.json(

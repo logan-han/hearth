@@ -382,6 +382,15 @@ describe('admin sessions', () => {
     expect(await readSession()).not.toBeNull()
   })
 
+  it('turns a made-up cookie away without reading the store', async () => {
+    const { __setDb } = await import('@/lib/db')
+    jar.store.set('hearth_session', await signRaw({ email: 'rowan@hearth.example', role: 'admin' }, new TextEncoder().encode('made up')))
+    let reads = 0
+    __setDb(new Proxy({}, { get: () => { reads++; throw new Error('the store was read') } }))
+    expect(await readSession()).toBeNull()
+    expect(reads).toBe(0)
+  })
+
   it('refuses a token with no email claim', async () => {
     jar.store.set('hearth_session', await signRaw({ name: 'X', provider: 'google', role: 'admin' }))
     expect(await readSession()).toBeNull()

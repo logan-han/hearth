@@ -117,7 +117,16 @@ export function mailTools(ctx: ToolContext) {
         if (everyone && (await strangersIn(ctx.chatId)).length > 0) {
           return { error: 'Not while someone unrecognised is in this chat. An admin can vouch for them with /allow.' }
         }
-        const members = everyone ? await presentIn(ctx.chatId, await allowedMembers()) : [requireMember(ctx)]
+        let members: Member[]
+        try {
+          members = everyone ? await presentIn(ctx.chatId, await allowedMembers()) : [requireMember(ctx)]
+        } catch (e) {
+          // Telegram hiccuping over who is here (a 429, a 5xx) fails this
+          // sweep and nothing else: thrown, it would take the brief's
+          // calendar, board and weather down with it, on the run's one try.
+          if (!everyone) throw e
+          return { error: `Could not check who is in this chat: ${describe(e)}` }
+        }
         const max = limit ?? 10
 
         const accounts: object[] = []

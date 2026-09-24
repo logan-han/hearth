@@ -603,6 +603,16 @@ describe('new_mail', () => {
     expect(String(r.error)).toContain('unrecognised')
   })
 
+  it('fails a family-wide sweep as its own result, not a throw, when Telegram hiccups over who is in the room', async () => {
+    const { GrammyError } = await import('grammy')
+    presentIn.mockRejectedValueOnce(
+      new GrammyError("Call to 'getChatMember' failed! (429: Too Many Requests: retry after 5)", { ok: false, error_code: 429, description: 'Too Many Requests: retry after 5' }, 'getChatMember', {}),
+    )
+    const r = await call(mailTools(ctx), 'new_mail', { limit: 10, everyone: true })
+    expect(String(r.error)).toMatch(/^Could not check who is in this chat: .*429/)
+    expect(listMail).not.toHaveBeenCalled()
+  })
+
   it('shows ten a mailbox when the caller does not say, and counts the rest', async () => {
     listMail.mockResolvedValue(Array.from({ length: 12 }, (_, i) => mail(`m${i}`, 1 + i / 10)))
     const r = await call(mailTools(ctx), 'new_mail', {})
@@ -775,7 +785,9 @@ describe('calendar tools', () => {
     expect(r.maybe_done).toBe(true)
     expect(turn.wrote).toEqual(['create_calendar_event'])
     expect(turn.unconfirmed).toEqual(['create_calendar_event'])
-    expect(turn.changed).toEqual(['create_calendar_event'])
+    // Kept apart from the writes that went through: it backs no reply that says it was done.
+    expect(turn.changed).toBeUndefined()
+    expect(turn.maybeChanged).toEqual(['create_calendar_event'])
     // A timeout before the request, on the token, is only a failure: nothing was asked.
     createEvent.mockRejectedValueOnce(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
     const plain = await call(tools, 'create_calendar_event', { title: 'T', start: '2026-08-27T09:00', all_day: false })

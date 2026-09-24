@@ -435,9 +435,10 @@ export function cleanReply(raw: string, opts: { working?: boolean } = {}): { tex
 
 /**
  * Whether a write went through this turn that makes its change by itself. A
- * call that answered with an error or threw changed nothing, and a draft or a
- * proposal is still waiting on a yes: "sent" or "added to the calendar" after
- * one of those is the report the check is for.
+ * call that answered with an error or threw changed nothing, one that ran out
+ * of time may not have, and a draft or a proposal is still waiting on a yes:
+ * "sent" or "added to the calendar" after one of those is the report the
+ * check is for.
  */
 function madeChange(ctx: ToolContext): boolean {
   return (ctx.changed ?? []).some((t) => !PENDING_WRITES.has(t as ToolName))
@@ -489,12 +490,12 @@ async function reportsChange(reply: string, chatId: string, deadline: number): P
 
 /**
  * A small model sometimes narrates a change it never made: it answers "done,
- * replaced" with no tool called, or after a call that failed, and the
- * calendar keeps the old entry. A tool's notice or a write that went through
- * this turn means the report is real and nothing is asked; otherwise the
- * reply is judged, and one that reports a change gets a second turn to make
- * it or take it back. The judgement fails open: an unsure or failed check
- * changes nothing.
+ * replaced" with no tool called, or after a call that failed or ran out of
+ * time, and the calendar keeps the old entry. A tool's notice or a write that
+ * went through this turn means the report is real and nothing is asked;
+ * otherwise the reply is judged, and one that reports a change gets a second
+ * turn to make it or take it back. The judgement fails open: an unsure or
+ * failed check changes nothing.
  */
 async function claimsUnmadeAction(slot: ModelSlot, text: string, ctx: ToolContext, deadline: number): Promise<boolean> {
   if (!text || ctx.notices.length > 0 || madeChange(ctx)) return false
@@ -506,14 +507,27 @@ async function claimsUnmadeAction(slot: ModelSlot, text: string, ctx: ToolContex
   }
 }
 
-const unmadeActionNote = (who: string) =>
-  `[Hearth] Nothing has changed: that reply says something was done, but no tool did it this turn. ` +
-  `A tool that answered with an error changed nothing, and a draft or a proposal only waits for a yes. ` +
-  `If ${who} asked for it, do it now with the right tool (list first if an id is needed) and report what the tool returned; ` +
-  `for a draft or a proposal, show it and ask for the yes. ` +
-  `If ${who} was only telling you something, reply without saying you did it.`
+/**
+ * After a write that ran out of time, "nothing has changed" may be untrue and
+ * "do it now" could do it twice, so the note says it is not known instead.
+ */
+const unmadeActionNote = (who: string, ctx: ToolContext) =>
+  ctx.maybeChanged?.length
+    ? `[Hearth] That reply says something was done, but no tool confirmed it this turn. ` +
+      `A tool that answered with maybe_done ran out of time, so it may or may not have gone through: do not try it again, ` +
+      `and tell ${who} it may not have happened and what to check. ` +
+      `Anything else the reply says was done, do now with the right tool if ${who} asked for it, or reply without saying you did it.`
+    : `[Hearth] Nothing has changed: that reply says something was done, but no tool did it this turn. ` +
+      `A tool that answered with an error changed nothing, and a draft or a proposal only waits for a yes. ` +
+      `If ${who} asked for it, do it now with the right tool (list first if an id is needed) and report what the tool returned; ` +
+      `for a draft or a proposal, show it and ask for the yes. ` +
+      `If ${who} was only telling you something, reply without saying you did it.`
 
 const NOTHING_CHANGED = 'I did not change anything this turn. If that is not what you expected, tell me exactly what to change.'
+/** After a write that ran out of time: it may or may not have gone through, so nothing changing is not known either. */
+const NOT_CONFIRMED = 'I could not confirm that change went through, so check whether it did before asking again.'
+/** What goes under a reply that still says something was done that no tool confirmed. */
+const notDone = (ctx: ToolContext) => (ctx.maybeChanged?.length ? NOT_CONFIRMED : NOTHING_CHANGED)
 /** After a retry that was making the change when it failed: it may or may not have gone through. */
 const CUT_OFF_MID_CHANGE = 'My reply was cut off while I was making that change, so check whether it went through before asking again.'
 
@@ -754,7 +768,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           if (mode === 'chat' && (await claimsUnmadeAction(slot, cleaned.text, ctx, deadline))) {
             console.warn(`[agent] ${slot.name} reported an action it never took; asking it to act or retract`)
             await recordModelEvent({ slot: slot.name, purpose: `hearth.${mode}`, outcome: 'claim_retry' })
-            const changedBefore = ctx.changed?.length ?? 0
+            const changedBefore = (ctx.changed?.length ?? 0) + (ctx.maybeChanged?.length ?? 0)
             // The first reply's looks are set aside while the retry runs, so
             // the retry sees the mail as new and can report it itself; they come
             // back only if the first reply is the one that stands.
@@ -766,7 +780,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
               const again = await call([
                 ...messages,
                 { role: 'assistant', content: cleaned.text },
-                { role: 'user', content: unmadeActionNote(input.memberName) },
+                { role: 'user', content: unmadeActionNote(input.memberName, ctx) },
               ])
               const retried = cleanReply(again.text)
               if (retried.text || ctx.notices.length) {
@@ -775,15 +789,15 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
               }
               if (await claimsUnmadeAction(slot, cleaned.text, ctx, deadline)) {
                 console.warn(`[agent] ${slot.name} still reported an untaken action; saying so`)
-                cleaned = { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
+                cleaned = { text: `${cleaned.text}\n\n${notDone(ctx)}`, stripped: true }
               }
             } catch (err) {
               console.error(`[agent] ${slot.name} retry after an untaken action failed:`, describeError(err))
               // The retry may have made the change before it failed; saying
               // nothing changed would then be the untrue report this is here to stop.
-              cleaned = (ctx.changed?.length ?? 0) > changedBefore
+              cleaned = (ctx.changed?.length ?? 0) + (ctx.maybeChanged?.length ?? 0) > changedBefore
                 ? { text: `${cleaned.text}\n\n${CUT_OFF_MID_CHANGE}`, stripped: true }
-                : { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
+                : { text: `${cleaned.text}\n\n${notDone(ctx)}`, stripped: true }
             }
             // Only the reply that stands keeps its looks: a retry that failed,
             // or whose reply was not used, showed its own to nobody.
@@ -1006,7 +1020,13 @@ const REWRITE_PROMPT = [
   'Return an empty message when what remains says nothing worth posting.',
 ].join(' ')
 
-export type DraftReview = { claims: string[]; unsupported: string[]; message: string | null }
+export type DraftReview = {
+  claims: string[]
+  unsupported: string[]
+  message: string | null
+  /** Why the rewrite could not cut the unsupported claims out; `message` is then null. */
+  rewriteFailed?: string
+}
 
 /**
  * Whether the evidence supports each statement. Jev judges them all in one
@@ -1061,7 +1081,10 @@ async function checkEach(
  * capped, so a long post is spot-checked rather than rebuilt: rebuilding it
  * from the list dropped every fact the list had no room for. Statements of
  * what is not known are not claims, so "purpose not recorded" passes untouched.
- * With a `deadline` (epoch ms) every call is over by then.
+ * With a `deadline` (epoch ms) every call is over by then. A rewrite that
+ * cannot finish, cut off by that deadline or failing on every slot, still
+ * hands back the verdicts, never a throw that would lose them and leave the
+ * caller only the draft they rejected.
  */
 export async function reviewDraft(input: { label: string; draft: string; evidence: string; deadline?: number }): Promise<DraftReview> {
   const evidence = input.evidence || '(no tool results)'
@@ -1114,7 +1137,8 @@ export async function reviewDraft(input: { label: string; draft: string; evidenc
     chain,
     'hearth.verify',
     input.deadline,
-  )
+  ).catch((err: unknown) => ({ failed: describeError(err) }))
+  if (typeof rewritten !== 'string') return { claims, unsupported, message: null, rewriteFailed: rewritten.failed }
   return { claims, unsupported, message: rewritten || null }
 }
 

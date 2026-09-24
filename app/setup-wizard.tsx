@@ -286,6 +286,11 @@ export function SetupWizard({
             <p className="empty" style={{ marginTop: '0.5rem' }}>
               Connected{status.webhook && status.webhook.pending > 0 ? `, ${status.webhook.pending} updates pending` : ''}.
             </p>
+          ) : status.webhook?.url === status.expectedUrl && status.webhook.missing.length ? (
+            <p className="empty warn" style={{ marginTop: '0.5rem' }}>
+              The webhook was registered by an older Hearth, so Telegram never says when the bot is removed from a
+              group. Reconnect it.
+            </p>
           ) : status.webhook?.url ? (
             <p className="empty warn" style={{ marginTop: '0.5rem' }}>
               The webhook currently points at {status.webhook.url}.

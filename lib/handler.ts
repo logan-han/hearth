@@ -682,8 +682,10 @@ async function refuseForStrangers(c: TelegramContext): Promise<boolean> {
  */
 const UPDATE_BUDGET_MS = 240_000
 /**
- * How much of that the downloads leave the turn. A file the host stalls on is
- * given up this far from the end, and the message is answered without it.
+ * How much of that the downloads and the wait for the turn ahead leave the
+ * turn. A file the host stalls on is given up this far from the end, and the
+ * message is answered without it; a turn ahead that runs on past it is not
+ * waited for any longer.
  */
 const ANSWER_RESERVE_MS = 60_000
 
@@ -771,7 +773,7 @@ export async function processUpdate(update: Update): Promise<void> {
     return
   }
 
-  const turn = await awaitTurn(c.chatId, storedId)
+  const turn = await awaitTurn(c.chatId, storedId, deadline - ANSWER_RESERVE_MS)
   await typing(c.chatId)
   try {
     const result = await runAgent({

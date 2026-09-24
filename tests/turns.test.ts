@@ -43,6 +43,17 @@ describe("a chat's turn", () => {
     expect(await q.getSetting('turnq:111:1')).toBeNull()
   })
 
+  it('stops waiting sooner when the time it is given runs out first', async () => {
+    const busy = `${Date.now() + 600_000} busy`
+    await q.setSetting('turn:111', busy)
+    const start = Date.now()
+    let calls = 0
+    // Past the time it was given, still well inside its own wait.
+    vi.spyOn(Date, 'now').mockImplementation(() => (calls++ === 0 ? start : start + 31_000))
+    expect(await awaitTurn('111', 1, start + 30_000)).toBeNull()
+    expect(await q.getSetting('turn:111')).toBe(busy)
+  })
+
   it('goes to the earliest message still waiting, past one that stopped waiting', async () => {
     // Message 2 is waiting; message 1 gave up long ago, cut off before it could say so.
     await q.setSetting('turnq:111:1', String(Date.now() - 1))

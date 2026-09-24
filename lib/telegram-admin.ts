@@ -53,13 +53,21 @@ export async function registerCommands(token: string): Promise<boolean> {
   return res.ok
 }
 
+/**
+ * What the webhook asks Telegram to deliver. The bot's own removal from a room
+ * arrives only if it is asked for. Not edits: answered again, an edit makes
+ * the same change twice.
+ */
+export const WEBHOOK_UPDATES = ['message', 'my_chat_member']
+
 export type TelegramStatus = {
   configured: boolean
   ok: boolean
   username: string | null
   error?: string
   secretSet: boolean
-  webhook: { url: string | null; pending: number; lastError: string | null } | null
+  /** `missing` is what WEBHOOK_UPDATES asks for that the registration leaves out. */
+  webhook: { url: string | null; pending: number; lastError: string | null; missing: string[] } | null
   expectedUrl: string
   connected: boolean
 }
@@ -67,7 +75,9 @@ export type TelegramStatus = {
 /**
  * One picture of the bot as Telegram sees it, for the settings panel and the
  * setup guide. `connected` means updates reach this deployment specifically:
- * a webhook pointing at an old URL is a configured bot that hears nothing.
+ * a webhook pointing at an old URL is a configured bot that hears nothing,
+ * and one an older Hearth registered for fewer kinds of update keeps them
+ * until it is registered again, never hearing the bot removed from a group.
  */
 export async function telegramStatus(): Promise<TelegramStatus> {
   const token = process.env.TELEGRAM_BOT_TOKEN
@@ -80,7 +90,10 @@ export async function telegramStatus(): Promise<TelegramStatus> {
 
   const [me, hook] = await Promise.all([
     telegramApi<{ username?: string }>(token, 'getMe'),
-    telegramApi<{ url?: string; pending_update_count?: number; last_error_message?: string }>(token, 'getWebhookInfo'),
+    telegramApi<{ url?: string; pending_update_count?: number; last_error_message?: string; allowed_updates?: string[] }>(
+      token,
+      'getWebhookInfo',
+    ),
   ])
 
   const webhook = hook.ok
@@ -88,6 +101,8 @@ export async function telegramStatus(): Promise<TelegramStatus> {
         url: hook.result?.url || null,
         pending: hook.result?.pending_update_count ?? 0,
         lastError: hook.result?.last_error_message ?? null,
+        // None listed is Telegram's default, which delivers both.
+        missing: WEBHOOK_UPDATES.filter((u) => hook.result?.allowed_updates && !hook.result.allowed_updates.includes(u)),
       }
     : null
 
@@ -99,6 +114,6 @@ export async function telegramStatus(): Promise<TelegramStatus> {
     secretSet,
     webhook,
     expectedUrl,
-    connected: Boolean(webhook?.url === expectedUrl && secretSet),
+    connected: Boolean(webhook?.url === expectedUrl && secretSet && webhook.missing.length === 0),
   }
 }

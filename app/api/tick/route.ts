@@ -5,7 +5,7 @@ import { Receiver } from '@upstash/qstash'
 import {
   dueAutomations, claimAutomation, allowedMembers, recordMessage, strangersIn,
   messagesSince, getSetting, setSetting, retireStaleProposals, recordTick,
-  unaskedQuestions, markQuestionsAsked, memberByTelegramId, setAutomationEnabled,
+  unaskedQuestions, markQuestionsAsked, memberByTelegramId, setAutomationEnabled, moveChat,
 } from '@/lib/db/queries'
 import { localDateKey, tzOffsetMs, nextRun, formatLocal } from '@/lib/cron'
 import { retryTickAt } from '@/lib/scheduler'
@@ -410,6 +410,13 @@ const SERVICE_PROBLEM =
   /rate.?limit|quota|too many requests|service unavailable|temporarily unavailable|overloaded|ECONNREFUSED|ECONNRESET|EAI_AGAIN|cannot connect|not configured|not connected|api key|insufficient credits|expired or been revoked|reconnect/i
 
 /**
+ * approve()'s answer for a draft it held back that no judge ruled on. The
+ * next run may well be judged in time, so unlike a draft the checks held
+ * back, what this one read is not spent with it.
+ */
+const UNJUDGED = Symbol('unjudged')
+
+/**
  * Post-or-skip is decided in a fresh context against the evidence, by a
  * judge that answers two questions and never sees the writer's draft as its
  * own. Each judge draws its own line (Jev's in lib/jev.ts, the chain's in
@@ -418,18 +425,20 @@ const SERVICE_PROBLEM =
  * decision itself cannot be made (a provider that will not return the
  * structured object) the draft goes out as it always did, and an admin hears
  * that the safety net was down; a decision the tick ran out of time for is
- * held back instead, as the judges were not all asked. A draft held back at
- * either step is reported to an admin with the reason: a run that wrote
- * something and posted nothing is not the quiet kind of quiet.
+ * held back instead, as the judges were not all asked, and answered UNJUDGED
+ * so that what the run read stays new. A draft held back at either step is
+ * reported to an admin with the reason: a run that wrote something and
+ * posted nothing is not the quiet kind of quiet.
  *
  * What posts is the reviewed draft itself, never a retype from the decision:
  * the decision once offered its own wording, and that is what turned a
  * formatted snapshot into plain lines and brought back entries the check had
  * never seen.
  */
-async function approve(a: Automation, member: Member | undefined, draft: string, evidence: string, deadline: number): Promise<string | null> {
+async function approve(a: Automation, member: Member | undefined, draft: string, evidence: string, deadline: number): Promise<string | null | typeof UNJUDGED> {
   // First the factored check: each claim against the evidence, in a context
-  // that never sees the draft. What fails is cut; if nothing survives, silence.
+  // that never sees the draft. What fails is cut; if nothing survives, or
+  // what failed could not be cut, silence.
   let reviewed = draft
   // Whether that check went through this draft and passed it whole: it pulled
   // statements out, every one was put to the checker against this evidence,
@@ -443,7 +452,9 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
   try {
     const review = await reviewDraft({ label: a.label, draft, evidence, deadline: deadline - DECISION_RESERVE_MS })
     if (review.message === null) {
-      const why = `no claim survived the check: ${review.unsupported.join(' | ')}`
+      const why = review.rewriteFailed
+        ? `claims failed the check and could not be cut out (${review.rewriteFailed}): ${review.unsupported.join(' | ')}`
+        : `no claim survived the check: ${review.unsupported.join(' | ')}`
       console.warn(`[tick] ${a.label}: held back, ${why}`)
       await tellAdminQuietly(member, heldBack(a, why, draft))
       return null
@@ -477,7 +488,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
     if (Date.now() >= deadline - 1_000) {
       console.warn(`[tick] ${a.label}: held back, the tick ran out of time for the post decision:`, reason)
       await tellAdminQuietly(member, heldBack(a, 'the tick ran out of time before the post check could answer', reviewed))
-      return null
+      return UNJUDGED
     }
     console.error(`[tick] ${a.label}: post decision unavailable, posting the draft:`, reason)
     await tellAdminQuietly(member, `Watcher **${a.label}**: the post decision failed (${reason}), so its draft went out unchecked.`)
@@ -496,11 +507,11 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
  * admin. `spent` marks what the run read as seen, and is called only once that
  * has reached the chat, or was deliberately kept from it: a plain SKIP, or a
  * draft the checks held back (an admin has it). A PROBLEM, a post the hourly
- * cap held back, or a send that fails before any of it is in the chat leaves
- * it new for the next run, with one exception: a run that wrote something
- * unrepeatable on the strength of it (a list item, a reminder) spends it
- * whatever else happened, or the next run would write it again. Says which it
- * was.
+ * cap held back, a draft the tick ran out of time to judge, or a send that
+ * fails before any of it is in the chat leaves it new for the next run, with
+ * one exception: a run that wrote something unrepeatable on the strength of it
+ * (a list item, a reminder) spends it whatever else happened, or the next run
+ * would write it again. Says which it was.
  */
 async function deliver(
   a: Automation,
@@ -538,18 +549,23 @@ async function deliver(
 
   const parts: string[] = []
   let withheld = false
+  // Held back with nobody's ruling on it: what it read has reached nobody.
+  let unjudged = false
   if (!draft.skip && draft.rest) {
     const approved = await approve(a, member, draft.rest, evidence, deadline)
-    if (approved) parts.push(approved)
+    if (approved === UNJUDGED) unjudged = true
+    else if (approved) parts.push(approved)
     else withheld = true
   }
   parts.push(...unsaid(parts.join('\n\n'), notices))
+  const keepNew = unjudged && !result.wrote?.length
 
   const message = parts.join('\n\n').trim()
   if (!message) {
     // Quiet by choice, or held back on purpose, is the run done with what it
-    // read. A run that could not do its job (a PROBLEM) leaves it for the next.
-    if (withheld || problems.length === 0 || result.wrote?.length) {
+    // read. A run that could not do its job (a PROBLEM), or whose draft the
+    // tick ran out of time to judge, leaves it for the next.
+    if (!keepNew && (withheld || problems.length === 0 || result.wrote?.length)) {
       await spent()
       return 'spent'
     }
@@ -593,8 +609,10 @@ async function deliver(
     posted = err.sent
     broken = err
   }
-  // Spent the moment it is posted, before the bookkeeping below can fail and bring it round again.
-  await spent()
+  // Spent the moment it is posted, before the bookkeeping below can fail and
+  // bring it round again; unless all that went was the notices beside a draft
+  // nobody judged.
+  if (!keepNew) await spent()
   await setSetting(capKey, JSON.stringify(recordPost(log, now)))
   await db().insert(schema.messages).values({
     chatId: a.chatId,
@@ -614,7 +632,7 @@ async function deliver(
       `Watcher **${a.label}** ran out of room: the model's output allowance cut its post short, so it went out without its unfinished end, and whatever that held was not posted. A shorter instruction, or a larger allowance for this watcher, stops it.`,
     )
   }
-  return 'spent'
+  return keepNew ? 'unavailable' : 'spent'
 }
 
 /**
@@ -721,6 +739,10 @@ async function spentClean(a: Automation, staged: StagedCursor[]): Promise<void> 
     console.error('[tick] stuck guard failed:', describeError(err))
   }
 }
+
+/** The id Telegram says a group now has, having become a supergroup since the run began. */
+const migratedTo = (err: unknown) =>
+  err instanceof GrammyError && err.parameters?.migrate_to_chat_id ? String(err.parameters.migrate_to_chat_id) : null
 
 /** Telegram turning the chat itself away, rather than failing this once. */
 const refusedChat = (err: unknown) =>
@@ -846,7 +868,18 @@ async function runDue(deadline: number): Promise<{ ran: number; skipped: number 
       console.error(`[tick] automation ${a.id} failed:`, err)
       const reason = describeError(err)
       try {
-        if (refusedChat(err)) {
+        const movedTo = migratedTo(err)
+        if (movedTo) {
+          // The room is still there under a new id, where posting works. Its
+          // rows follow it (the webhook moves them too once it hears, and the
+          // second move finds nothing left), and the automation stays on:
+          // paused, it would sit silent in a room it can post in.
+          await moveChat(a.chatId, movedTo)
+          await tellAdminQuietly(
+            undefined,
+            `**${a.label}** was not posted: chat ${a.chatId} has just become a supergroup. It posts there from its next run.`,
+          )
+        } else if (refusedChat(err)) {
           // Telegram will refuse this chat every hour from now on (the bot was
           // removed, or the person blocked it), and what the run read stays
           // unspent, so each hour would fetch, write and fail again. Paused, once.

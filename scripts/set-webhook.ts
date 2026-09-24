@@ -40,13 +40,13 @@ async function main() {
   if (!appUrl) throw new Error('APP_URL is required, e.g. https://hearth.vercel.app')
 
   const me = (await call('getMe')) as { username?: string }
+  const { BOT_COMMANDS, WEBHOOK_UPDATES } = await import('../lib/telegram-admin')
   await call('setWebhook', {
     url: `${appUrl}/api/telegram`,
     secret_token: secret,
-    allowed_updates: ['message', 'my_chat_member'],
+    allowed_updates: WEBHOOK_UPDATES,
     drop_pending_updates: true,
   })
-  const { BOT_COMMANDS } = await import('../lib/telegram-admin')
   await call('setMyCommands', { commands: BOT_COMMANDS })
   const info = (await call('getWebhookInfo')) as { url?: string; pending_update_count?: number }
 

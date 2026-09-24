@@ -48,15 +48,16 @@ Vercel Fluid compute (300 s ceiling). A turn gives itself 150 s of that, every
 model it tries and every check on its reply included, and starts no further
 model once they are spent. Its clock starts when the message arrives, not when
 the turn does: the gate, the attachments and the wait for the turn ahead come
-out of the same four minutes, and a file still downloading with a minute of
-them left is given up and the message answered without it, so the reply, or
-the apology, still goes out before the function is stopped. The hourly tick
-keeps one clock the same way: it starts an automation only while a whole turn
-and the checks on its draft still fit in its first 280 s, so the rest stay
-due, first in line at the next tick, rather than claimed and then stopped
-halfway through. A draft whose post decision that clock cuts short is held
-back for an admin, not posted unchecked, and the nightly memory pass waits for
-a tick with a whole turn left.
+out of the same four minutes, and a file still downloading, or a turn ahead
+still running, with a minute of them left is no longer waited for and the
+message is answered without it, so the reply, or the apology, still goes out
+before the function is stopped. The hourly tick keeps one clock the same way:
+it starts an automation only while a whole turn and the checks on its draft
+still fit in its first 280 s, so the rest stay due, first in line at the next
+tick, rather than claimed and then stopped halfway through. A draft whose post
+decision that clock cuts short is held back for an admin, not posted unchecked,
+with what it read left new for the next run; and the nightly memory pass waits
+for a tick with a whole turn left.
 
 A chat turn does not see all 55 tools. The 23 in the core are always in reach
 (search, weather, lists, the shared calendar and its proposals, memory); mail,
@@ -74,18 +75,19 @@ chatter, so a fact from last week is still in reach without the transcript.
 Before anything a watcher wrote reaches the chat it passes two checks in fresh
 contexts: each checkable claim is tested against the evidence by a call that
 never sees the draft, and what fails is removed from the draft with the rest
-left as written; then a decision says post or skip with a confidence, judging
-only whether the draft is true to its evidence: what the writer chose to
-include is not re-judged. With a TypeSafe key these judgements, the ambient
-gate and the check on a reply that reports a change no tool made are put to
-[Jev](https://typesafe.ai), a model that answers typed yes-or-no and pick-one
-questions with a probability rather than writing anything; without one they
-are structured calls to the chain, which then tries first the models that have
-lately been returning an object, whatever the chain order for chat. A draft
-held back at either step goes to an admin by DM with the reason and the draft,
-so a snapshot that should have posted is never merely quiet. A chat also hears
-from its watchers at most six times an hour, with an admin told the first time
-the cap holds something back.
+left as written (a draft whose failed claims cannot be removed, the rewrite cut
+off or failing, is held back for an admin); then a decision says post or skip
+with a confidence, judging only whether the draft is true to its evidence: what
+the writer chose to include is not re-judged. With a TypeSafe key these
+judgements, the ambient gate and the check on a reply that reports a change no
+tool made are put to [Jev](https://typesafe.ai), a model that answers typed
+yes-or-no and pick-one questions with a probability rather than writing
+anything; without one they are structured calls to the chain, which then tries
+first the models that have lately been returning an object, whatever the chain
+order for chat. A draft held back at either step goes to an admin by DM with
+the reason and the draft, so a snapshot that should have posted is never merely
+quiet. A chat also hears from its watchers at most six times an hour, with an
+admin told the first time the cap holds something back.
 
 ## Layout
 
@@ -234,9 +236,9 @@ AADSTS code.
 ### Model chain
 
 Three tiers, tried in order, each dropping out when unconfigured. The order is
-`LLM_ORDER` and is editable from **System** by moving tiers up and down, so the
-thing you read is the thing you change. Self-hosted leads by default, being the
-only tier where nothing leaves the house.
+`LLM_ORDER` and is editable from **Settings** by moving tiers up and down, so
+the thing you read is the thing you change. Self-hosted leads by default, being
+the only tier where nothing leaves the house.
 
 1. `LLM_BASE_URL` + `LLM_MODEL` — a self-hosted OpenAI-compatible endpoint
 2. `GEMINI_API_KEY` + `GEMINI_MODEL`
@@ -429,11 +431,14 @@ description, due date) and copy an email's attachment onto it
 (`jira_attach_email_file`), so the notice sits with the job.
 
 **Saying a thing is done is not doing it.** A chat reply that reports a change
-(added, replaced, cancelled, sent) while no tool that changes anything ran is
-judged by a typed model call, the same shape as the ambient gate, and one
-that reports a change is sent back to the model with the note that nothing
-happened: act now, or say so. Should it insist a second time, the reply goes
-out with a line saying nothing was changed. Events are also changed in place
+(added, replaced, cancelled, sent) while no tool that changes anything ran, or
+only one that ran out of time before it was confirmed, is judged by a typed
+model call, the same shape as the ambient gate, and one that reports a change
+is sent back to the model with the note that nothing happened: act now, or say
+so. Should it insist a second time, the reply goes out with a line saying
+nothing was changed. After a write that ran out of time, which may or may not
+have gone through, the note says so instead and not to try it again, and the
+line says the change could not be confirmed. Events are also changed in place
 with `update_family_event`, so "replace" is one call and every subscribed
 calendar updates the same entry instead of showing a cancellation beside a new
 one.
@@ -512,26 +517,27 @@ read-only tools, the same right to stay silent, and the same post decision.
 It reads its author's own mailbox and nobody else's, even in the group: its
 problems and held-back drafts go to its author first.
 
-What a watcher read counts as seen only once it has reached someone. A run
-that fails, reports a PROBLEM or has its post refused leaves the mail and the
-transactions new, so the next run tries them again; one that wrote something
-it cannot take back on the strength of them (a list item, a reminder) spends
-them whatever else happened, or the next run would write it twice, and a post
-the hourly cap then holds back goes to an admin as a draft. A failure that is
-the same every time would otherwise hold every later run on the same items for
-good, so a mailbox or account held at the same place for three runs and at
-least twelve hours is moved past what the first of those runs saw (anything
-newer keeps its chance), and an admin is told once which source and which span
-were skipped. Only a failure about what was sent counts towards that (a
-request the model rejects as it stands, a post Telegram cannot parse, a
-PROBLEM about the mail itself): a model chain, service or network that is
-down, rate limited, out of credit or refusing its key says nothing about the
-items, and a count left untouched for eight days is forgotten. A post
-longer than the model's output allowance goes to the next model in the chain
-first; the last one's, or the first one's when no later model answers at all,
-loses its cut-off last line rather than going out mid-bullet, still faces the
-checks, and an admin is told it went out short. A reply cut
-off before a whole line of any length is dropped as the fragment it is.
+What a watcher read counts as seen only once it has reached someone. A run that
+fails, reports a PROBLEM, has its post refused or runs out of time for the post
+decision leaves the mail and the transactions new, so the next run tries them
+again; one that wrote something it cannot take back on the strength of them (a
+list item, a reminder) spends them whatever else happened, or the next run
+would write it twice, and a post the hourly cap then holds back goes to an
+admin as a draft. A failure that is the same every time would otherwise hold
+every later run on the same items for good, so a mailbox or account held at the
+same place for three runs and at least twelve hours is moved past what the
+first of those runs saw (anything newer keeps its chance), and an admin is told
+once which source and which span were skipped. Only a failure about what was
+sent counts towards that (a request the model rejects as it stands, a post
+Telegram cannot parse, a PROBLEM about the mail itself): a model chain, service
+or network that is down, rate limited, out of credit or refusing its key says
+nothing about the items, and a count left untouched for eight days is
+forgotten. A post longer than the model's output allowance goes to the next
+model in the chain first; the last one's, or the first one's when no later
+model answers at all, loses its cut-off last line rather than going out
+mid-bullet, still faces the checks, and an admin is told it went out short. A
+reply cut off before a whole line of any length is dropped as the fragment it
+is.
 
 ## Sweeping email onto the calendar
 
@@ -623,8 +629,10 @@ skipping them unseen, short of runs stuck on the same ones for half a day
 first counts as posted, since posting it again would repeat what the chat
 already has, and an admin is told the rest did not go. A chat Telegram
 refuses outright (the bot removed, blocked or muted in the group) pauses its
-automation rather than failing every hour. The first run looks back only 24
-hours, so switching it on does not dump months of history into the chat.
+automation rather than failing every hour; a group made a supergroup while a
+run was posting is followed to its new id instead, and stays on. The first run
+looks back only 24 hours, so switching it on does not dump months of history
+into the chat.
 
 Ask for it once and it keeps happening:
 
@@ -730,9 +738,11 @@ revoke or a demotion takes effect on the next click, not when the cookie runs
 out twelve hours later. For a session left open somewhere it should not be,
 **Sign everyone out** on Settings ends every session at once, the admin's own
 included, and voids every /connect link not yet used. Sessions and OAuth state
-are each signed with their own key, derived from `TOKEN_ENC_KEY` and salted
-with a stored epoch that the button replaces, so ending them never means
-replacing the key that decrypts every stored refresh token and setting.
+are each signed with their own key, derived from `TOKEN_ENC_KEY`, and carry a
+digest of a stored epoch that the button replaces, so ending them never means
+replacing the key that decrypts every stored refresh token and setting. The
+epoch is read only once the signature has checked, so a made-up cookie or link
+costs no database read, and the sign-in state anyone can ask for carries none.
 
 Admins manage the family from the same page: add someone by Telegram id and
 name, optionally with an email so they can sign in before linking anything,
@@ -788,9 +798,11 @@ tick read it only once the caller has passed a first check against what the
 instance already holds; a caller that fails it gets one fresh look at the
 store an hour, in case the secret changed elsewhere, and callers that reach a
 fresh instance together share its first read. The calendar feed treats its
-token the same way, and `/api/mcp` checks a key's tag before it looks the key
-up (see below). Someone fetching junk from any of the four every few minutes
-cannot keep the database awake and run out the free plan's compute hours.
+token the same way, `/api/mcp` checks a key's tag before it looks the key up
+(see below), and a session cookie or an OAuth state is checked against its
+signature before the epoch it carries is looked up. Someone fetching junk from
+any of them every few minutes cannot keep the database awake and run out the
+free plan's compute hours.
 
 ## Claude, and anything else that speaks MCP
 
@@ -919,7 +931,8 @@ scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
   to a supergroup gets a new id, and its flags, history and watchers move to
   it. A group the bot is removed from stops counting as the household's;
   Telegram reports that only to a webhook that asks for it, so one registered by
-  an older Hearth wants pointing at the deployment again from Settings.
+  an older Hearth wants pointing at the deployment again from Settings, which
+  says so rather than showing it connected, as /setup does.
 - Whoever a private chat belongs to must still be allowed for any automation to
   post there. Revoking someone stops their DM watchers and pauses the custom
   automations they wrote, whose instructions are now a stranger's words run with

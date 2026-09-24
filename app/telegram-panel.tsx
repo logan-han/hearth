@@ -60,9 +60,11 @@ export function TelegramPanel({
       ? status.webhook && status.webhook.pending > 0
         ? `delivering here, ${status.webhook.pending} pending`
         : 'delivering to this deployment'
-      : status.webhook?.url
-        ? `points at ${status.webhook.url}`
-        : 'not registered'
+      : status.webhook?.url === status.expectedUrl && status.webhook.missing.length
+        ? 'registered by an older Hearth; reconnect to hear when the bot is removed from a group'
+        : status.webhook?.url
+          ? `points at ${status.webhook.url}`
+          : 'not registered'
 
   return (
     <div className="hook">

@@ -85,3 +85,17 @@ describe('the README', () => {
     expect(claimed('start from the (\\d+) in the core')).toBe(CORE_TOOLS.length)
   })
 })
+
+describe('where the docs send an admin', () => {
+  const readme = readFileSync(join(root, 'README.md'), 'utf8')
+  const env = readFileSync(join(root, '.env.example'), 'utf8')
+  const renders = (page: string | undefined, form: string) =>
+    Boolean(page) && new RegExp(`<${form}\\b`).test(readFileSync(join(root, 'app', page!.toLowerCase(), 'page.tsx'), 'utf8'))
+
+  it('names the page that reorders the chain', () => {
+    // ChainForm is the one control that writes the order.
+    expect(readFileSync(join(root, 'app/chain-form.tsx'), 'utf8')).toContain("key: 'LLM_ORDER'")
+    expect(renders(/Also set on (\w+)\b[^\n]*\n(?:#[^\n]*\n)*LLM_ORDER=/.exec(env)?.[1], 'ChainForm')).toBe(true)
+    expect(renders(/`LLM_ORDER`\s+and\s+is\s+editable\s+from\s+\*\*(\w+)\*\*/.exec(readme)?.[1], 'ChainForm')).toBe(true)
+  })
+})

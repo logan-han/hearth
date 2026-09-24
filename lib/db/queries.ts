@@ -267,8 +267,12 @@ export async function moveChat(from: string, to: string): Promise<void> {
   await db().update(emailDrafts).set({ chatId: to }).where(eq(emailDrafts.chatId, from))
   await db().update(eventProposals).set({ chatId: to }).where(eq(eventProposals.chatId, from))
   // Keys name the room as one colon-separated part: mail_cursor:<chat>:…,
-  // proactive_posts:<chat>. One the new room has already written stays.
-  const keyed = sql`(${settings.key} like ${`%:${from}:%`} or ${settings.key} like ${`%:${from}`})`
+  // proactive_posts:<chat>. One the new room has already written stays. A
+  // turn's hold, a waiting message's row and an album's items stay put: the
+  // invocation answering in the old room frees and takes them by the old id,
+  // and moved, a hold would keep the new room waiting for five minutes.
+  const keyed = sql`(${settings.key} like ${`%:${from}:%`} or ${settings.key} like ${`%:${from}`})
+    and ${settings.key} not like 'turn:%' and ${settings.key} not like 'turnq:%' and ${settings.key} not like 'album:%'`
   await db().execute(sql`
     insert into settings (key, value)
     select replace(key, ${`:${from}`}, ${`:${to}`}), value from settings where ${keyed}

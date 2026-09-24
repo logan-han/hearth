@@ -1,5 +1,5 @@
 import { SignJWT, jwtVerify } from 'jose'
-import { signingSecret } from '../auth/keys'
+import { signingSecret, epochMark, inThisEpoch } from '../auth/keys'
 
 const ALG = 'HS256'
 
@@ -13,9 +13,14 @@ const secret = () => signingSecret('oauth-state')
  */
 export type StatePayload = { tg: string; name: string; chat: string; purpose?: 'link' | 'signin' }
 
-/** Signed, short-lived state binding an OAuth round-trip to one Telegram user. */
+/**
+ * Signed, short-lived state binding an OAuth round-trip to one Telegram user.
+ * A sign-in state is handed to anyone who asks and binds nobody, so it carries
+ * no epoch and costs no read; a link carries one, so signing out everywhere
+ * voids it.
+ */
 export async function signState(payload: StatePayload, ttl = '10m'): Promise<string> {
-  return new SignJWT({ ...payload })
+  return new SignJWT({ ...payload, ...(payload.purpose === 'signin' ? {} : { ep: await epochMark() }) })
     .setProtectedHeader({ alg: ALG })
     .setIssuedAt()
     .setExpirationTime(ttl)
@@ -30,9 +35,10 @@ export async function signState(payload: StatePayload, ttl = '10m'): Promise<str
  */
 export async function verifyState(token: string, expect?: 'link' | 'signin'): Promise<StatePayload> {
   const { payload } = await jwtVerify(token, await secret(), { algorithms: [ALG] })
-  const { tg, name, chat, purpose } = payload as Record<string, unknown>
+  const { tg, name, chat, purpose, ep } = payload as Record<string, unknown>
   const kind = purpose === 'signin' ? 'signin' : 'link'
   if (expect && kind !== expect) throw new Error(`state is for ${kind}, not ${expect}`)
+  if (kind === 'link' && !(await inThisEpoch(ep))) throw new Error('state signed before everyone was signed out')
   // Signing in is not bound to a Telegram account, so only the linking flow
   // requires one, and an empty id binds nothing.
   if (kind === 'link' && (typeof tg !== 'string' || !tg.trim())) throw new Error('state missing telegram id')

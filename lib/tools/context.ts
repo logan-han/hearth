@@ -51,13 +51,18 @@ export type ToolContext = {
   /** The writes in `wrote` that may or may not have happened, which a reply after a failure does not say were done. */
   unconfirmed?: string[]
   /**
-   * Every write tool that returned without an error this turn, or that ran
-   * out of time and may have gone through, repeatable or not. It may still
-   * have changed nothing (an event already there, a fact already known), so
-   * it decides only what a reply can honestly say after a failure, never what
-   * the turn claims was done.
+   * Every write tool that returned without an error this turn, repeatable or
+   * not. It may still have changed nothing (an event already there, a fact
+   * already known), so it decides only what a reply can honestly say, never
+   * what the turn claims was done.
    */
   changed?: string[]
+  /**
+   * Every write tool that ran out of time this turn and may or may not have
+   * gone through (`maybe_done`), repeatable or not. None of them backs a reply
+   * that says it was done, and none lets one say nothing changed.
+   */
+  maybeChanged?: string[]
   /** Cursor moves waiting on this turn's result reaching someone; see StagedCursor. */
   pendingCursors?: StagedCursor[]
   /**

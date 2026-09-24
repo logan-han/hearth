@@ -204,6 +204,22 @@ describe('a group made a supergroup', () => {
     expect(await q.strangersIn('-1005')).toHaveLength(1)
   })
 
+  it('leaves a turn running in the old room its hold, its waiters and its album, which it frees by the old id', async () => {
+    const { awaitTurn, endTurn, noteAlbumItem, takeAlbum } = await import('@/lib/turns')
+    const hold = await awaitTurn('-5', 1)
+    await q.setSetting('turnq:-5:2', String(Date.now() + 60_000))
+    await noteAlbumItem('-5', 'notice', { messageId: 3 })
+
+    await q.moveChat('-5', '-1005')
+
+    expect(await q.getSetting('turn:-1005')).toBeNull()
+    expect(await q.getSetting('turnq:-1005:2')).toBeNull()
+    expect(await q.getSetting('album:-1005:notice')).toBeNull()
+    expect((await takeAlbum('-5', 'notice'))?.map((i) => i.messageId)).toEqual([3])
+    await endTurn('-5', hold)
+    expect(await q.getSetting('turn:-5')).toBeNull()
+  })
+
   it('merges into a new room someone already spoke in, the household keeping its own watchers', async () => {
     await q.rememberChat('-5', 'group', 'Family')
     await q.noteStranger('-5', { id: '9', name: 'Eve' })

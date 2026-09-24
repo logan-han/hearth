@@ -150,6 +150,24 @@ describe('the Telegram admin API', () => {
     expect(body.connected).toBe(true)
   })
 
+  it('does not call a webhook an older Hearth registered connected, as it never hears the bot removed from a group', async () => {
+    await signIn()
+    process.env.TELEGRAM_BOT_TOKEN = '123456:GOOD-token'
+    process.env.TELEGRAM_WEBHOOK_SECRET = 's'
+    let updates: string[] | undefined = ['message', 'edited_message']
+    telegramAnswers({
+      getMe: () => ({ ok: true, result: { username: 'hearth_bot' } }),
+      getWebhookInfo: () => ({ ok: true, result: { url: 'https://hearth.example/api/telegram', allowed_updates: updates } }),
+    })
+    const old = await (await GET()).json()
+    expect(old.connected).toBe(false)
+    expect(old.webhook.missing).toEqual(['my_chat_member'])
+
+    // None listed is Telegram's default, which delivers it.
+    updates = undefined
+    expect((await (await GET()).json()).connected).toBe(true)
+  })
+
   it('keeps an existing webhook secret rather than rotating it', async () => {
     await signIn()
     process.env.TELEGRAM_BOT_TOKEN = '123456:GOOD-token'

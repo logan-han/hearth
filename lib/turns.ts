@@ -37,10 +37,14 @@ const waitingPrefix = (chatId: string) => `turnq:${chatId}:`
  * waiting, and a free chat is taken only by the earliest message still
  * waiting. One still on its way here, fetching its attachments say, has not
  * said so yet and is not waited for.
+ *
+ * The wait also ends at `until`, when that comes sooner: a message that spent
+ * its time on a slow download and then waited the full stretch would reach
+ * its turn with nothing left to answer in.
  */
-export async function awaitTurn(chatId: string, storedId: number): Promise<string | null> {
+export async function awaitTurn(chatId: string, storedId: number, until = Infinity): Promise<string | null> {
   const key = `turn:${chatId}`
-  const giveUpAt = Date.now() + TURN_WAIT_MS
+  const giveUpAt = Math.min(Date.now() + TURN_WAIT_MS, until)
   const waiting = `${waitingPrefix(chatId)}${storedId}`
   // A waiter cut off mid-wait leaves its row; it is cleared once its wait would have run out.
   await db()
