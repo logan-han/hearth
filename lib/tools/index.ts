@@ -24,7 +24,7 @@ const UNTRUSTED_SOURCES = new Set([
 ])
 
 export function buildTools(ctx: ToolContext) {
-  return markUntrusted(ctx, {
+  return instrument(ctx, {
     ...searchTools,
     ...mailTools(ctx),
     ...calendarTools(ctx),
@@ -42,18 +42,26 @@ export function buildTools(ctx: ToolContext) {
   })
 }
 
-/** Wrap each outside-content tool so calling it marks the turn as having read something untrusted. */
-function markUntrusted<T extends Record<string, { execute?: (...args: never[]) => unknown }>>(ctx: ToolContext, tools: T): T {
+/**
+ * Wrap the tools that leave a mark on the turn: an outside-content tool marks
+ * it as having read something untrusted when called, and a write tool records
+ * itself once it has succeeded (a result with an `error` changed nothing).
+ */
+function instrument<T extends Record<string, { execute?: (...args: never[]) => unknown }>>(ctx: ToolContext, tools: T): T {
   const out: Record<string, unknown> = { ...tools }
-  for (const name of UNTRUSTED_SOURCES) {
-    const t = tools[name]
-    if (!t?.execute) continue
+  for (const [name, t] of Object.entries(tools)) {
+    const untrusted = UNTRUSTED_SOURCES.has(name)
+    const writes = WRITE_TOOLS.has(name as ToolName)
+    if (!t.execute || (!untrusted && !writes)) continue
     const execute = t.execute
     out[name] = {
       ...t,
-      execute: (...args: never[]) => {
-        ctx.readUntrusted = true
-        return execute(...args)
+      execute: async (...args: never[]) => {
+        if (untrusted) ctx.readUntrusted = true
+        const result = await execute(...args)
+        const failed = typeof result === 'object' && result !== null && 'error' in result
+        if (writes && !failed) (ctx.wrote ??= []).push(name)
+        return result
       },
     }
   }

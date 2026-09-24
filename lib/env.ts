@@ -29,14 +29,35 @@ export function idSet(name: string): Set<string> {
   )
 }
 
+const DEFAULT_TIMEZONE = 'Australia/Melbourne'
+let zoneChecked: { value: string; ok: boolean } | null = null
+
 /**
  * The household's timezone, not the viewer's. Bin night, school pickup and a
  * 7pm reminder all mean Melbourne time whether you are reading this from the
  * kitchen or from an airport. Read through a function so a change made in the
- * dashboard applies without a redeploy.
+ * dashboard applies without a redeploy. A value no clock knows falls back to
+ * the default rather than throwing from every date on every page, including
+ * the Settings page that would fix it.
  */
 export function timezone(): string {
-  return process.env.TIMEZONE || 'Australia/Melbourne'
+  const value = process.env.TIMEZONE?.trim()
+  if (!value) return DEFAULT_TIMEZONE
+  if (zoneChecked?.value !== value) {
+    zoneChecked = { value, ok: isTimeZone(value) }
+    if (!zoneChecked.ok) console.warn(`[env] TIMEZONE "${value}" is not a time zone; using ${DEFAULT_TIMEZONE}`)
+  }
+  return zoneChecked.ok ? value : DEFAULT_TIMEZONE
+}
+
+/** True for a zone Intl can format in, such as Australia/Melbourne. */
+export function isTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value })
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** Read at call time, like timezone(), so a dashboard change applies without a redeploy. */

@@ -499,6 +499,43 @@ export function collectEvidence(steps: ReadonlyArray<{ toolResults?: ReadonlyArr
   return parts.join('\n')
 }
 
+/**
+ * What a write tool did, in the words a reply would use. Tools that announce
+ * themselves in the chat (the family calendar, a new board ticket) are left
+ * out: their own line is posted anyway.
+ */
+const DONE: Partial<Record<ToolName, string>> = {
+  propose_family_event: 'proposed an event for the family calendar',
+  reject_event_proposal: 'turned down a proposal',
+  add_to_list: 'added to a list',
+  check_off_list: 'ticked something off a list',
+  remove_from_list: 'removed something from a list',
+  clear_list: 'cleared a list',
+  remember: 'noted a household fact',
+  forget: 'forgot a household fact',
+  unsure: 'put a question to the family',
+  answer_question: 'settled a question',
+  draft_email: 'drafted an email',
+  send_email: 'sent an email',
+  cancel_draft: 'cancelled a draft',
+  create_calendar_event: 'added an event to your calendar',
+  notion_append_to_page: 'added to a Notion page',
+  jira_update_issue: 'updated a board ticket',
+  jira_move_issue: 'moved a board ticket',
+  jira_comment: 'commented on a board ticket',
+  jira_attach_email_file: 'attached a file to a board ticket',
+  create_automation: 'set up a reminder',
+  delete_automation: 'deleted a reminder',
+  pause_automation: 'paused or resumed a reminder',
+}
+
+/** The reply for a turn that changed things and then lost its model before it could say so. */
+function doneLine(ctx: ToolContext): string {
+  const done = [...new Set((ctx.wrote ?? []).map((t) => DONE[t as ToolName]).filter(Boolean))]
+  if (done.length === 0) return ''
+  return `Done: ${done.join(', ')}. My reply was cut off after that, so there is no need to ask again.`
+}
+
 export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const mode = input.mode ?? 'chat'
   const now = new Date()
@@ -580,49 +617,66 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
             telemetry: callTelemetry(`hearth.${mode}`),
           })
 
-        const r = await call(messages)
-        let cleaned = cleanReply(r.text, { working: mode === 'watcher' })
-        if (cleaned.stripped) console.warn(`[agent] ${slot.name} leaked its working into the reply; stripped`)
+        // Whatever this slot changes stays changed if it then fails. Starting
+        // the turn over on the next slot would do it all again: the same list
+        // items twice, a second reminder, invitations sent twice. So once
+        // anything is written, a failure ends the turn here, saying what was done.
+        try {
+          const r = await call(messages)
+          let cleaned = cleanReply(r.text, { working: mode === 'watcher' })
+          if (cleaned.stripped) console.warn(`[agent] ${slot.name} leaked its working into the reply; stripped`)
 
-        // A fragment is worse than nothing: it would go to the review as the
-        // post. It is dropped here, and unless a tool already did something
-        // worth reporting, the failure below hands the turn to the next slot.
-        const truncated = r.finishReason === 'length' && cleaned.text.length < TRUNCATED_REPLY_CHARS
-        if (truncated) {
-          console.warn(`[agent] ${slot.name} ran out of output tokens after ${cleaned.text.length} characters of reply; dropped`)
-          cleaned = { text: '', stripped: true }
-        }
-
-        if (mode === 'chat' && (await claimsUnmadeAction(slot, cleaned.text, r.steps ?? [], ctx))) {
-          console.warn(`[agent] ${slot.name} reported an action it never took; asking it to act or retract`)
-          await recordModelEvent({ slot: slot.name, purpose: `hearth.${mode}`, outcome: 'claim_retry' })
-          try {
-            const again = await call([
-              ...messages,
-              { role: 'assistant', content: cleaned.text },
-              { role: 'user', content: unmadeActionNote(input.memberName) },
-            ])
-            const retried = cleanReply(again.text)
-            if (retried.text || ctx.notices.length) cleaned = retried
-            if (await claimsUnmadeAction(slot, cleaned.text, again.steps ?? [], ctx)) {
-              console.warn(`[agent] ${slot.name} still reported an untaken action; saying so`)
-              cleaned = { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
-            }
-          } catch (err) {
-            console.error(`[agent] ${slot.name} retry after an untaken action failed:`, describeError(err))
-            cleaned = { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
+          // A fragment is worse than nothing: it would go to the review as the
+          // post. It is dropped here, and unless a tool already announced or
+          // changed something, the failure below hands the turn to the next slot.
+          const truncated = r.finishReason === 'length' && cleaned.text.length < TRUNCATED_REPLY_CHARS
+          if (truncated) {
+            console.warn(`[agent] ${slot.name} ran out of output tokens after ${cleaned.text.length} characters of reply; dropped`)
+            cleaned = { text: '', stripped: true }
           }
-        }
 
-        // An empty completion usually means the model ended on a tool call it never
-        // summarised; treat it as a failure so the fallback model gets a turn.
-        if (!cleaned.text && ctx.notices.length === 0) {
-          throw new Error(truncated ? `${slot.name} ran out of output tokens before answering` : `${slot.name} returned no text`)
-        }
-        return {
-          text: cleaned.text,
-          model: slot.name,
-          evidence: mode === 'watcher' ? collectEvidence(r.steps ?? []) : undefined,
+          if (mode === 'chat' && (await claimsUnmadeAction(slot, cleaned.text, r.steps ?? [], ctx))) {
+            console.warn(`[agent] ${slot.name} reported an action it never took; asking it to act or retract`)
+            await recordModelEvent({ slot: slot.name, purpose: `hearth.${mode}`, outcome: 'claim_retry' })
+            const wroteBefore = ctx.wrote?.length ?? 0
+            try {
+              const again = await call([
+                ...messages,
+                { role: 'assistant', content: cleaned.text },
+                { role: 'user', content: unmadeActionNote(input.memberName) },
+              ])
+              const retried = cleanReply(again.text)
+              if (retried.text || ctx.notices.length) cleaned = retried
+              if (await claimsUnmadeAction(slot, cleaned.text, again.steps ?? [], ctx)) {
+                console.warn(`[agent] ${slot.name} still reported an untaken action; saying so`)
+                cleaned = { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
+              }
+            } catch (err) {
+              console.error(`[agent] ${slot.name} retry after an untaken action failed:`, describeError(err))
+              // The retry may have made the change before it failed; saying
+              // nothing changed would then be the untrue report this is here to stop.
+              cleaned = (ctx.wrote?.length ?? 0) > wroteBefore
+                ? { text: doneLine(ctx), stripped: true }
+                : { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
+            }
+          }
+
+          // An empty completion usually means the model ended on a tool call it never
+          // summarised; treat it as a failure so the fallback model gets a turn,
+          // or, if that tool call changed something, so the turn ends saying so.
+          if (!cleaned.text && ctx.notices.length === 0) {
+            throw new Error(truncated ? `${slot.name} ran out of output tokens before answering` : `${slot.name} returned no text`)
+          }
+          return {
+            text: cleaned.text,
+            model: slot.name,
+            evidence: mode === 'watcher' ? collectEvidence(r.steps ?? []) : undefined,
+          }
+        } catch (err) {
+          if (!ctx.wrote?.length) throw err
+          console.error(`[agent] ${slot.name} failed after changing something, so no other slot gets the turn:`, describeError(err))
+          // A watcher or the nightly pass says nothing: what it changed shows on Home.
+          return { text: mode === 'chat' ? doneLine(ctx) : '', model: slot.name, evidence: undefined }
         }
       },
     ),

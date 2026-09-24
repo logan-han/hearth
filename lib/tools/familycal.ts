@@ -3,7 +3,7 @@ import { z } from 'zod'
 import {
   addFamilyEvent, listFamilyEvents, cancelFamilyEvent, updateFamilyEvent, getFamilyEvent, calendarToken,
 } from '../db/queries'
-import { localToUtc, localDateKey, formatLocal, formatLocalDate } from '../cron'
+import { localToUtc, localDateKey, formatLocal, formatLocalDate, dayAfter, nextLocalMidnight } from '../cron'
 import { timezone, appUrl } from '../env'
 import { announce, type ToolContext } from './context'
 
@@ -12,10 +12,6 @@ const LOCAL_DATETIME = z
   .describe(`Local ${timezone()} time as YYYY-MM-DDTHH:mm (or YYYY-MM-DD for all-day)`)
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
-const DAY_MS = 86_400_000
-
-/** The date after a YYYY-MM-DD date, by the calendar rather than by adding 24 hours across a clock change. */
-const dayAfter = (date: string) => new Date(Date.parse(`${date}T00:00:00Z`) + DAY_MS).toISOString().slice(0, 10)
 
 /**
  * Read a start and optional end the way the model gives them. A date with no
@@ -33,7 +29,8 @@ function resolveTimes(input: { start: string; end?: string; allDay: boolean }): 
   if (allDay) {
     const startsAt = localToUtc(start.slice(0, 10))
     const endBase = input.end ? localToUtc(input.end.trim().slice(0, 10)) : startsAt
-    const endsAt = endBase.getTime() > startsAt.getTime() ? endBase : new Date(startsAt.getTime() + DAY_MS)
+    // By the calendar: the day the clocks go back is 25 hours long, and 24 would end it where it began.
+    const endsAt = endBase.getTime() > startsAt.getTime() ? endBase : nextLocalMidnight(startsAt)
     return { startsAt, endsAt, allDay }
   }
   const startsAt = localToUtc(start)
@@ -159,7 +156,9 @@ export function familyCalendarTools(ctx: ToolContext) {
                 : existing.endsAt
             Object.assign(patch, {
               ...(toWholeDays ? { startsAt } : {}),
-              endsAt: endsAt.getTime() > startsAt.getTime() ? endsAt : new Date(startsAt.getTime() + (allDay ? DAY_MS : 3_600_000)),
+              endsAt: endsAt.getTime() > startsAt.getTime()
+                ? endsAt
+                : allDay ? nextLocalMidnight(startsAt) : new Date(startsAt.getTime() + 3_600_000),
               allDay,
             })
           }

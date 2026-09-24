@@ -1,6 +1,7 @@
 import type { AccountClient, CalendarEvent, MailAttachment, MailSummary } from './types'
 import { accessTokenFor } from './token'
 import { timezone } from '../env'
+import { localDateKey } from '../cron'
 import { htmlToPlainText } from '../html'
 
 const GRAPH = 'https://graph.microsoft.com/v1.0/me'
@@ -192,8 +193,17 @@ export function microsoftClient(memberId: number): AccountClient {
           body: input.description ? { contentType: 'Text', content: input.description } : undefined,
           location: input.location ? { displayName: input.location } : undefined,
           isAllDay: input.allDay ?? false,
-          start: { dateTime: input.start.toISOString().replace(/Z$/, ''), timeZone: 'UTC' },
-          end: { dateTime: input.end.toISOString().replace(/Z$/, ''), timeZone: 'UTC' },
+          // Graph takes an all-day event only as midnight to midnight in the
+          // zone it is given, so it gets the household's dates and zone.
+          ...(input.allDay
+            ? {
+                start: { dateTime: `${localDateKey(input.start)}T00:00:00`, timeZone: timezone() },
+                end: { dateTime: `${localDateKey(input.end)}T00:00:00`, timeZone: timezone() },
+              }
+            : {
+                start: { dateTime: input.start.toISOString().replace(/Z$/, ''), timeZone: 'UTC' },
+                end: { dateTime: input.end.toISOString().replace(/Z$/, ''), timeZone: 'UTC' },
+              }),
           attendees: input.attendees?.map((address) => ({
             emailAddress: { address },
             type: 'required',

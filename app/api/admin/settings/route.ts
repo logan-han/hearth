@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireAdmin } from '@/lib/auth/session'
-import { isManaged, setSecret, clearSecret, listSettings } from '@/lib/settings'
+import { isManaged, setSecret, clearSecret, listSettings, SETTING_META } from '@/lib/settings'
+import { isTimeZone } from '@/lib/env'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -21,12 +22,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Malformed request' }, { status: 400 })
   }
 
-  const { key, value } = body
+  const { key } = body
   // The allowlist is the security boundary: without it a session could set
   // DATABASE_URL and point the deployment at someone else's database.
   if (!key || !isManaged(key)) {
     return NextResponse.json({ error: `"${key}" is not an editable setting.` }, { status: 400 })
   }
+  // A pasted key brings its trailing newline with it.
+  const value = typeof body.value === 'string' ? body.value.trim() : body.value
+  const refused = value ? invalid(key, value) : null
+  if (refused) return NextResponse.json({ error: refused }, { status: 400 })
 
   try {
     if (value === undefined || value === '') await clearSecret(key, session.email)
@@ -36,4 +41,14 @@ export async function POST(req: Request) {
     console.error('[admin] could not save setting:', err)
     return NextResponse.json({ error: 'Could not save that setting.' }, { status: 500 })
   }
+}
+
+/** Why this value cannot be stored, or null. Checked here, since a value that gets in is read by every page. */
+function invalid(key: string, value: string): string | null {
+  if (key === 'TIMEZONE' && !isTimeZone(value)) {
+    return `"${value}" is not a time zone. Use a name like Australia/Melbourne or Europe/London.`
+  }
+  const options = (SETTING_META as Record<string, { options?: readonly string[] }>)[key]?.options
+  if (options && !options.includes(value)) return `${key} is one of: ${options.join(', ')}.`
+  return null
 }

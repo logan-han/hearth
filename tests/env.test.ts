@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { required, optional, appUrl, idSet, reasoningLevel } from '@/lib/env'
+import { required, optional, appUrl, idSet, reasoningLevel, timezone, isTimeZone } from '@/lib/env'
 
 const KEYS = ['APP_URL', 'VERCEL_PROJECT_PRODUCTION_URL', 'VERCEL_URL', 'SOME_KEY', 'LLM_REASONING']
 
@@ -53,6 +53,32 @@ describe('appUrl', () => {
 
   it('and finally to localhost for development', () => {
     expect(appUrl()).toBe('http://localhost:3000')
+  })
+})
+
+describe('timezone', () => {
+  it('is the household\'s zone, trimmed, and Melbourne when unset', () => {
+    process.env.TIMEZONE = ' Europe/London '
+    expect(timezone()).toBe('Europe/London')
+    delete process.env.TIMEZONE
+    expect(timezone()).toBe('Australia/Melbourne')
+  })
+
+  it('falls back to the default for a zone no clock knows, saying so once rather than throwing everywhere', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    process.env.TIMEZONE = 'Melbourne'
+    expect(timezone()).toBe('Australia/Melbourne')
+    expect(timezone()).toBe('Australia/Melbourne')
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"Melbourne" is not a time zone'))
+    delete process.env.TIMEZONE
+  })
+
+  it('knows a zone from a name that is not one', () => {
+    expect(isTimeZone('Australia/Perth')).toBe(true)
+    expect(isTimeZone('australia/perth')).toBe(true)
+    expect(isTimeZone('Perth')).toBe(false)
+    expect(isTimeZone('')).toBe(false)
   })
 })
 

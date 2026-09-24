@@ -41,6 +41,16 @@ export function formatLocal(d: Date, tz: string = timezone()): string {
   }).format(d)
 }
 
+/** The date after a YYYY-MM-DD date, by the calendar rather than by adding 24 hours across a clock change. */
+export function dayAfter(date: string): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10)
+}
+
+/** The local midnight after `d`'s local day: the exclusive end of an all-day event that starts then. */
+export function nextLocalMidnight(d: Date, tz: string = timezone()): Date {
+  return localToUtc(dayAfter(localDateKey(d, tz)), tz)
+}
+
 /** ISO-8601 date (YYYY-MM-DD) for `d` as seen in `tz`. */
 export function localDateKey(d: Date, tz: string = timezone()): string {
   return new Intl.DateTimeFormat('en-CA', {

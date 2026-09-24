@@ -444,6 +444,50 @@ describe('runAgent', () => {
     expect(r.model).toContain('openrouter')
   })
 
+  it('ends the turn, saying what was done, when a model fails after changing something', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    process.env.OPENROUTER_MODEL = 'minimax/minimax-m3:free'
+    // The first slot adds to the list and then hits its rate limit mid-turn.
+    generateText.mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
+      await opts.tools.add_to_list.execute({ items: ['milk', 'eggs'], list: 'shopping' }, {})
+      throw new Error('429 quota')
+    })
+    const r = await runAgent({ ...input, text: 'add milk and eggs to the shopping list' })
+    // No second slot, so nothing is added twice.
+    expect(generateText).toHaveBeenCalledTimes(1)
+    expect(r.text).toBe('Done: added to a list. My reply was cut off after that, so there is no need to ask again.')
+    const list = await q.findOrCreateList('shopping')
+    expect((await q.listContents(list.id)).map((i) => i.content)).toEqual(['milk', 'eggs'])
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('failed after changing something'), expect.stringContaining('429'))
+  })
+
+  it('ends the turn the same way when the model changed something and then said nothing', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText.mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
+      await opts.tools.add_to_list.execute({ items: ['batteries'], list: 'hardware' }, {})
+      await opts.tools.remember.execute({ fact: 'The smoke alarm takes 9V batteries' }, {})
+      return reply('')
+    })
+    const r = await runAgent(input)
+    expect(generateText).toHaveBeenCalledTimes(1)
+    expect(r.text).toBe('Done: added to a list, noted a household fact. My reply was cut off after that, so there is no need to ask again.')
+  })
+
+  it('still hands the turn on when nothing was changed, a refused write included', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText
+      .mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
+        // No member, so the draft is refused: nothing was written.
+        await opts.tools.draft_email.execute({ to: ['a@b.com'], subject: 's', body: 'b' }, {}).catch(() => null)
+        await opts.tools.recall.execute({}, {})
+        throw new Error('429 quota')
+      })
+      .mockResolvedValueOnce(reply('Second here.'))
+    const r = await runAgent(input)
+    expect(r.text).toBe('Second here.')
+    expect(r.model).toContain('openrouter')
+  })
+
   it('treats an empty completion as a failure worth retrying', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     generateText.mockResolvedValueOnce(reply('   ')).mockResolvedValueOnce(reply('Proper answer.'))
@@ -589,6 +633,19 @@ describe('a reply that reports a change no tool made', () => {
       .mockResolvedValueOnce(reply(''))
       .mockResolvedValueOnce(judged('claims_change'))
     expect((await runAgent(input)).text).toMatch(/^Replaced it\.\n\nI did not change anything this turn\./)
+  })
+
+  it('does not say nothing changed when the second try made the change before it failed', async () => {
+    generateText
+      .mockResolvedValueOnce(reply('Added milk.'))
+      .mockResolvedValueOnce(judged('claims_change'))
+      .mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
+        await opts.tools.add_to_list.execute({ items: ['milk'], list: 'shopping' }, {})
+        throw new Error('429 quota')
+      })
+    const r = await runAgent(input)
+    expect(r.text).toBe('Done: added to a list. My reply was cut off after that, so there is no need to ask again.')
+    expect(r.text).not.toContain('did not change anything')
   })
 
   it('says plainly that nothing changed when the second try fails outright', async () => {

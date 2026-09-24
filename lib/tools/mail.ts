@@ -1,7 +1,7 @@
 import { tool } from 'ai'
 import { z } from 'zod'
 import { clientFor, clientsFor, type MailFile } from '../providers'
-import { NotConnectedError } from '../providers/token'
+import { NotConnectedError, ReconnectNeededError } from '../providers/token'
 import type { Member } from '../db/schema'
 import { parseIcs, describeIcs } from '../ics-parse'
 import { createDraft, getDraft, markDraft, connectionsFor, allowedMembers, strangersIn, pendingDrafts } from '../db/queries'
@@ -315,6 +315,9 @@ export function mailTools(ctx: ToolContext) {
 function describe(e: unknown): string {
   if (e instanceof NotConnectedError) {
     return `No ${e.provider} account linked. Send /connect to link one.`
+  }
+  if (e instanceof ReconnectNeededError) {
+    return `The ${e.provider} link has expired or been revoked. Send /connect to link it again.`
   }
   return describeError(e)
 }

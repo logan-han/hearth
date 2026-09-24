@@ -1,6 +1,7 @@
 import type { AccountClient, CalendarEvent, DraftMail, MailAttachment, MailSummary } from './types'
 import { accessTokenFor } from './token'
 import { timezone } from '../env'
+import { localDateKey } from '../cron'
 import { htmlToPlainText } from '../html'
 
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me'
@@ -216,11 +217,13 @@ export function googleClient(memberId: number): AccountClient {
         summary: input.title,
         location: input.location,
         description: input.description,
+        // An all-day event is a pair of the household's dates, end exclusive.
+        // The UTC date of a Melbourne midnight is the day before.
         start: input.allDay
-          ? { date: input.start.toISOString().slice(0, 10) }
+          ? { date: localDateKey(input.start) }
           : { dateTime: input.start.toISOString(), timeZone: timezone() },
         end: input.allDay
-          ? { date: input.end.toISOString().slice(0, 10) }
+          ? { date: localDateKey(input.end) }
           : { dateTime: input.end.toISOString(), timeZone: timezone() },
         attendees: input.attendees?.map((email) => ({ email })),
       }

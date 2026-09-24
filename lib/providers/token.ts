@@ -1,5 +1,6 @@
-import { connectionFor, decryptRefreshToken } from '../db/queries'
-import { refreshAccessToken, type Provider } from '../oauth/providers'
+import { connectionFor, decryptRefreshToken, updateRefreshToken } from '../db/queries'
+import { refreshAccessToken, TokenRequestError, type Provider } from '../oauth/providers'
+import { describeError } from '../errors'
 
 type CacheEntry = { token: string; expiresAt: number }
 
@@ -14,6 +15,14 @@ export class NotConnectedError extends Error {
   }
 }
 
+/** The link is there but the provider no longer honours it: expired, revoked, or the password changed. */
+export class ReconnectNeededError extends Error {
+  constructor(public provider: Provider) {
+    super(`The ${provider} link has expired or been revoked`)
+    this.name = 'ReconnectNeededError'
+  }
+}
+
 export async function accessTokenFor(memberId: number, provider: Provider): Promise<string> {
   const key = `${memberId}:${provider}`
   const hit = cache.get(key)
@@ -23,9 +32,28 @@ export async function accessTokenFor(memberId: number, provider: Provider): Prom
   if (!conn) throw new NotConnectedError(provider)
 
   const refresh = await decryptRefreshToken(conn)
-  const res = await refreshAccessToken(provider, refresh)
+  let res
+  try {
+    res = await refreshAccessToken(provider, refresh)
+  } catch (err) {
+    if (err instanceof TokenRequestError && err.code === 'invalid_grant') throw new ReconnectNeededError(provider)
+    throw err
+  }
   const expiresAt = Date.now() + (res.expires_in ?? 3600) * 1000
   cache.set(key, { token: res.access_token, expiresAt })
+
+  // Microsoft hands back a new refresh token on every refresh, and each one
+  // lasts 90 days from its own issue. Keep presenting the one from the day of
+  // linking and the link dies three months in. Google usually sends none.
+  if (res.refresh_token && res.refresh_token !== refresh) {
+    try {
+      await updateRefreshToken(memberId, provider, res.refresh_token)
+    } catch (err) {
+      // The access token is good either way, and the old refresh token still
+      // works until its own expiry; the next refresh tries the save again.
+      console.error(`[token] could not store the rotated ${provider} refresh token:`, describeError(err))
+    }
+  }
   return res.access_token
 }
 

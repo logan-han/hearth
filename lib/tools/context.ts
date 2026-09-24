@@ -24,6 +24,12 @@ export type ToolContext = {
    * cannot send a draft that was waiting on someone's yes.
    */
   readUntrusted?: boolean
+  /**
+   * Every write tool that succeeded this turn, in order. Once there is one, a
+   * failing model does not hand the turn to the next in the chain: that one
+   * would start from the message again and do it all a second time.
+   */
+  wrote?: string[]
 }
 
 export function requireMember(ctx: ToolContext): Member {

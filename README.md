@@ -170,6 +170,12 @@ https://<your-deployment>/api/oauth/microsoft/callback
 Delegated permissions: `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`,
 `User.Read`, `offline_access`.
 
+Microsoft hands back a new refresh token every time one is used, each good for
+90 days from its own issue, and Hearth stores each one as it arrives. A link in
+use stays linked; one Microsoft stops honouring (a password change, a revoked
+consent) tells the member to send /connect again rather than failing with an
+AADSTS code.
+
 ### 4. Services
 
 - **Neon** — add Postgres from the Vercel Marketplace; it injects `DATABASE_URL`
@@ -245,8 +251,11 @@ endpoints are deprioritised under load, so the same model can serve in 5s or
 16s depending on the hour; a paid slot at the tail is what stops a bad hour
 turning into a failed reply. A rate limit, timeout,
 provider outage, or a model that cannot drive tools all collapse to the same
-behaviour: move to the next slot. Every model in the chain must support tool
-calling.
+behaviour: move to the next slot. The one exception is a turn that has already
+changed something (added to a list, set up a reminder, sent an invitation):
+the next slot would start from the message again and do it twice, so the turn
+ends there with a line saying what was done. Every model in the chain must
+support tool calling.
 
 `LLM_REASONING` (none, minimal, low, medium, high) is passed through as
 `reasoning_effort` when set. Leave it empty for the provider default. Gemini's
@@ -651,8 +660,12 @@ live dot beside the keys that drive each service.
 
 Settings groups fold to a line each, showing the live dots, how many keys are
 set and the values that are safe to show; a group opens on a click, or on its
-own when an integration in it is failing. Editable settings are a **fixed
-allowlist**. `DATABASE_URL`, `TOKEN_ENC_KEY`
+own when an integration in it is failing. A value is trimmed and checked
+before it is stored: a time zone has to be one a clock knows, and a setting
+with a fixed set of answers takes only those, because a bad time zone that
+got in would break every page that shows a date, Settings included. One that
+somehow gets in anyway falls back to Melbourne time with a warning in the log.
+Editable settings are a **fixed allowlist**. `DATABASE_URL`, `TOKEN_ENC_KEY`
 and `ADMIN_EMAILS` are deliberately not on it, so a stolen session cannot
 repoint the deployment at another database or lock the owner out. The Telegram
 token, webhook secret and founding members *are* editable — an admin session

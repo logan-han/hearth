@@ -274,6 +274,14 @@ export async function saveConnection(input: {
     })
 }
 
+/** A refreshed link's replacement refresh token, stored the same way the first one was. */
+export async function updateRefreshToken(memberId: number, provider: Provider, refreshToken: string) {
+  await db()
+    .update(connections)
+    .set({ refreshToken: await encrypt(refreshToken), updatedAt: new Date() })
+    .where(and(eq(connections.memberId, memberId), eq(connections.provider, provider)))
+}
+
 export async function connectionsFor(memberId: number): Promise<Connection[]> {
   return db().select().from(connections).where(eq(connections.memberId, memberId))
 }

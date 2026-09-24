@@ -287,14 +287,15 @@ describe('google calendar', () => {
     expect(events[1]).toMatchObject({ title: '(untitled)', allDay: true, start: '2026-09-02' })
   })
 
-  it('sends a date-only payload for an all-day event', async () => {
-    fetchMock.mockResolvedValueOnce(reply({ id: 'x', summary: 'Trip' }))
+  it('sends an all-day event as the household\'s dates, not the UTC dates of its midnights', async () => {
+    fetchMock.mockResolvedValueOnce(reply({ id: 'x', summary: 'School photos' }))
+    // Melbourne midnights, as the tool hands them over: 13:00 UTC the day before.
     await googleClient(1).createEvent({
-      title: 'Trip', start: new Date('2026-09-01T00:00:00Z'), end: new Date('2026-09-02T00:00:00Z'), allDay: true,
+      title: 'School photos', start: new Date('2026-10-09T13:00:00Z'), end: new Date('2026-10-10T13:00:00Z'), allDay: true,
     })
     const sent = JSON.parse(String(lastCall()[1].body))
-    expect(sent.start).toEqual({ date: '2026-09-01' })
-    expect(sent.end.dateTime).toBeUndefined()
+    expect(sent.start).toEqual({ date: '2026-10-10' })
+    expect(sent.end).toEqual({ date: '2026-10-11' })
   })
 
   it('sends attendees as objects', async () => {
@@ -491,6 +492,17 @@ describe('microsoft graph', () => {
     expect(sent.body).toEqual({ contentType: 'Text', content: 'Check-up' })
     expect(sent.location).toEqual({ displayName: 'Clinic' })
     expect(created).toMatchObject({ title: 'Dentist', location: 'Clinic' })
+  })
+
+  it('sends an all-day event as midnight to midnight in the household\'s zone, which is all Graph accepts', async () => {
+    fetchMock.mockResolvedValueOnce(reply({ id: 'e', subject: 'Camp' }))
+    await microsoftClient(1).createEvent({
+      title: 'Camp', start: new Date('2026-09-24T14:00:00Z'), end: new Date('2026-09-27T14:00:00Z'), allDay: true,
+    })
+    const sent = JSON.parse(String(lastCall()[1].body))
+    expect(sent.isAllDay).toBe(true)
+    expect(sent.start).toEqual({ dateTime: '2026-09-25T00:00:00', timeZone: 'Australia/Melbourne' })
+    expect(sent.end).toEqual({ dateTime: '2026-09-28T00:00:00', timeZone: 'Australia/Melbourne' })
   })
 
   it('sends attendees as required participants', async () => {

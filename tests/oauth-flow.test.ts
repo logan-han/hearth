@@ -22,7 +22,7 @@ vi.mock('next/headers', () => ({ cookies: jar.cookies }))
 
 const { startAuth, completeAuth } = await import('@/lib/oauth/flow')
 const { signState } = await import('@/lib/oauth/state')
-const { accessTokenFor, clearTokenCache, NotConnectedError } = await import('@/lib/providers/token')
+const { accessTokenFor, clearTokenCache, NotConnectedError, ReconnectNeededError } = await import('@/lib/providers/token')
 const { clientsFor, clientFor } = await import('@/lib/providers')
 
 const fetchMock = vi.fn()
@@ -280,6 +280,51 @@ describe('access tokens', () => {
     await accessTokenFor(m.id, 'google')
     await accessTokenFor(m.id, 'google')
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the refresh token Microsoft rotates in, so the link outlives the first one\'s 90 days', async () => {
+    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
+    await q.saveConnection({ memberId: m.id, provider: 'microsoft', email: 'r@outlook.com', refreshToken: 'day-0', scopes: null })
+    fetchMock.mockResolvedValueOnce(tokenReply({ access_token: 'a1', refresh_token: 'day-1', expires_in: 10 }))
+    expect(await accessTokenFor(m.id, 'microsoft')).toBe('a1')
+    expect(await q.decryptRefreshToken((await q.connectionFor(m.id, 'microsoft'))!)).toBe('day-1')
+
+    // The next refresh presents the new one, not the one from the day of linking.
+    fetchMock.mockResolvedValueOnce(tokenReply({ access_token: 'a2', refresh_token: 'day-2', expires_in: 3600 }))
+    expect(await accessTokenFor(m.id, 'microsoft')).toBe('a2')
+    expect(new URLSearchParams(String((fetchMock.mock.calls[1][1] as RequestInit).body)).get('refresh_token')).toBe('day-1')
+    expect(await q.decryptRefreshToken((await q.connectionFor(m.id, 'microsoft'))!)).toBe('day-2')
+  })
+
+  it('leaves the stored token alone when the provider sends none back, or the same one', async () => {
+    const m = await linkGoogle()
+    const before = (await q.connectionFor(m.id, 'google'))!.refreshToken
+    fetchMock.mockResolvedValueOnce(tokenReply({ access_token: 'fresh', refresh_token: 'r', expires_in: 10 }))
+    await accessTokenFor(m.id, 'google')
+    fetchMock.mockResolvedValueOnce(tokenReply({ access_token: 'fresh', expires_in: 10 }))
+    await accessTokenFor(m.id, 'google')
+    expect((await q.connectionFor(m.id, 'google'))!.refreshToken).toBe(before)
+  })
+
+  it('still hands out the access token when the rotated one cannot be stored', async () => {
+    const m = await linkGoogle()
+    const { db } = await import('@/lib/db')
+    vi.spyOn(db(), 'update').mockImplementationOnce(() => { throw new Error('connections locked') })
+    fetchMock.mockResolvedValueOnce(tokenReply({ access_token: 'fresh', refresh_token: 'rotated', expires_in: 3600 }))
+    expect(await accessTokenFor(m.id, 'google')).toBe('fresh')
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('could not store the rotated google'), 'connections locked')
+  })
+
+  it('says the link needs redoing when the provider refuses the refresh token outright', async () => {
+    const m = await linkGoogle()
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 400, text: async () => '{"error":"invalid_grant","error_description":"AADSTS700082: expired"}' })
+    const err = await accessTokenFor(m.id, 'google').catch((e) => e)
+    expect(err).toBeInstanceOf(ReconnectNeededError)
+    expect(err.provider).toBe('google')
+
+    // Anything else stays the error it was.
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 503, text: async () => 'upstream down' })
+    await expect(accessTokenFor(m.id, 'google')).rejects.toThrow(/token request failed \(503\): upstream down/)
   })
 
   it('keeps members apart', async () => {

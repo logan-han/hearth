@@ -99,6 +99,14 @@ export type TokenResponse = {
   id_token?: string
 }
 
+/** A token endpoint's refusal, with the OAuth error code it gave (invalid_grant, say) when it gave one. */
+export class TokenRequestError extends Error {
+  constructor(message: string, public status: number, public code: string | null) {
+    super(message)
+    this.name = 'TokenRequestError'
+  }
+}
+
 async function tokenRequest(p: Provider, body: Record<string, string>): Promise<TokenResponse> {
   const c = providerConfig(p)
   const res = await fetch(c.tokenUrl, {
@@ -111,7 +119,16 @@ async function tokenRequest(p: Provider, body: Record<string, string>): Promise<
     }),
   })
   const text = await res.text()
-  if (!res.ok) throw new Error(`${c.label} token request failed (${res.status}): ${text.slice(0, 400)}`)
+  if (!res.ok) {
+    let code: string | null = null
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown }
+      if (typeof parsed.error === 'string') code = parsed.error
+    } catch {
+      // Not JSON; the status and the text are all there is.
+    }
+    throw new TokenRequestError(`${c.label} token request failed (${res.status}): ${text.slice(0, 400)}`, res.status, code)
+  }
   return JSON.parse(text) as TokenResponse
 }
 

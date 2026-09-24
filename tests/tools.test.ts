@@ -107,6 +107,13 @@ describe('mail tools', () => {
     expect(String(r.error)).toContain('/connect')
   })
 
+  it('turns a link the provider stopped honouring into the same advice', async () => {
+    const { ReconnectNeededError } = await import('@/lib/providers/token')
+    readMail.mockRejectedValue(new ReconnectNeededError('microsoft'))
+    const r = await call(mailTools(ctx), 'read_email', { id: 'x', provider: 'microsoft' })
+    expect(String(r.error)).toBe('The microsoft link has expired or been revoked. Send /connect to link it again.')
+  })
+
   it('drafts without sending', async () => {
     const r = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com'], subject: 's', body: 'b' })
     expect(r.draft_id).toBeDefined()
@@ -465,6 +472,34 @@ describe('calendar tools', () => {
     expect(arg.end.getTime() - arg.start.getTime()).toBe(3_600_000)
   })
 
+  it('reads a date alone as an all-day event over the household\'s own day', async () => {
+    createEvent.mockResolvedValue({ id: 'e', title: 'School photos', start: '', end: '', allDay: true })
+    // 10 October is after Melbourne's clocks go forward, so its midnight is 13:00 UTC the day before.
+    const r = await call(calendarTools(ctx), 'create_calendar_event', { title: 'School photos', start: '2026-10-10', all_day: false })
+    const arg = createEvent.mock.calls[0][0] as { start: Date; end: Date; allDay: boolean }
+    expect(arg.allDay).toBe(true)
+    expect(arg.start.toISOString()).toBe('2026-10-09T13:00:00.000Z')
+    expect(arg.end.toISOString()).toBe('2026-10-10T13:00:00.000Z')
+    expect(r.start_local).toBe('Sat, 10 Oct 2026')
+  })
+
+  it('keeps an all-day end that is later, and makes one that is not a single day', async () => {
+    createEvent.mockResolvedValue({ id: 'e', title: 'Camp', start: '', end: '', allDay: true })
+    await call(calendarTools(ctx), 'create_calendar_event', { title: 'Camp', start: '2026-09-25', end: '2026-09-28', all_day: true })
+    await call(calendarTools(ctx), 'create_calendar_event', { title: 'Fete', start: '2026-09-26T09:00', end: '2026-09-26', all_day: true })
+    const [camp, fete] = createEvent.mock.calls.map(([a]) => a as { start: Date; end: Date })
+    expect([camp.start.toISOString(), camp.end.toISOString()]).toEqual(['2026-09-24T14:00:00.000Z', '2026-09-27T14:00:00.000Z'])
+    expect([fete.start.toISOString(), fete.end.toISOString()]).toEqual(['2026-09-25T14:00:00.000Z', '2026-09-26T14:00:00.000Z'])
+  })
+
+  it('makes the day the clocks go back a whole day, not 24 hours of it', async () => {
+    createEvent.mockResolvedValue({ id: 'e', title: 'Swap', start: '', end: '', allDay: true })
+    // 5 April 2026 is 25 hours long in Melbourne.
+    await call(calendarTools(ctx), 'create_calendar_event', { title: 'Swap', start: '2026-04-05', all_day: true })
+    const arg = createEvent.mock.calls[0][0] as { start: Date; end: Date }
+    expect(arg.end.getTime() - arg.start.getTime()).toBe(25 * 3_600_000)
+  })
+
   it('surfaces a create failure', async () => {
     createEvent.mockRejectedValue(new Error('calendar full'))
     const r = await call(calendarTools(ctx), 'create_calendar_event', { title: 'T', start: '2026-08-27T09:00', all_day: false })
@@ -482,6 +517,13 @@ describe('calendar tools', () => {
     listEvents.mockRejectedValue(new NotConnectedError('google'))
     const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27T00:00', to: '2026-08-28T00:00' })
     expect(String((r.accounts as { error?: string }[])[0].error)).toContain('/connect')
+  })
+
+  it('turns a link the provider stopped honouring into the same nudge', async () => {
+    const { ReconnectNeededError } = await import('@/lib/providers/token')
+    listEvents.mockRejectedValue(new ReconnectNeededError('google'))
+    const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27T00:00', to: '2026-08-28T00:00' })
+    expect(String((r.accounts as { error?: string }[])[0].error)).toContain('expired or been revoked. Send /connect')
   })
 
   it('creates on the named provider, honouring an explicit end', async () => {
@@ -529,6 +571,12 @@ describe('family calendar tools', () => {
     await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Trip', start: '2026-08-29', all_day: true })
     const [e] = await q.listFamilyEvents(new Date('2026-01-01'), new Date('2027-01-01'))
     expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(86_400_000)
+  })
+
+  it('makes an all-day family event on the day the clocks go back a whole day, not 24 hours of it', async () => {
+    await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Swap day', start: '2026-04-05', all_day: true })
+    const [e] = await q.listFamilyEvents(new Date('2026-04-01'), new Date('2026-04-10'))
+    expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(25 * 3_600_000)
   })
 
   it('spans several days when an all-day event is given an explicit later end', async () => {

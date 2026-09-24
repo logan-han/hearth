@@ -92,6 +92,27 @@ describe('the settings API respects the allowlist', () => {
     }
   })
 
+  it('refuses a time zone no clock knows, which would otherwise break every page, this one included', async () => {
+    for (const value of ['Melbourne', 'Australia/Melbourn']) {
+      const res = await post({ key: 'TIMEZONE', value })
+      expect(res.status).toBe(400)
+      expect((await res.json()).error).toContain('is not a time zone')
+    }
+    expect(process.env.TIMEZONE ?? '').not.toContain('Melbourn')
+    const ok = await post({ key: 'TIMEZONE', value: ' Australia/Sydney\n' })
+    expect(ok.status).toBe(200)
+    expect(process.env.TIMEZONE).toBe('Australia/Sydney')
+  })
+
+  it('holds a setting with a fixed set of answers to that set, and trims what is pasted', async () => {
+    const bad = await post({ key: 'UNITS', value: 'furlongs' })
+    expect(bad.status).toBe(400)
+    expect((await bad.json()).error).toContain('metric, imperial')
+    expect((await post({ key: 'UNITS', value: 'imperial' })).status).toBe(200)
+    expect((await post({ key: 'TAVILY_API_KEY', value: '  tvly-pasted\n' })).status).toBe(200)
+    expect(process.env.TAVILY_API_KEY).toBe('tvly-pasted')
+  })
+
   it('accepts the Telegram settings, which are dashboard-managed now', async () => {
     const res = await post({ key: 'ALLOWED_TELEGRAM_IDS', value: '111, 222' })
     expect(res.status).toBe(200)
