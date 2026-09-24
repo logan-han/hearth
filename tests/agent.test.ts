@@ -363,6 +363,16 @@ describe('runAgent', () => {
     expect(e).toMatchObject({ title: 'Scouts Cuboree', allDay: true })
   })
 
+  it('will not send a waiting draft in a turn that came with a file, which is outside text like any email', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+    const draft = await q.createDraft({ chatId: '-100', memberId: member.id, provider: 'google', to: ['a@b.com'], subject: 's', body: 'b' })
+    await runAgent({ ...input, member, attachments: [{ bytes: new Uint8Array([1]), mediaType: 'image/png', kind: 'photo' }] })
+    const out = await generateText.mock.calls[0][0].tools.send_email.execute({ draft_id: draft.id, confirmed: true }, {})
+    expect(String(out.error)).toContain('outside the household')
+    expect((await q.getDraft(draft.id))!.status).toBe('pending')
+  })
+
   it('recognises a calendar by its content when the type and name say nothing', async () => {
     generateText.mockResolvedValue(reply('ok'))
     const ics = 'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:Camp\r\nDTSTART;VALUE=DATE:20261003\r\nEND:VEVENT\r\nEND:VCALENDAR'

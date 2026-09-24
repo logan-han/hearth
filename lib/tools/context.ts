@@ -17,6 +17,13 @@ export type ToolContext = {
    * least of all an instruction inside an email it just read, is that.
    */
   draftedThisTurn?: Set<number>
+  /**
+   * Set once anything from outside the household has been read this turn: mail,
+   * a web page, a search, Notion, the board, a calendar invite, an attached
+   * file. send_email refuses after that, so a sentence planted in any of them
+   * cannot send a draft that was waiting on someone's yes.
+   */
+  readUntrusted?: boolean
 }
 
 export function requireMember(ctx: ToolContext): Member {

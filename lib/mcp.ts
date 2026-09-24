@@ -20,6 +20,8 @@ import { formatLocal } from './cron'
 import { timezone } from './env'
 import { describeError } from './errors'
 import { send } from './telegram'
+import { unaccountedIn } from './headcount'
+import { isGroupChat } from './watchers'
 import type { Member } from './db/schema'
 
 export const SERVER_INFO = { name: 'hearth', version: '1.0.0' }
@@ -131,8 +133,15 @@ export async function callTool(name: string, input: unknown, member: Member): Pr
 async function speak(ctx: ToolContext): Promise<string> {
   if (ctx.notices.length === 0) return ''
   try {
-    await send(ctx.chatId, ctx.notices.join('\n'))
-    return ''
+    // Nobody in the room asked for this line, so it is held to the watchers'
+    // rule: the group only while Telegram's head count is all family, and
+    // otherwise the member's own chat, where it still gets said.
+    const own = ctx.member?.telegramUserId
+    const room = own && isGroupChat(ctx.chatId) && (await unaccountedIn(ctx.chatId)) !== 0 ? own : ctx.chatId
+    await send(room, ctx.notices.join('\n'))
+    return room === ctx.chatId
+      ? ''
+      : 'Hearth posted this in your own chat rather than the family group, which has people in it I cannot account for.'
   } catch (err) {
     return `Hearth could not post this in the family chat (${describeError(err)}), so nobody there has been told. Say it yourself.`
   }

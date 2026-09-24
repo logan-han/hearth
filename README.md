@@ -323,7 +323,7 @@ SSO redirect.
 | `/connect` | DMs a personal link to link Google or Microsoft |
 | `/accounts` | List linked accounts |
 | `/unlink google` | Remove an account |
-| `/calendar` | The family calendar subscription URL; `/calendar new` (admin) replaces it if it has got out |
+| `/calendar` | The family calendar subscription URL; `/calendar new` (admin) replaces it if it has got out, and DMs the new one |
 | `/mcp` | DMs a personal key for the MCP endpoint; `/mcp new` replaces it, `/mcp off` revokes it |
 | `/whoami` | Your Telegram id |
 | `/members` | Who the bot answers to |
@@ -706,6 +706,9 @@ open questions with the ids the other tools want.
 Nothing changes about how the household hears of it. A tool that announces
 itself still says so in the family chat, so an event added through Claude turns
 up in the group and not only on the calendar, and mail still waits for a yes.
+Nobody in the group asked for that line, so it is held to the watchers' rule:
+while Telegram's head count there includes people the household cannot account
+for, it goes to the member's own chat with the bot instead.
 The room is the household's own group, or the member's DM with the bot while
 there is someone unrecognised in it. The transport is stateless streamable HTTP:
 nothing is remembered between calls, and an idle endpoint costs nothing.
@@ -759,24 +762,30 @@ scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
   would hand them the feed. Someone who never speaks is caught by Telegram's
   head count before anything is posted unasked.
 - Whoever a private chat belongs to must still be allowed for any automation to
-  post there. Revoking someone stops their DM watchers; a group watcher they set
-  up keeps running for the room, but never as them.
+  post there. Revoking someone stops their DM watchers and pauses the custom
+  automations they wrote, whose instructions are now a stranger's words run with
+  the household's read tools (deleting them pauses those at once). A ready-made
+  watcher they switched on in a group keeps running for the room, but never as
+  them.
 - OAuth `state` is a 10-minute signed JWT bound to one Telegram user, and each
   consumer says which purpose it takes: the sign-in state anyone can ask for
   never passes as a member's `/connect` link, and a link shows nothing to a
   member revoked since it was sent.
 - Refresh tokens are AES-256-GCM encrypted with `TOKEN_ENC_KEY`.
 - The ICS feed sits behind a long random token, compared without early exit.
-  `/calendar new` replaces the token if the URL gets out; everyone subscribed
-  then subscribes again.
+  `/calendar new` replaces the token if the URL gets out, and sends the new one
+  to the admin by DM to pass on; everyone subscribed then subscribes again.
 - `/api/mcp` accepts only a bearer key it can match to an allowed member, and
   keys are stored as SHA-256 digests, so the store cannot hand one back out.
 - `/api/tick` verifies the QStash signature.
 - Email is never sent without a human "yes": `draft_email` and `send_email` are
   separate tools, the draft is persisted, and the send claims it atomically so a
-  repeated confirmation cannot send twice. `send_email` refuses a draft written
-  in the same turn, so the yes has to come from a person in a later message,
-  never from the model, and never from an instruction inside an email it read.
+  repeated confirmation cannot send twice. In a chat, `send_email` refuses a
+  draft written in the same turn, and refuses anything at all in a turn that has
+  read mail, a web page, a search result, Notion, the board, a calendar invite or
+  an attached file, so the yes has to come from a person's own message and never
+  from an instruction planted in something the bot read. Over MCP each call
+  stands alone, so there the client's own approval of each tool call is the gate.
 
 ## Development
 

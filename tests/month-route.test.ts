@@ -39,6 +39,14 @@ describe('the month API', () => {
     expect((await get('2026-09')).status).toBe(401)
   })
 
+  it('turns away a cookie whose member has since been revoked', async () => {
+    await q.saveMember({ telegramUserId: '222', name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
+    await createSession({ email: 'ada@hearth.example', name: 'Ada', provider: 'google', role: 'member' })
+    expect((await get('2026-09')).status).toBe(200)
+    await q.setMemberAllowed('222', false)
+    expect((await get('2026-09')).status).toBe(401)
+  })
+
   it('serves a month to any recognised member, not just admins', async () => {
     await q.saveMember({ telegramUserId: '222', name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
     await createSession({ email: 'ada@hearth.example', name: 'Ada', provider: 'google', role: 'member' })

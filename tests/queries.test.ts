@@ -628,6 +628,21 @@ describe('settings and the calendar token', () => {
     expect(await q.calendarToken()).toBe(first)
   })
 
+  it('pauses a deleted member\'s own automations before the row that says whose they were goes', async () => {
+    const m = await q.upsertMember('222', 'Nanny', { allowed: true })
+    const at = new Date('2026-09-20T00:00:00Z')
+    const own = await q.addAutomation({ chatId: '-100', memberId: m.id, label: 'mine', cronExpr: '0 9 * * *', instruction: 'x', nextRunAt: at })
+    const watcher = await q.addAutomation({ chatId: '222', memberId: m.id, label: '2Up', cronExpr: '0 9 * * *', instruction: 'y', kind: 'money', nextRunAt: at })
+    const theirs = await q.addAutomation({ chatId: '-100', memberId: null, label: 'household', cronExpr: '0 9 * * *', instruction: 'z', nextRunAt: at })
+    expect(await q.deleteMember('222')).toBe(true)
+    const rows = await q.listAutomations()
+    expect(rows.find((a) => a.id === own.id)).toMatchObject({ enabled: false, memberId: null })
+    // A ready-made watcher's words are the code's, and the household's own automations are untouched.
+    expect(rows.find((a) => a.id === watcher.id)!.enabled).toBe(true)
+    expect(rows.find((a) => a.id === theirs.id)!.enabled).toBe(true)
+    expect(await q.deleteMember('222')).toBe(false)
+  })
+
   it('replaces the calendar token when rotated, and keeps the new one', async () => {
     const first = await q.calendarToken()
     const second = await q.rotateCalendarToken()

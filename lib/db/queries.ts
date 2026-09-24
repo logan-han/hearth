@@ -907,6 +907,16 @@ export async function saveMember(input: {
 }
 
 export async function deleteMember(telegramUserId: string): Promise<boolean> {
+  // Their own scheduled instructions stop with them. Deleting the row sets
+  // member_id to null, after which a custom automation would read as the
+  // household's, so it is paused while it is still known to be theirs.
+  const [member] = await db().select({ id: members.id }).from(members).where(eq(members.telegramUserId, telegramUserId)).limit(1)
+  if (member) {
+    await db()
+      .update(automations)
+      .set({ enabled: false })
+      .where(and(eq(automations.memberId, member.id), isNull(automations.kind)))
+  }
   const rows = await db().delete(members).where(eq(members.telegramUserId, telegramUserId)).returning()
   return rows.length > 0
 }

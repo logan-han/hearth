@@ -14,8 +14,17 @@ import { browseTools } from './browse'
 import { routerTools, CORE_TOOLS, TOOL_GROUPS } from './router'
 import type { ToolContext } from './context'
 
+/** Tools whose results carry text written outside the household. See ToolContext.readUntrusted. */
+const UNTRUSTED_SOURCES = new Set([
+  'web_search', 'read_url',
+  'list_email', 'new_mail', 'read_email', 'read_attachment',
+  'list_calendar',
+  'notion_search', 'notion_read_page', 'notion_query_database',
+  'jira_search', 'jira_board_summary', 'jira_read_issue',
+])
+
 export function buildTools(ctx: ToolContext) {
-  return {
+  return markUntrusted(ctx, {
     ...searchTools,
     ...mailTools(ctx),
     ...calendarTools(ctx),
@@ -30,7 +39,25 @@ export function buildTools(ctx: ToolContext) {
     ...weatherTools(ctx),
     ...browseTools(ctx),
     ...routerTools(),
+  })
+}
+
+/** Wrap each outside-content tool so calling it marks the turn as having read something untrusted. */
+function markUntrusted<T extends Record<string, { execute?: (...args: never[]) => unknown }>>(ctx: ToolContext, tools: T): T {
+  const out: Record<string, unknown> = { ...tools }
+  for (const name of UNTRUSTED_SOURCES) {
+    const t = tools[name]
+    if (!t?.execute) continue
+    const execute = t.execute
+    out[name] = {
+      ...t,
+      execute: (...args: never[]) => {
+        ctx.readUntrusted = true
+        return execute(...args)
+      },
+    }
   }
+  return out as T
 }
 
 export type { ToolContext }

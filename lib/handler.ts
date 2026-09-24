@@ -397,21 +397,26 @@ async function handleCommand(c: TelegramContext, member: Member): Promise<boolea
     }
 
     case '/calendar': {
-      const rotating = c.text.split(/\s+/)[1]?.toLowerCase() === 'new'
-      if (rotating && !member.isAdmin) {
+      const howTo = 'Google Calendar → Other calendars → From URL. Apple/Outlook → Add calendar → Subscribe from web.'
+      if (c.text.split(/\s+/)[1]?.toLowerCase() !== 'new') {
+        const url = `${appUrl()}/api/calendar/${await calendarToken()}/family.ics`
+        await send(c.chatId, `Subscribe to the family calendar with this URL:\n\`${url}\`\n\n${howTo}`)
+        return true
+      }
+      if (!member.isAdmin) {
         await send(c.chatId, 'Only an admin can do that.')
         return true
       }
-      const token = rotating ? await rotateCalendarToken() : await calendarToken()
-      const url = `${appUrl()}/api/calendar/${token}/family.ics`
-      await send(
-        c.chatId,
-        (rotating
-          ? 'The old calendar URL has stopped working (a cached copy can answer for up to half an hour). ' +
-            'Everyone subscribed needs to subscribe again with this one:\n'
-          : 'Subscribe to the family calendar with this URL:\n') +
-          `\`${url}\`\n\nGoogle Calendar → Other calendars → From URL. Apple/Outlook → Add calendar → Subscribe from web.`,
-      )
+      // The old URL got out somewhere, quite possibly in this room, so the new
+      // one goes to the admin alone to pass on.
+      const url = `${appUrl()}/api/calendar/${await rotateCalendarToken()}/family.ics`
+      const note = 'The old calendar URL has stopped working (a cached copy can answer for up to half an hour). '
+      try {
+        await send(c.userId, `${note}Everyone subscribed needs to subscribe again with this one:\n\`${url}\`\n\n${howTo}`)
+        if (c.chatType !== 'private') await send(c.chatId, `${note}${c.userName}, I have sent you the new one in a DM to pass on.`)
+      } catch {
+        await send(c.chatId, `${note}${c.userName}, start a direct message with me and send /calendar there for the new one.`)
+      }
       return true
     }
 

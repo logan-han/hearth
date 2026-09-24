@@ -6,6 +6,8 @@ import type { Member } from '@/lib/db/schema'
 
 const send = vi.fn(async () => {})
 vi.mock('@/lib/telegram', () => ({ send }))
+const unaccountedIn = vi.hoisted(() => vi.fn(async (_chatId: string): Promise<number | null> => 0))
+vi.mock('@/lib/headcount', () => ({ unaccountedIn }))
 
 const hydrateSecrets = vi.fn(async () => {})
 vi.mock('@/lib/settings', async (orig) => {
@@ -112,6 +114,17 @@ describe('calling a tool', () => {
     )
     expect(send).toHaveBeenCalledWith('-100', expect.stringContaining('Swimming'))
     expect(text(result)).toContain('Swimming')
+  })
+
+  it('says it in the member\'s own chat instead when the group holds people nobody has accounted for', async () => {
+    for (const count of [3, null]) {
+      send.mockClear()
+      unaccountedIn.mockResolvedValueOnce(count)
+      const result = await callTool('add_family_event', { title: `Swimming ${count}`, start: '2026-09-20T10:00', all_day: false }, member)
+      expect(send).toHaveBeenCalledTimes(1)
+      expect(send).toHaveBeenCalledWith(member.telegramUserId, expect.stringContaining('Swimming'))
+      expect(text(result)).toContain('your own chat rather than the family group')
+    }
   })
 
   it('withdraws the promise when the family could not be told', async () => {

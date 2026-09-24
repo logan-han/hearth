@@ -3,7 +3,7 @@ import { Receiver } from '@upstash/qstash'
 import {
   dueAutomations, claimAutomation, allowedMembers, recordMessage, strangersIn,
   messagesSince, getSetting, setSetting, retireStaleProposals, recordTick,
-  unaskedQuestions, markQuestionsAsked, memberByTelegramId,
+  unaskedQuestions, markQuestionsAsked, memberByTelegramId, setAutomationEnabled,
 } from '@/lib/db/queries'
 import { localDateKey, tzOffsetMs, nextRun } from '@/lib/cron'
 import { timezone, idSet } from '@/lib/env'
@@ -441,32 +441,37 @@ async function allowedPerson(telegramUserId: string): Promise<boolean> {
 }
 
 /**
- * True when a group holds people the household cannot account for, so nothing
- * goes in unasked. An admin hears once per change in the count rather than
- * every hour the room stays that way.
+ * Tell an admin why a room is being left alone, once per change in what
+ * Telegram says about it rather than every hour it stays that way. `what` is
+ * the thing held back: a post, or the watchers a new room would have had.
  */
-async function heldForHeadcount(a: Automation): Promise<boolean> {
-  const unaccounted = await unaccountedIn(a.chatId)
-  const key = `unaccounted:${a.chatId}`
+async function sayUnaccounted(chatId: string, room: string, unaccounted: number | null, what: string): Promise<void> {
+  const key = `unaccounted:${chatId}`
   const said = await getSetting(key)
   if (unaccounted === 0) {
     if (said && said !== '0') await setSetting(key, '0')
-    return false
+    return
   }
   const count = unaccounted === null ? 'unknown' : String(unaccounted)
-  console.info(`[tick] ${a.label}: ${count} unrecognised people in chat ${a.chatId}, not posting`)
-  if (said !== count) {
-    await setSetting(key, count)
-    await tellAdminQuietly(
-      undefined,
-      unaccounted === null
-        ? `**${a.label}** was not posted in chat ${a.chatId}: Telegram would not say who is there. ` +
-            'I may have been removed, or the group hides its members; making me an admin there lets me see them.'
-        : `**${a.label}** was not posted in chat ${a.chatId}: Telegram counts ${unaccounted} ${unaccounted === 1 ? 'person' : 'people'} ` +
-            'there I do not recognise. Allow them (`/allow <id>`, or reply to one of their messages with `/allow`) ' +
-            'or remove them, and it posts again.',
-    )
-  }
+  if (said === count) return
+  await setSetting(key, count)
+  await tellAdminQuietly(
+    undefined,
+    unaccounted === null
+      ? `${what} in ${room}: Telegram would not say who is there. ` +
+          'I may have been removed, or the group hides its members; making me an admin there lets me see them.'
+      : `${what} in ${room}: Telegram counts ${unaccounted} ${unaccounted === 1 ? 'person' : 'people'} there ` +
+          'I cannot match to an allowed member. If they are family, have them send a message there or `/allow` them; ' +
+          'otherwise remove them. Making me an admin in the group also lets me see everyone who is in it.',
+  )
+}
+
+/** True when a group holds people the household cannot account for, so nothing goes in unasked. */
+async function heldForHeadcount(a: Automation): Promise<boolean> {
+  const unaccounted = await unaccountedIn(a.chatId)
+  await sayUnaccounted(a.chatId, `chat ${a.chatId}`, unaccounted, `**${a.label}** was not posted`)
+  if (unaccounted === 0) return false
+  console.info(`[tick] ${a.label}: ${unaccounted ?? 'unknown'} unrecognised people in chat ${a.chatId}, not posting`)
   return true
 }
 
@@ -512,8 +517,24 @@ async function runDue(): Promise<{ ran: number; skipped: number }> {
       const creator = a.memberId
         ? (await db().select().from(schema.members).where(eq(schema.members.id, a.memberId)).limit(1))[0]
         : undefined
+      // A custom automation runs its author's own words with the household's
+      // read tools. With the author revoked, those words are a stranger's, so
+      // it is paused rather than run (deleting a member pauses theirs up front,
+      // before the row that says whose it was goes). A ready-made watcher's
+      // instruction comes from code, and the room keeps it.
+      if (!isWatcherKind(a.kind) && a.memberId && !creator?.allowed) {
+        await setAutomationEnabled(a.id, false)
+        console.info(`[tick] ${a.label}: whoever set it up is no longer allowed, paused`)
+        await tellAdminQuietly(
+          undefined,
+          `Paused **${a.label}**: whoever set it up is no longer allowed, so its instruction is not run. ` +
+            'Resume it from Home if the household still wants it.',
+        )
+        skipped++
+        continue
+      }
       // Nothing runs as someone who has been revoked: not their mailbox, and
-      // not the first DM when a draft is held back. The room keeps its watcher.
+      // not the first DM when a draft is held back.
       const member = creator?.allowed ? creator : undefined
 
       if (isWatcherKind(a.kind)) await runReadyMade(a.kind, a, member)
@@ -558,7 +579,10 @@ export async function POST(req: Request) {
   // The built-in watchers are part of the product: every household group has
   // them, kept in step with their definitions, before anything due is run.
   try {
-    const builtins = await installBuiltins(new Date())
+    const builtins = await installBuiltins(new Date(), {
+      counted: (room, unaccounted) =>
+        sayUnaccounted(room.chatId, room.title ?? `chat ${room.chatId}`, unaccounted, 'The built-in watchers were not set up'),
+    })
     if (builtins.installed.length || builtins.converted || builtins.retired || builtins.synced) {
       console.info('[tick] built-in watchers:', JSON.stringify(builtins))
     }

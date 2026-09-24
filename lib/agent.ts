@@ -508,6 +508,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     memberName: input.memberName,
     now,
     notices: [],
+    // A photo, PDF or file sent with the message is outside text as much as an email is.
+    readUntrusted: (input.attachments?.length ?? 0) > 0,
   }
 
   const [ambient, history] = await Promise.all([

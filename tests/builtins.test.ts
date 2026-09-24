@@ -59,6 +59,17 @@ describe('the built-in watchers', () => {
     expect(console.info).toHaveBeenCalledWith(expect.stringContaining('an unknown number of people'))
   })
 
+  it('passes every count it takes back to the caller, so an admin can be told why a room has none', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    await q.rememberChat('-400', 'group', 'School parents')
+    unaccountedIn.mockImplementation(async (chatId) => (chatId === '-100' ? 0 : 23))
+    const counted = vi.fn(async () => {})
+    await installBuiltins(now, { counted })
+    expect(counted).toHaveBeenCalledTimes(2)
+    expect(counted).toHaveBeenCalledWith(expect.objectContaining({ chatId: '-100', title: 'Family' }), 0)
+    expect(counted).toHaveBeenCalledWith(expect.objectContaining({ chatId: '-400', title: 'School parents' }), 23)
+  })
+
   it('does not ask Telegram about a room that already has its watchers', async () => {
     await q.rememberChat('-100', 'group', 'Family')
     await installBuiltins(now)

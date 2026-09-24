@@ -283,6 +283,27 @@ describe('/calendar', () => {
     expect(lastSent()).toContain('stopped working')
   })
 
+  it('sends the replacement to the admin alone when asked in a group, since the old one may have got out there', async () => {
+    await processUpdate(group('/calendar new'))
+    const token = await q.calendarToken()
+    const toGroup = send.mock.calls.filter(([chat]) => String(chat) === '-100').map(([, text]) => String(text))
+    const toAdmin = send.mock.calls.filter(([chat]) => String(chat) === '111').map(([, text]) => String(text))
+    expect(toAdmin.join('\n')).toContain(`/api/calendar/${token}/family.ics`)
+    expect(toGroup.join('\n')).toContain('sent you the new one in a DM')
+    expect(toGroup.join('\n')).not.toContain('/api/calendar/')
+  })
+
+  it('still replaces it, and says how to get the new one, when the admin has no DM open', async () => {
+    const before = await q.calendarToken()
+    // The first thing said is the DM to the admin, which Telegram refuses.
+    send.mockRejectedValueOnce(new Error('Forbidden: bot can\'t initiate conversation with a user'))
+    await processUpdate(group('/calendar new'))
+    expect(send.mock.calls[0][0]).toBe('111')
+    expect(await q.calendarToken()).not.toBe(before)
+    expect(lastSent()).toContain('start a direct message with me')
+    expect(lastSent()).not.toContain('/api/calendar/')
+  })
+
   it('lets only an admin replace it', async () => {
     await processUpdate(dm('/allow 999'))
     const before = await q.calendarToken()

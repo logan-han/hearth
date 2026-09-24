@@ -17,7 +17,8 @@ const strangersIn = vi.fn<(chatId: string) => Promise<{ id: string; name: string
 const unaskedQuestions = vi.fn<() => Promise<{ id: number; question: string }[]>>()
 const markQuestionsAsked = vi.fn<(ids: number[]) => Promise<void>>()
 const allowedMembers = vi.fn<() => Promise<{ id: number; telegramUserId: string; name: string; isAdmin: boolean; allowed: boolean }[]>>()
-const installBuiltins = vi.fn(async (_now?: Date) => ({ installed: [] as string[], converted: 0, retired: 0, synced: 0 }))
+type Counted = (room: { chatId: string; title: string | null }, unaccounted: number | null) => Promise<void>
+const installBuiltins = vi.fn(async (_now?: Date, _on?: { counted?: Counted }) => ({ installed: [] as string[], converted: 0, retired: 0, synced: 0 }))
 const send = vi.fn<(chatId: string, text: string) => Promise<void>>()
 const verify = vi.fn<() => Promise<boolean>>()
 const insertValues = vi.fn()
@@ -34,7 +35,8 @@ const buildTools = vi.fn(
     }) as Record<string, { execute?: (...args: unknown[]) => unknown }>,
 )
 
-const { unaccountedIn, memberByTelegramId, creatorRows } = vi.hoisted(() => ({
+const { unaccountedIn, memberByTelegramId, creatorRows, setAutomationEnabled } = vi.hoisted(() => ({
+  setAutomationEnabled: vi.fn(async (_id: number, _enabled: boolean) => ({})),
   unaccountedIn: vi.fn<(chatId: string) => Promise<number | null>>(async () => 0),
   memberByTelegramId: vi.fn<(id: string) => Promise<{ allowed: boolean } | undefined>>(async () => ({ allowed: true })),
   creatorRows: vi.fn(async () => [] as unknown[]),
@@ -63,6 +65,7 @@ vi.mock('@/lib/db/queries', () => ({
   markQuestionsAsked,
   allowedMembers,
   memberByTelegramId,
+  setAutomationEnabled,
 }))
 vi.mock('@/lib/builtins', () => ({ installBuiltins }))
 vi.mock('@/lib/agent', () => ({ runAgent, decideWatcherPost, reviewDraft }))
@@ -284,15 +287,33 @@ describe('running due automations', () => {
     expect(send).toHaveBeenCalledWith('111', 'Bins out tonight.')
   })
 
-  it('runs a revoked creator\'s group automation as the family, never as them', async () => {
+  it('runs a revoked creator\'s group watcher as the family, and tells an admin rather than them', async () => {
     creatorRows.mockResolvedValue([{ id: 9, telegramUserId: '222', name: 'Nanny', allowed: false, isAdmin: false }])
-    dueAutomations.mockResolvedValue([automation({ memberId: 9 })])
-    runAgent.mockRejectedValueOnce(new Error('model exploded'))
+    dueAutomations.mockResolvedValue([automation({ memberId: 9, kind: 'morning', label: 'Morning brief' })])
+    // A fetch problem goes to the creator first when there is one, which a revoked one no longer is.
+    newMail.mockResolvedValue({ error: 'Graph answered 503' })
     await authed()
-    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ member: null, memberName: 'the family' }))
-    // The failure goes to an admin, not to the revoked creator first.
-    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('model exploded'))
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('Graph answered 503'))
     expect(send).not.toHaveBeenCalledWith('222', expect.anything())
+    expect(setAutomationEnabled).not.toHaveBeenCalled()
+  })
+
+  it('pauses a revoked creator\'s own instruction rather than running it with the household\'s tools', async () => {
+    creatorRows.mockResolvedValue([{ id: 9, telegramUserId: '222', name: 'Nanny', allowed: false, isAdmin: false }])
+    dueAutomations.mockResolvedValue([automation({ memberId: 9, label: 'check everyone\'s mail' })])
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 0, skipped: 1 })
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(setAutomationEnabled).toHaveBeenCalledWith(1, false)
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('Paused **check everyone\'s mail**'))
+    expect(send).not.toHaveBeenCalledWith('222', expect.anything())
+  })
+
+  it('pauses one whose creator has gone from the members table altogether', async () => {
+    creatorRows.mockResolvedValue([])
+    dueAutomations.mockResolvedValue([automation({ memberId: 9 })])
+    await authed()
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(setAutomationEnabled).toHaveBeenCalledWith(1, false)
   })
 
   it('holds a group post while Telegram counts people nobody has vouched for, telling an admin once', async () => {
@@ -309,6 +330,34 @@ describe('running due automations', () => {
     getSetting.mockImplementation(async (key: string) => (key === 'unaccounted:-100999' ? '2' : key === 'memory_sweep_day' ? today() : null))
     await authed()
     expect(send).not.toHaveBeenCalled()
+  })
+
+  it('tells an admin again when the count changes', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    unaccountedIn.mockResolvedValue(3)
+    getSetting.mockImplementation(async (key: string) => (key === 'unaccounted:-100999' ? '2' : key === 'memory_sweep_day' ? today() : null))
+    await authed()
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('Telegram counts 3 people'))
+    expect(setSetting).toHaveBeenCalledWith('unaccounted:-100999', '3')
+  })
+
+  it('reports a Telegram hiccup during the count as the failure it is, not as a room it cannot see', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    unaccountedIn.mockRejectedValueOnce(new Error('Too Many Requests: retry after 5'))
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 0, skipped: 0 })
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('failed: Too Many Requests'))
+    expect(send).not.toHaveBeenCalledWith('900', expect.stringContaining('would not say'))
+  })
+
+  it('tells an admin, once, when a new room is not given its built-in watchers', async () => {
+    installBuiltins.mockImplementationOnce(async (_now, on) => {
+      await on?.counted?.({ chatId: '-400', title: 'School parents' }, 23)
+      return { installed: [], converted: 0, retired: 0, synced: 0 }
+    })
+    await authed()
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('The built-in watchers were not set up in School parents'))
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('Telegram counts 23 people'))
+    expect(setSetting).toHaveBeenCalledWith('unaccounted:-400', '23')
   })
 
   it('holds a group post when Telegram will not say who is there', async () => {

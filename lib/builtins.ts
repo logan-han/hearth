@@ -23,7 +23,10 @@ export type BuiltinReport = { installed: string[]; converted: number; retired: n
  * in which case it simply goes. The mail cursor is keyed by chat, so the brief
  * carries on from where the sweep left off rather than replaying the inbox.
  */
-export async function installBuiltins(now: Date = new Date()): Promise<BuiltinReport> {
+export async function installBuiltins(
+  now: Date = new Date(),
+  on: { counted?: (room: { chatId: string; title: string | null }, unaccounted: number | null) => Promise<void> } = {},
+): Promise<BuiltinReport> {
   const report: BuiltinReport = { installed: [], converted: 0, retired: 0, synced: 0 }
   const [rooms, all] = await Promise.all([groupChats(), listAutomations()])
 
@@ -68,6 +71,9 @@ export async function installBuiltins(now: Date = new Date()): Promise<BuiltinRe
                 `${unaccounted ?? 'an unknown number of'} people there are not recognised`,
             )
           }
+          // Said to an admin by the caller, who knows how; a room left without
+          // its watchers and nobody told is a household that never gets a brief.
+          await on.counted?.(room, unaccounted)
         }
         if (!accounted) continue
         await addAutomation({

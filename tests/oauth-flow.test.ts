@@ -66,6 +66,14 @@ describe('startAuth', () => {
     expect(res.status).toBe(400)
   })
 
+  it('refuses a sign-in state as a link even when it names an allowed member', async () => {
+    await q.upsertMember('111', 'Rowan', { allowed: true })
+    const state = await signState({ tg: '111', name: 'Rowan', chat: '', purpose: 'signin' })
+    const res = await startAuth(req(`https://hearth.example/api/oauth/google?t=${encodeURIComponent(state)}`), 'google')
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('expired')
+  })
+
   it('refuses a link bound to nobody, or to someone revoked since it was sent', async () => {
     const empty = await signState({ tg: '', name: '', chat: '' })
     expect((await startAuth(req(`https://hearth.example/api/oauth/google?t=${encodeURIComponent(empty)}`), 'google')).status).toBe(400)
