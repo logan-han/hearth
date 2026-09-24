@@ -16,7 +16,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # The Node version is `engines` in package.json, which Vercel reads too,
       # so CI tests on the runtime production runs.
