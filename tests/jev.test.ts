@@ -210,6 +210,36 @@ describe('the post decision', () => {
   })
 })
 
+describe('the deadline', () => {
+  it('stops a call and its retries at the caller\'s deadline', async () => {
+    // Jev hanging on until it is told to stop; a call given no signal is refused outright.
+    systemOne.mockImplementation((_req: unknown, opts?: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        if (!opts?.signal) return reject(new Error('no deadline given'))
+        opts.signal.addEventListener('abort', () => reject(opts.signal?.reason))
+      }),
+    )
+    await expect(claimsChange({ reply: 'done', chatId: '-1', deadline: Date.now() + 50 })).rejects.toThrow('aborted due to timeout')
+  })
+
+  it('asks nothing once the deadline has passed, and puts nothing down against Jev for it', async () => {
+    await expect(claimsChange({ reply: 'done', chatId: '-1', deadline: Date.now() - 1 })).rejects.toThrow('Timed out before Jev was asked')
+    expect(systemOne).not.toHaveBeenCalled()
+    expect((await chainHealth(1)).slots.find((s) => s.slot === 'jev:jev-latest')).toBeUndefined()
+  })
+
+  it('gives the checks and the decision one, and the gate, which has none, no signal', async () => {
+    const deadline = Date.now() + 10_000
+    systemOne.mockResolvedValue(answer({ c0: pick(0.9) }))
+    await checkClaims({ label: 'x', claims: ['a'], evidence: 'e', deadline })
+    systemOne.mockResolvedValue(answer({ invented: noul(0.1), nothingNew: noul(0.1) }))
+    await decidePost({ label: 'x', draft: 'd', evidence: 'e', deadline })
+    systemOne.mockResolvedValue(answer({ forAssistant: noul(0.9) }))
+    await wantsAssistant({ chatId: '-1', conversation: [], message: 'Ada: hi' })
+    expect(systemOne.mock.calls.map(([, opts]) => opts?.signal instanceof AbortSignal)).toEqual([true, true, false])
+  })
+})
+
 describe('the trace', () => {
   const langfuse = globalThis as unknown as { __hearthLangfuse?: { forceFlush: () => Promise<void> } | null }
   afterEach(() => {

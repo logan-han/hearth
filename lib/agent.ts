@@ -26,16 +26,20 @@ const MAX_STEPS = 8
 const STEP_TIMEOUT_MS = 60_000
 /**
  * How long a turn may take, every model it tries and the claim retry
- * included. The function is killed at 300 s, and the gate and any
- * attachments come before the turn, the reply (or the apology), its record,
- * the summary and the traces after it.
+ * included. The function is killed at 300 s, and what runs before the turn
+ * (the gate, attachments, the wait for the turn ahead) and after it (the
+ * reply or the apology, its record, the summary, the traces) has to fit
+ * around it, so a caller with its own clock running passes a nearer deadline.
  */
-const TURN_BUDGET_MS = 150_000
+export const TURN_BUDGET_MS = 150_000
 /** A claim retry is a second whole turn; with less than this left it would only be cut off. */
 const RETRY_RESERVE_MS = 30_000
 
 /** What is left before `deadline`, never nothing: a timeout of zero or less is not one the SDK takes. */
 const timeLeft = (deadline: number) => Math.max(1, deadline - Date.now())
+
+/** A judging call's timeout: its own for each step, and no later than `deadline` when the caller has one. */
+const within = (stepMs: number, deadline?: number) => (deadline === undefined ? { stepMs } : { totalMs: timeLeft(deadline), stepMs })
 
 /**
  * The three jobs the model does, each with its own prompt, tools and
@@ -63,7 +67,7 @@ export type AgentInput = {
   tools?: ToolName[]
   /** A larger output budget than the mode's, for a run known to write at length (the morning brief). */
   maxOutputTokens?: number
-  /** When the turn must be over, in epoch ms. Defaults to TURN_BUDGET_MS from the start; a caller with its own clock running can pass a nearer one. */
+  /** When the caller needs the turn over by, in epoch ms. The turn ends at this or TURN_BUDGET_MS from its start, whichever comes first. */
   deadline?: number
   /** Whether the tools may read into a room the family shares; see ToolContext.shared. Defaults to any chat but a private one. */
   shared?: boolean
@@ -457,10 +461,11 @@ const CLAIM_RULES = [
  * when a key is set; otherwise the chain does, as a structured call like the
  * others: recorded, so a slot that answers the choice with prose (the SDK
  * throws on that, and on an allowance thought away with nothing written)
- * falls behind the ones that answer it.
+ * falls behind the ones that answer it. Either way it ends at the turn's
+ * deadline, since the check after a retry can start with little of it left.
  */
 async function reportsChange(reply: string, chatId: string, deadline: number): Promise<boolean> {
-  if (jevConfigured()) return claimsChange({ reply, chatId })
+  if (jevConfigured()) return claimsChange({ reply, chatId, deadline })
   return withModelFallback(async (slot) => {
     const out = await traced(
       { traceName: 'hearth.claim', sessionId: chatId, tags: ['claim'], metadata: { model: slot.name } },
@@ -618,7 +623,7 @@ export function unconfirmedLine(wrote: readonly string[] | undefined, unconfirme
 export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const mode = input.mode ?? 'chat'
   const now = new Date()
-  const deadline = input.deadline ?? now.getTime() + TURN_BUDGET_MS
+  const deadline = Math.min(input.deadline ?? Infinity, now.getTime() + TURN_BUDGET_MS)
   const ctx: ToolContext = {
     chatId: input.chatId,
     member: input.member,
@@ -894,10 +899,16 @@ export async function decideWatcherPost(input: {
   evidence: string
   /** Every statement the claim check pulled out of this draft was checked against this evidence and supported. */
   verified?: boolean
+  /** When the decision must be made by, in epoch ms: the tick's, which the platform stops soon after. */
+  deadline?: number
 }): Promise<PostDecision & { model: string }> {
   if (jevConfigured()) {
     try {
-      return await decidePost(input)
+      // Jev answers in a fraction of a second or not at all, so with a
+      // deadline it has half of what is left: a Jev that hangs still leaves
+      // the chain time to answer, and the draft is not left with no judge.
+      const jevBy = input.deadline === undefined ? undefined : Date.now() + Math.floor((input.deadline - Date.now()) / 2)
+      return await decidePost({ ...input, deadline: jevBy })
     } catch (err) {
       console.warn(`[agent] Jev could not decide on "${input.label}"; asking the chain:`, describeError(err))
     }
@@ -911,12 +922,12 @@ export async function decideWatcherPost(input: {
         output: Output.object({ schema: postAnswersSchema, name: 'post_decision' }),
         temperature: 0.2,
         maxOutputTokens: 600,
-        timeout: { stepMs: 30_000 },
+        timeout: within(30_000, input.deadline),
         telemetry: callTelemetry('hearth.decision'),
       }),
     )
     return { ...fromAnswers(r.output, input.verified ?? false), model: slot.name }
-  }, await structuredChain(), 'hearth.decision')
+  }, await structuredChain(), 'hearth.decision', input.deadline)
 }
 
 /**
@@ -1010,10 +1021,11 @@ async function checkEach(
   label: string,
   chain: ModelSlot[],
   meta: (step: string, model: string) => Parameters<typeof traced>[0],
+  deadline?: number,
 ): Promise<boolean[]> {
   if (jevConfigured()) {
     try {
-      return (await checkClaims({ label, claims, evidence })).map((c) => c.supported)
+      return (await checkClaims({ label, claims, evidence, deadline })).map((c) => c.supported)
     } catch (err) {
       console.warn(`[agent] Jev could not check the "${label}" draft; asking the chain:`, describeError(err))
     }
@@ -1029,12 +1041,13 @@ async function checkEach(
             output: Output.object({ schema: checkSchema, name: 'check' }),
             temperature: 0,
             maxOutputTokens: 300,
-            timeout: { stepMs: 30_000 },
+            timeout: within(30_000, deadline),
             telemetry: callTelemetry('hearth.verify'),
           }),
         ).then((r) => r.output.supported),
         chain,
         'hearth.verify',
+        deadline,
       ),
     ),
   )
@@ -1048,8 +1061,9 @@ async function checkEach(
  * capped, so a long post is spot-checked rather than rebuilt: rebuilding it
  * from the list dropped every fact the list had no room for. Statements of
  * what is not known are not claims, so "purpose not recorded" passes untouched.
+ * With a `deadline` (epoch ms) every call is over by then.
  */
-export async function reviewDraft(input: { label: string; draft: string; evidence: string }): Promise<DraftReview> {
+export async function reviewDraft(input: { label: string; draft: string; evidence: string; deadline?: number }): Promise<DraftReview> {
   const evidence = input.evidence || '(no tool results)'
   const meta = (step: string, model: string) => ({ traceName: 'hearth.verify', tags: ['verify', step], metadata: { label: input.label, model } })
   const chain = await structuredChain()
@@ -1064,17 +1078,18 @@ export async function reviewDraft(input: { label: string; draft: string; evidenc
           output: Output.object({ schema: claimsSchema, name: 'claims' }),
           temperature: 0,
           maxOutputTokens: 500,
-          timeout: { stepMs: 30_000 },
+          timeout: within(30_000, input.deadline),
           telemetry: callTelemetry('hearth.verify'),
         }),
       ).then((r) => r.output.claims),
       chain,
       'hearth.verify',
+      input.deadline,
     )
   ).slice(0, MAX_CLAIMS)
   if (claims.length === 0) return { claims, unsupported: [], message: input.draft }
 
-  const checks = await checkEach(claims, evidence, input.label, chain, meta)
+  const checks = await checkEach(claims, evidence, input.label, chain, meta, input.deadline)
   const unsupported = claims.filter((_, i) => !checks[i])
   if (unsupported.length === 0) return { claims, unsupported, message: input.draft }
 
@@ -1092,12 +1107,13 @@ export async function reviewDraft(input: { label: string; draft: string; evidenc
         output: Output.object({ schema: rewriteSchema, name: 'rewrite' }),
         temperature: 0,
         maxOutputTokens: 800,
-        timeout: { stepMs: 30_000 },
+        timeout: within(30_000, input.deadline),
         telemetry: callTelemetry('hearth.verify'),
       }),
     ).then((r) => r.output.message.trim()),
     chain,
     'hearth.verify',
+    input.deadline,
   )
   return { claims, unsupported, message: rewritten || null }
 }

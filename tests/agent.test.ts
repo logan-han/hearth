@@ -504,6 +504,16 @@ describe('runAgent', () => {
     expect(generateText).toHaveBeenCalledTimes(1)
   })
 
+  it('ends at the caller\'s deadline when that is nearer, and never runs past its own budget', async () => {
+    generateText.mockResolvedValue(reply('Bins go out Monday.'))
+    await runAgent({ ...input, mode: 'watcher', history: false, deadline: Date.now() + 40_000 })
+    expect(generateText.mock.calls[0][0].timeout.totalMs).toBeGreaterThan(30_000)
+    expect(generateText.mock.calls[0][0].timeout.totalMs).toBeLessThanOrEqual(40_000)
+    // A caller whose clock leaves more than a turn needs still gets only the turn.
+    await runAgent({ ...input, mode: 'watcher', history: false, deadline: Date.now() + 600_000 })
+    expect(generateText.mock.calls[1][0].timeout.totalMs).toBeLessThanOrEqual(150_000)
+  })
+
   it('still ends a turn the clock stopped after a write by saying what was done', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     const deadline = Date.now() + 500
@@ -1413,6 +1423,17 @@ describe('decideWatcherPost', () => {
     expect(generateText).toHaveBeenCalledTimes(1)
   })
 
+  it('is over by the caller\'s deadline, and asks no model once it has passed', async () => {
+    generateText.mockResolvedValue(answers({}))
+    await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e', deadline: Date.now() + 10_000 })
+    const { totalMs, stepMs } = generateText.mock.calls[0][0].timeout
+    expect(totalMs).toBeGreaterThan(9_000)
+    expect(totalMs).toBeLessThanOrEqual(10_000)
+    expect(stepMs).toBe(30_000)
+    await expect(decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e', deadline: Date.now() - 1 })).rejects.toThrow('Timed out before any model was asked')
+    expect(generateText).toHaveBeenCalledTimes(1)
+  })
+
   it('tells a plain error apart from a structured-output failure', () => {
     expect(isStructuredOutputError(new Error('boom'))).toBe(false)
   })
@@ -1487,6 +1508,24 @@ describe('reviewDraft', () => {
     expect(r.message).toBe('Nothing new worth flagging.')
     expect(generateText).toHaveBeenCalledTimes(1)
   })
+
+  it('gives the extract, every check and the rewrite only what is left before the caller\'s deadline', async () => {
+    generateText
+      .mockResolvedValueOnce(out({ claims: ['a trip to Lisbon was booked'] }))
+      .mockResolvedValueOnce(out({ supported: false }))
+      .mockResolvedValueOnce(out({ message: '' }))
+    await reviewDraft({ label: 'x', draft: 'Looks like a trip to Lisbon!', evidence: 'DATA ...', deadline: Date.now() + 10_000 })
+    expect(generateText).toHaveBeenCalledTimes(3)
+    for (const [call] of generateText.mock.calls) {
+      expect(call.timeout.totalMs).toBeLessThanOrEqual(10_000)
+      expect(call.timeout.stepMs).toBe(30_000)
+    }
+    // Past it, nothing is asked at all.
+    await expect(reviewDraft({ label: 'x', draft: 'Looks like a trip to Lisbon!', evidence: 'DATA ...', deadline: Date.now() - 1 })).rejects.toThrow(
+      'Timed out before any model was asked',
+    )
+    expect(generateText).toHaveBeenCalledTimes(3)
+  })
 })
 
 describe('watcher formatting', () => {
@@ -1559,6 +1598,35 @@ describe('with a TypeSafe key', () => {
     expect(generateText).toHaveBeenCalledTimes(1)
   })
 
+  it('stops waiting on Jev\'s judgement of the reply at the turn\'s deadline, and lets the reply stand', async () => {
+    generateText.mockResolvedValue(reply('Done, replaced it.'))
+    // Jev would say the reply claims a change, but only after the turn's time is up.
+    systemOne.mockImplementation((_req: unknown, opts?: { signal?: AbortSignal }) =>
+      new Promise((resolve, reject) => {
+        const late = setTimeout(() => resolve(jev({ claimsChange: noul(0.95) })), 3_000)
+        opts?.signal?.addEventListener('abort', () => {
+          clearTimeout(late)
+          reject(opts.signal?.reason)
+        })
+      }),
+    )
+    const started = Date.now()
+    const r = await runAgent({ ...input, deadline: started + 500 })
+    expect(r.text).toBe('Done, replaced it.')
+    expect(generateText).toHaveBeenCalledTimes(1)
+    expect(Date.now() - started).toBeLessThan(2_500)
+  })
+
+  it('holds Jev\'s checks and post decision to the caller\'s deadline, as it does the chain\'s', async () => {
+    generateText.mockResolvedValueOnce({ ...reply(''), output: { claims: ['$389.60 to FARESAVER'] } })
+    systemOne.mockResolvedValueOnce(jev({ c0: pick(0.94) })).mockResolvedValueOnce(jev({ invented: noul(0.06), nothingNew: noul(0.03) }))
+    const deadline = Date.now() + 10_000
+    await reviewDraft({ label: 'x', draft: '2Up: $389.60 FARESAVER LISBON.', evidence: 'DATA ...', deadline })
+    await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e', deadline })
+    expect(systemOne).toHaveBeenCalledTimes(2)
+    for (const [, opts] of systemOne.mock.calls) expect(opts?.signal).toBeInstanceOf(AbortSignal)
+  })
+
   it('checks every claim in one Jev call against the evidence, then edits with the chain', async () => {
     generateText
       .mockResolvedValueOnce({ ...reply(''), output: { claims: ['$389.60 to FARESAVER', 'a trip to Lisbon was booked'] } })
@@ -1600,6 +1668,18 @@ describe('with a TypeSafe key', () => {
     const d = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
     expect(d).toMatchObject({ decision: 'skip', confidence: 0.8, model: 'gemini:gemini-3.5-flash-lite', reason: expect.stringContaining('evidence does not contain') })
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Jev could not decide'), 'fetch failed')
+  })
+
+  it('leaves the chain part of the decision\'s time when Jev hangs near the deadline', async () => {
+    systemOne.mockImplementationOnce((_req: unknown, opts?: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        opts?.signal?.addEventListener('abort', () => reject(opts.signal?.reason))
+      }),
+    )
+    generateText.mockResolvedValue({ ...reply(''), output: { invented: false, nothing_new: false, confidence: 0.9 } })
+    const d = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e', deadline: Date.now() + 400 })
+    expect(d.decision).toBe('post')
+    expect(generateText).toHaveBeenCalledTimes(1)
   })
 
   it('records its calls beside the chain, under the Jev slot', async () => {

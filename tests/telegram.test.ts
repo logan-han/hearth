@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 const { sendMessage, sendChatAction, getFile } = vi.hoisted(() => ({
   sendMessage: vi.fn(async (_chatId: string | number, _text: string, _opts?: Record<string, unknown>) => ({})),
   sendChatAction: vi.fn(async (_chatId: string | number, _action: string) => true),
-  getFile: vi.fn<(fileId: string) => Promise<{ file_path?: string; file_size?: number }>>(),
+  getFile: vi.fn<(fileId: string, signal?: AbortSignal) => Promise<{ file_path?: string; file_size?: number }>>(),
 }))
 vi.mock('grammy', async (importOriginal) => ({
   ...(await importOriginal<typeof import('grammy')>()),
@@ -182,5 +182,14 @@ describe('downloadFile', () => {
     getFile.mockResolvedValue({ file_path: 'photos/f.jpg', file_size: 10 })
     fetchMock.mockResolvedValue({ ok: false, status: 404 })
     await expect(downloadFile('fid')).rejects.toThrow(/404/)
+  })
+
+  it('stops the lookup and the download alike at the caller\'s signal', async () => {
+    getFile.mockResolvedValue({ file_path: 'photos/f.jpg', file_size: 10 })
+    fetchMock.mockResolvedValue({ ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer })
+    const signal = AbortSignal.timeout(10_000)
+    await downloadFile('fid', signal)
+    expect(getFile).toHaveBeenCalledWith('fid', signal)
+    expect(fetchMock.mock.calls[0][1]).toEqual({ signal })
   })
 })

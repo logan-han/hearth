@@ -45,8 +45,18 @@ Google/Outlook/Apple ──subscribe──> /api/calendar/{token}/family.ics
 Telegram retries any webhook it does not get an ack for within seconds, so
 `/api/telegram` validates, acks, and finishes the work in `waitUntil()` under
 Vercel Fluid compute (300 s ceiling). A turn gives itself 150 s of that, every
-model it tries included, and starts no further model once they are spent, so
-the reply, or the apology, still goes out before the function is stopped.
+model it tries and every check on its reply included, and starts no further
+model once they are spent. Its clock starts when the message arrives, not when
+the turn does: the gate, the attachments and the wait for the turn ahead come
+out of the same four minutes, and a file still downloading with a minute of
+them left is given up and the message answered without it, so the reply, or
+the apology, still goes out before the function is stopped. The hourly tick
+keeps one clock the same way: it starts an automation only while a whole turn
+and the checks on its draft still fit in its first 280 s, so the rest stay
+due, first in line at the next tick, rather than claimed and then stopped
+halfway through. A draft whose post decision that clock cuts short is held
+back for an admin, not posted unchecked, and the nightly memory pass waits for
+a tick with a whole turn left.
 
 A chat turn does not see all 55 tools. The 23 in the core are always in reach
 (search, weather, lists, the shared calendar and its proposals, memory); mail,

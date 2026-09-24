@@ -1,4 +1,4 @@
-import { Bot, GrammyError } from 'grammy'
+import { Bot, GrammyError, type Api } from 'grammy'
 import { required } from './env'
 import { toTelegramHtml } from './telegram-format'
 import { describeError } from './errors'
@@ -107,15 +107,19 @@ export type Attachment = {
 /**
  * Fetch a file the user sent. Two round trips: getFile resolves the path, then
  * the file itself comes from a different host that wants the token in the URL.
+ * A `signal` stops both, and the body: fetch alone waits five minutes on a
+ * file host that stalls.
  */
-export async function downloadFile(fileId: string): Promise<{ bytes: Uint8Array; path: string }> {
+export async function downloadFile(fileId: string, signal?: AbortSignal): Promise<{ bytes: Uint8Array; path: string }> {
   const b = bot()
-  const file = await b.api.getFile(fileId)
+  // grammY types its signal as its Node polyfill's, and takes the platform's
+  // at run time: all it does with one is listen for the abort.
+  const file = await b.api.getFile(fileId, signal as Parameters<Api['getFile']>[1])
   if (!file.file_path) throw new Error('Telegram returned no file path')
   if ((file.file_size ?? 0) > MAX_FILE_BYTES) {
     throw new Error(`File is ${Math.round((file.file_size ?? 0) / 1e6)} MB, over the 20 MB limit`)
   }
-  const res = await fetch(`https://api.telegram.org/file/bot${required('TELEGRAM_BOT_TOKEN')}/${file.file_path}`)
+  const res = await fetch(`https://api.telegram.org/file/bot${required('TELEGRAM_BOT_TOKEN')}/${file.file_path}`, { signal })
   if (!res.ok) throw new Error(`Could not download the file (${res.status})`)
   return { bytes: new Uint8Array(await res.arrayBuffer()), path: file.file_path }
 }

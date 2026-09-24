@@ -77,7 +77,10 @@ vi.mock('@/lib/db/queries', () => ({
   setAutomationEnabled,
 }))
 vi.mock('@/lib/builtins', () => ({ installBuiltins }))
-vi.mock('@/lib/agent', () => ({ runAgent, decideWatcherPost, reviewDraft, looksBefore }))
+vi.mock('@/lib/agent', async (orig) => ({
+  runAgent, decideWatcherPost, reviewDraft, looksBefore,
+  TURN_BUDGET_MS: (await orig<typeof import('@/lib/agent')>()).TURN_BUDGET_MS,
+}))
 vi.mock('@/lib/tools', () => ({ buildTools }))
 vi.mock('@/lib/telegram', async (importOriginal) => ({ send, PartlySent: (await importOriginal<typeof import('@/lib/telegram')>()).PartlySent }))
 vi.mock('@upstash/qstash', () => ({ Receiver: class { verify = verify } }))
@@ -308,18 +311,36 @@ describe('running due automations', () => {
     expect(next!.getTime()).toBeGreaterThan(Date.now())
   })
 
-  it('starts no run late in the tick, leaving the rest unclaimed for the next one', async () => {
+  it('starts no run without room for a whole turn and its checks, leaving the rest unclaimed for the next tick', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     try {
       dueAutomations.mockResolvedValue([automation({ id: 1 }), automation({ id: 2 }), automation({ id: 3 })])
-      // The first run is a slow one: past the point where another may start.
-      runAgent.mockImplementationOnce(async () => {
-        vi.setSystemTime(Date.now() + 200_000)
+      // A minute in, a turn and its checks still fit before the tick's own
+      // deadline; eleven seconds later they would not.
+      const slow = (ms: number) => async () => {
+        vi.setSystemTime(Date.now() + ms)
         return { text: 'Bins out tonight.', notices: [], model: 'primary:test' }
-      })
-      await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
-      expect(claimAutomation).toHaveBeenCalledTimes(1)
-      expect(console.warn).toHaveBeenCalledWith('[tick] out of time: 2 due automation(s) left for the next tick')
+      }
+      runAgent.mockImplementationOnce(slow(60_000)).mockImplementationOnce(slow(11_000))
+      await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 2, skipped: 0 })
+      expect(claimAutomation).toHaveBeenCalledTimes(2)
+      expect(console.warn).toHaveBeenCalledWith('[tick] out of time: 1 due automation(s) left for the next tick')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('holds every run to the tick, leaving its checks the end of it and the post decision the very end', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const start = Date.now()
+      dueAutomations.mockResolvedValue([automation({ id: 1 }), automation({ id: 2, kind: 'money', label: '2Up transactions' })])
+      newTransactions.mockResolvedValue({ account: '2Up', count: 1, transactions: [{ description: 'CAFE', amount: '$4.50', when: 'Mon', status: 'SETTLED' }] })
+      await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 2, skipped: 0 })
+      // A custom automation and a ready-made watcher alike.
+      expect(runAgent.mock.calls.map(([input]) => input.deadline)).toEqual([start + 220_000, start + 220_000])
+      expect(reviewDraft.mock.calls.map(([input]) => input.deadline)).toEqual([start + 250_000, start + 250_000])
+      expect(decideWatcherPost.mock.calls.map(([input]) => input.deadline)).toEqual([start + 280_000, start + 280_000])
     } finally {
       vi.useRealTimers()
     }
@@ -697,11 +718,33 @@ describe('running due automations', () => {
       ] as never)
       await authed()
       expect(setSetting).toHaveBeenCalledWith('memory_sweep_day', expect.any(String))
-      const call = runAgent.mock.calls.at(-1)![0] as { text: string; mode: string }
+      const call = runAgent.mock.calls.at(-1)![0] as { text: string; mode: string; deadline: number }
       expect(call.text).toContain('Nightly memory pass')
       expect(call.text).toContain('Bin night is Monday')
       expect(call.mode).toBe('sweep')
+      expect(call.deadline).toBe(new Date('2026-08-30T18:30:00Z').getTime() + 280_000)
       expect(send).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('leaves the pass to the next tick, the day unclaimed, when the runs have not left it a whole turn', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-30T18:30:00Z')) // 4:30am in Melbourne
+    try {
+      getSetting.mockImplementation(async () => null)
+      messagesSince.mockResolvedValue([
+        { chatId: '-100999', authorName: 'Rowan', role: 'user', content: 'Bin night is Monday by the way' },
+      ] as never)
+      dueAutomations.mockResolvedValue([automation()])
+      runAgent.mockImplementationOnce(async () => {
+        vi.setSystemTime(Date.now() + 140_000)
+        return { text: 'Bins out tonight.', notices: [], model: 'primary:test' }
+      })
+      await authed()
+      expect(runAgent).toHaveBeenCalledTimes(1)
+      expect(setSetting).not.toHaveBeenCalledWith('memory_sweep_day', expect.anything())
     } finally {
       vi.useRealTimers()
     }
@@ -828,6 +871,27 @@ describe('the post decision', () => {
     await authed()
     expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
     expect(send).toHaveBeenCalledWith('900', expect.stringContaining('post decision failed'))
+  })
+
+  it('holds the draft back, never posting it unchecked, when the tick ran out of time for the decision', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const start = Date.now()
+      // The first judge used up the tick, and the next was never asked.
+      decideWatcherPost.mockImplementation(async () => {
+        vi.setSystemTime(start + 280_000)
+        throw new Error('The operation was aborted due to timeout')
+      })
+      await authed()
+      expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+      expect(send).toHaveBeenCalledTimes(1)
+      const [to, text] = send.mock.calls[0]
+      expect(to).toBe('900')
+      expect(text).toContain('held back: the tick ran out of time before the post check could answer')
+      expect(text).toContain('Draft:\nBins out tonight.')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('checks the claims before deciding, and decides on what survived', async () => {

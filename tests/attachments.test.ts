@@ -3,9 +3,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 // vi.mock factories are hoisted above ordinary consts, so the doubles they
 // close over have to be hoisted too.
 const { downloadFile, runAgent, recordMessage, send, memberByTelegramId, albums } = vi.hoisted(() => ({
-  downloadFile: vi.fn<(id: string) => Promise<{ bytes: Uint8Array; path: string }>>(),
+  downloadFile: vi.fn<(id: string, signal?: AbortSignal) => Promise<{ bytes: Uint8Array; path: string }>>(),
   runAgent: vi.fn(
-    async (_input: { text: string; attachments?: { mediaType: string; kind: string }[] }) => ({
+    async (_input: { text: string; attachments?: { mediaType: string; kind: string }[]; deadline?: number }) => ({
       text: 'Looks like school photo day.',
       notices: [] as string[],
       model: 'gemini',
@@ -62,6 +62,7 @@ vi.mock('@/lib/turns', () => ({
 
 const { processUpdate } = await import('@/lib/handler')
 const { mediaTypeFor } = await import('@/lib/telegram')
+const { awaitTurn } = await import('@/lib/turns')
 
 const photoUpdate = (caption?: string) => ({
   update_id: 1,
@@ -108,8 +109,8 @@ describe('mediaTypeFor', () => {
 describe('photos', () => {
   it('takes the largest resolution Telegram offers', async () => {
     await processUpdate(photoUpdate())
-    expect(downloadFile).toHaveBeenCalledWith('large')
-    expect(downloadFile).not.toHaveBeenCalledWith('small')
+    expect(downloadFile).toHaveBeenCalledWith('large', expect.any(AbortSignal))
+    expect(downloadFile).not.toHaveBeenCalledWith('small', expect.anything())
   })
 
   it('answers a photo sent with no caption at all', async () => {
@@ -259,7 +260,7 @@ describe('nothing is fetched before it is wanted', () => {
     downloadFile.mockResolvedValue({ bytes: new TextEncoder().encode('BEGIN:VCALENDAR\nEND:VCALENDAR'), path: 'documents/file_4.ics' })
     const ics = { file_id: 'ics', file_unique_id: 'ics', file_name: 'camp.ics', mime_type: 'application/ics' }
     await processUpdate(sent(111, dm, { document: ics }))
-    expect(downloadFile).toHaveBeenCalledWith('ics')
+    expect(downloadFile).toHaveBeenCalledWith('ics', expect.any(AbortSignal))
     expect(runAgent.mock.calls[1][0].attachments).toEqual([expect.objectContaining({ mediaType: 'text/calendar' })])
   })
 
@@ -267,7 +268,7 @@ describe('nothing is fetched before it is wanted', () => {
     downloadFile.mockResolvedValue({ bytes: new Uint8Array([80, 75, 3, 4]), path: 'documents/file_5' })
     const blob = { file_id: 'blob', file_unique_id: 'blob', file_name: 'scan.bin', mime_type: 'application/octet-stream' }
     await processUpdate(sent(111, dm, { document: blob }))
-    expect(downloadFile).toHaveBeenCalledWith('blob')
+    expect(downloadFile).toHaveBeenCalledWith('blob', expect.any(AbortSignal))
     expect(runAgent).not.toHaveBeenCalled()
     expect(send).not.toHaveBeenCalled()
   })
@@ -311,4 +312,64 @@ describe('an album', () => {
     // The reply threads onto the page that asked.
     expect(send).toHaveBeenCalledWith('-100', 'Looks like school photo day.', 32)
   })
+
+  it('leaves out the pages still to fetch once the downloads\' time is gone, and answers with what came', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const dm = { id: 111, type: 'private' }
+      downloadFile.mockImplementationOnce(async () => {
+        vi.setSystemTime(Date.now() + 180_000)
+        return { bytes: new Uint8Array([137, 80, 78, 71]), path: 'photos/file_1.jpg' }
+      })
+      await Promise.all([processUpdate(page(1, dm, 'add these dates')), processUpdate(page(2, dm)), processUpdate(page(3, dm))])
+      expect(downloadFile.mock.calls.map(([id]) => id)).toEqual(['page1'])
+      expect(runAgent.mock.calls[0][0].attachments).toHaveLength(1)
+      expect(console.warn).toHaveBeenCalledWith('[telegram] out of time: 2 attachment(s) not fetched')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('the time a turn has', () => {
+  it('runs from when the message arrived, so the downloads and the wait for the turn ahead come out of it', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const arrived = Date.now()
+      downloadFile.mockImplementationOnce(async () => {
+        vi.setSystemTime(Date.now() + 20_000)
+        return { bytes: new Uint8Array([137, 80, 78, 71]), path: 'photos/file_1.jpg' }
+      })
+      vi.mocked(awaitTurn).mockImplementationOnce(async () => {
+        vi.setSystemTime(Date.now() + 90_000)
+        return 'hold'
+      })
+      await processUpdate(photoUpdate('add these dates'))
+      // A minute short of the ceiling, whenever the turn itself began.
+      expect(runAgent.mock.calls[0][0].deadline).toBe(arrived + 240_000)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('gives up on a file the host stalls on while the turn still has time, and answers without it', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const arrived = Date.now()
+      // What came before the downloads left them only a moment.
+      recordMessage.mockImplementationOnce(async () => {
+        vi.setSystemTime(arrived + 180_000 - 50)
+        return 1
+      })
+      // A file host that takes the request and never sends the body.
+      downloadFile.mockImplementationOnce((_id, signal) =>
+        new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal.reason))),
+      )
+      await processUpdate(photoUpdate('what is this'))
+      expect(runAgent.mock.calls[0][0]).toMatchObject({ text: 'what is this', attachments: [] })
+      expect(send).toHaveBeenCalledWith('111', 'Looks like school photo day.', undefined)
+    } finally {
+      vi.useRealTimers()
+    }
+  }, 2_000)
 })

@@ -121,22 +121,29 @@ function describeJevError(err: unknown): string {
  * One call to Jev, recorded like any model call: a row in the chain health
  * under Jev's own slot, and a generation in the trace when tracing is on. The
  * error is rethrown with its description, so the caller's log line and the
- * chain health say the same thing.
+ * chain health say the same thing. With a `deadline` (epoch ms) the call and
+ * its retries stop there: the timeout is per attempt, and three attempts at
+ * it would outlast what is left of a turn near its end.
  */
 export async function askJev<const Q extends Questions>(input: {
   purpose: string
   state: EntryType
   questions: Q
   trace: PropagateAttributesParams
+  deadline?: number
 }): Promise<SystemOneResult<Q>> {
   const slot = jevSlot()
   const started = Date.now()
+  // As with the chain's slots, a call started past the deadline would be cut
+  // off before it could answer, and the failure recorded would not be Jev's.
+  if (input.deadline !== undefined && started >= input.deadline) throw new Error('Timed out before Jev was asked')
+  const options = input.deadline === undefined ? undefined : { signal: AbortSignal.timeout(input.deadline - started) }
   try {
     const result = await traced({ ...input.trace, metadata: { ...input.trace.metadata, model: slot } }, () =>
       observed(
         input.purpose,
         { model: jevModel(), input: { state: input.state, questions: input.questions } },
-        () => client().systemOne({ state: input.state, questions: input.questions }),
+        () => client().systemOne({ state: input.state, questions: input.questions }, options),
         (r) => ({ output: r.answers, usage: { input: r.usage.input_tokens, output: r.usage.output_tokens } }),
       ),
     )
@@ -204,12 +211,13 @@ const CLAIM_QUESTION = noul(
 )
 
 /** Whether a chat reply says a change was made; the caller knows whether one was. */
-export async function claimsChange(input: { reply: string; chatId: string }): Promise<boolean> {
+export async function claimsChange(input: { reply: string; chatId: string; deadline?: number }): Promise<boolean> {
   const { answers } = await askJev({
     purpose: 'hearth.claim',
     state: { reply: input.reply.slice(0, REPLY_CHARS) },
     questions: { claimsChange: CLAIM_QUESTION },
     trace: { traceName: 'hearth.claim', sessionId: input.chatId, tags: ['claim'] },
+    deadline: input.deadline,
   })
   return answers.claimsChange.noul >= THRESHOLDS.claimsChange
 }
@@ -242,7 +250,7 @@ const checkQuestion = (statement: string) =>
 
 export type ClaimCheck = { claim: string; supported: boolean; p: number }
 
-export async function checkClaims(input: { label: string; claims: string[]; evidence: string }): Promise<ClaimCheck[]> {
+export async function checkClaims(input: { label: string; claims: string[]; evidence: string; deadline?: number }): Promise<ClaimCheck[]> {
   if (input.claims.length === 0) return []
   const questions = Object.fromEntries(input.claims.map((claim, i) => [`c${i}`, checkQuestion(claim)]))
   const { answers } = await askJev({
@@ -250,6 +258,7 @@ export async function checkClaims(input: { label: string; claims: string[]; evid
     state: { evidence: input.evidence },
     questions,
     trace: { traceName: 'hearth.verify', tags: ['verify', 'check'], metadata: { label: input.label } },
+    deadline: input.deadline,
   })
   return input.claims.map((claim, i) => {
     const p = answers[`c${i}`].probabilities.supported
@@ -306,12 +315,14 @@ export async function decidePost(input: {
   evidence: string
   /** Every statement the claim check pulled out of this draft was checked against this evidence and supported. */
   verified?: boolean
+  deadline?: number
 }): Promise<JevPostDecision> {
   const { answers } = await askJev({
     purpose: 'hearth.decision',
     state: { draft: input.draft, evidence: input.evidence },
     questions: { invented: INVENTED_QUESTION, nothingNew: NOTHING_NEW_QUESTION },
     trace: { traceName: 'hearth.decision', tags: ['decision'], metadata: { label: input.label } },
+    deadline: input.deadline,
   })
   const invented = answers.invented.noul
   const nothingNew = answers.nothingNew.noul

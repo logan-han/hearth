@@ -12,7 +12,7 @@ import { retryTickAt } from '@/lib/scheduler'
 import { timezone, idSet } from '@/lib/env'
 import { db, schema } from '@/lib/db'
 import { eq } from 'drizzle-orm'
-import { runAgent, decideWatcherPost, reviewDraft, looksBefore, type AgentResult } from '@/lib/agent'
+import { runAgent, decideWatcherPost, reviewDraft, looksBefore, TURN_BUDGET_MS, type AgentResult } from '@/lib/agent'
 import { buildTools, type ToolName } from '@/lib/tools'
 import type { ToolContext } from '@/lib/tools/context'
 import { WATCHERS, isWatcherKind, isGroupChat, watcherInstruction, type WatcherKind } from '@/lib/watchers'
@@ -101,11 +101,14 @@ const heldBack = (a: Automation, why: string, draft: string) =>
  * previous day's talk is re-read purely for what deserves keeping. One model
  * call, silent, with only the memory tools in reach.
  */
-async function maybeConsolidateMemory(now: Date): Promise<void> {
+async function maybeConsolidateMemory(now: Date, deadline: number): Promise<void> {
   const localHour = new Date(now.getTime() + tzOffsetMs(now, timezone())).getUTCHours()
   if (localHour < 3) return
   const today = localDateKey(now)
   if ((await getSetting('memory_sweep_day')) === today) return
+  // The day is claimed below, so a pass the platform cut off would be lost
+  // until tomorrow. With less than a whole turn left, the next tick has it.
+  if (deadline - Date.now() < TURN_BUDGET_MS) return
   // Claim before working; a racing tick at worst repeats an idempotent pass.
   await setSetting('memory_sweep_day', today)
 
@@ -127,6 +130,7 @@ async function maybeConsolidateMemory(now: Date): Promise<void> {
       text:
         "Nightly memory pass. Yesterday's household talk follows; the Known household facts are in your context.\n\n" +
         transcript,
+      deadline,
     })
   } catch (err) {
     // A failed pass costs nothing; tomorrow re-reads a fresh day.
@@ -255,7 +259,22 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
 /** The Known facts the writer had in view, so the checks judge the draft against the same sources. */
 const factsGiven = (r: AgentResult) => (r.facts ? `${r.facts}\n\n` : '')
 
-async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | undefined): Promise<void> {
+/**
+ * Vercel ends the tick at maxDuration, and a run cut off there is lost: it
+ * was claimed, so it is not due again until its next time. So the tick keeps
+ * one clock from its start, and every run and check it makes is over this far
+ * in, which leaves the last post, its records and the traces the rest.
+ */
+const TICK_BUDGET_MS = 280_000
+/**
+ * How much of the end of the tick a run leaves for its draft's checks. The
+ * claim check has the first half and the post decision the second, so the
+ * last gate a draft passes is still asked when the claim check ran long.
+ */
+const REVIEW_RESERVE_MS = 60_000
+const DECISION_RESERVE_MS = 30_000
+
+async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | undefined, deadline: number): Promise<void> {
   const now = new Date()
   const memberName = member?.name ?? 'the family'
   const ctx: ToolContext = { chatId: a.chatId, member: member ?? null, memberName, now, notices: [], shared: isGroupChat(a.chatId) }
@@ -285,19 +304,21 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
     ...(watcher.maxOutputTokens ? { maxOutputTokens: watcher.maxOutputTokens } : {}),
     history: false,
     text: `Scheduled check "${a.label}".\n\n${instruction}\n\nDATA (fetched just now):\n${data}`,
+    deadline: deadline - REVIEW_RESERVE_MS,
   }))
   const staged = () => [...(ctx.pendingCursors ?? []), ...(result.cursors ?? [])]
   await counted(a, member, staged, () => deliver(
     a, member, result,
     `INSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`,
     () => spentClean(a, staged()),
+    deadline,
   ))
   // Asked once: whatever became of the post, Home keeps the question until it is answered.
   if (fetched.asked?.length) await markQuestionsAsked(fetched.asked)
 }
 
 /** A member's own scheduled instruction: the model decides what to fetch, with read-only tools. */
-async function runCustom(a: Automation, member: Member | undefined): Promise<void> {
+async function runCustom(a: Automation, member: Member | undefined, deadline: number): Promise<void> {
   const result = await counted(a, member, looksBefore, () => runAgent({
     chatId: a.chatId,
     chatType: isGroupChat(a.chatId) ? 'group' : 'private',
@@ -315,12 +336,14 @@ async function runCustom(a: Automation, member: Member | undefined): Promise<voi
       'If the instruction only wants a post under some condition and that condition is not met (nothing new, nothing to report), reply with exactly SKIP and nothing will be posted. Write nothing beside it: a quiet run needs no explanation of why it was quiet. ' +
       'If a tool fails or errors, never post the failure to the chat: write PROBLEM: followed by a one-line diagnosis, then SKIP on its own line. That, and only that, reaches the admins privately. ' +
       'Reply with the post alone: no preamble, no planning notes, no handover line such as "now the post:", no commentary about what the tools returned.',
+    deadline: deadline - REVIEW_RESERVE_MS,
   }))
   const staged = () => result.cursors ?? []
   await counted(a, member, staged, () => deliver(
     a, member, result,
     `INSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`,
     () => spentClean(a, staged()),
+    deadline,
   ))
 }
 
@@ -394,16 +417,17 @@ const SERVICE_PROBLEM =
  * here once stacked on Jev's and held back a grounded brief at 0.63. If the
  * decision itself cannot be made (a provider that will not return the
  * structured object) the draft goes out as it always did, and an admin hears
- * that the safety net was down. A draft held back at either step is reported
- * to an admin with the reason: a run that wrote something and posted nothing
- * is not the quiet kind of quiet.
+ * that the safety net was down; a decision the tick ran out of time for is
+ * held back instead, as the judges were not all asked. A draft held back at
+ * either step is reported to an admin with the reason: a run that wrote
+ * something and posted nothing is not the quiet kind of quiet.
  *
  * What posts is the reviewed draft itself, never a retype from the decision:
  * the decision once offered its own wording, and that is what turned a
  * formatted snapshot into plain lines and brought back entries the check had
  * never seen.
  */
-async function approve(a: Automation, member: Member | undefined, draft: string, evidence: string): Promise<string | null> {
+async function approve(a: Automation, member: Member | undefined, draft: string, evidence: string, deadline: number): Promise<string | null> {
   // First the factored check: each claim against the evidence, in a context
   // that never sees the draft. What fails is cut; if nothing survives, silence.
   let reviewed = draft
@@ -417,7 +441,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
   // checked since, leaves this false and the full line stands.
   let verified = false
   try {
-    const review = await reviewDraft({ label: a.label, draft, evidence })
+    const review = await reviewDraft({ label: a.label, draft, evidence, deadline: deadline - DECISION_RESERVE_MS })
     if (review.message === null) {
       const why = `no claim survived the check: ${review.unsupported.join(' | ')}`
       console.warn(`[tick] ${a.label}: held back, ${why}`)
@@ -433,7 +457,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
     console.error(`[tick] ${a.label}: claim check unavailable, deciding on the raw draft:`, describeError(err))
   }
   try {
-    const d = await decideWatcherPost({ label: a.label, draft: reviewed, evidence, verified })
+    const d = await decideWatcherPost({ label: a.label, draft: reviewed, evidence, verified, deadline })
     console.info(
       '[tick] decision',
       JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, verified, model: d.model, reason: d.reason ?? null }),
@@ -445,6 +469,16 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
     return null
   } catch (err) {
     const reason = describeError(err)
+    // The tick's own clock stopping the judges is not every judge down: the
+    // rest of the chain was never asked, and a draft goes out unchecked only
+    // when none could answer it. So it is held back like any other the checks
+    // did not pass. A second's slack, as a timer can fire a little early by
+    // the wall clock.
+    if (Date.now() >= deadline - 1_000) {
+      console.warn(`[tick] ${a.label}: held back, the tick ran out of time for the post decision:`, reason)
+      await tellAdminQuietly(member, heldBack(a, 'the tick ran out of time before the post check could answer', reviewed))
+      return null
+    }
     console.error(`[tick] ${a.label}: post decision unavailable, posting the draft:`, reason)
     await tellAdminQuietly(member, `Watcher **${a.label}**: the post decision failed (${reason}), so its draft went out unchecked.`)
     return reviewed
@@ -474,6 +508,7 @@ async function deliver(
   result: AgentResult,
   evidence: string,
   spent: () => Promise<void>,
+  deadline: number,
 ): Promise<'spent' | 'problem' | 'unavailable' | 'capped'> {
   const split = (part: string) => {
     const lines = part.split('\n')
@@ -504,7 +539,7 @@ async function deliver(
   const parts: string[] = []
   let withheld = false
   if (!draft.skip && draft.rest) {
-    const approved = await approve(a, member, draft.rest, evidence)
+    const approved = await approve(a, member, draft.rest, evidence, deadline)
     if (approved) parts.push(approved)
     else withheld = true
   }
@@ -735,22 +770,17 @@ async function heldForHeadcount(a: Automation): Promise<boolean> {
   return true
 }
 
-/**
- * Vercel ends the tick at maxDuration, and a run cut off there is lost: it
- * was claimed, so it is not due again until its next time. No run starts this
- * far into the loop, which leaves the last one started room to finish, and
- * whatever is still due unclaimed and first in line at the next tick.
- */
-const START_RUNS_WITHIN_MS = 200_000
-
-async function runDue(): Promise<{ ran: number; skipped: number }> {
+async function runDue(deadline: number): Promise<{ ran: number; skipped: number }> {
   const now = new Date()
   const due = await dueAutomations(now)
   let ran = 0
   let skipped = 0
 
   for (const [i, a] of due.entries()) {
-    if (Date.now() - now.getTime() >= START_RUNS_WITHIN_MS) {
+    // No run starts without room for a whole turn and its checks before the
+    // tick's deadline, so the last one started can finish, and whatever is
+    // still due stays unclaimed and first in line at the next tick.
+    if (deadline - Date.now() < TURN_BUDGET_MS + REVIEW_RESERVE_MS) {
       console.warn(`[tick] out of time: ${due.length - i} due automation(s) left for the next tick`)
       break
     }
@@ -809,8 +839,8 @@ async function runDue(): Promise<{ ran: number; skipped: number }> {
       // not the first DM when a draft is held back.
       const member = creator?.allowed ? creator : undefined
 
-      if (isWatcherKind(a.kind)) await runReadyMade(a.kind, a, member)
-      else await runCustom(a, member)
+      if (isWatcherKind(a.kind)) await runReadyMade(a.kind, a, member, deadline)
+      else await runCustom(a, member, deadline)
       ran++
     } catch (err) {
       console.error(`[tick] automation ${a.id} failed:`, err)
@@ -839,6 +869,7 @@ async function runDue(): Promise<{ ran: number; skipped: number }> {
 }
 
 export async function POST(req: Request) {
+  const deadline = Date.now() + TICK_BUDGET_MS
   // Checked first against the keys this instance already holds, so a
   // stranger's call costs no database read (see recheckSecrets). Automations
   // run the agent and message Telegram, so dashboard-managed settings are then
@@ -884,8 +915,8 @@ export async function POST(req: Request) {
   } catch (err) {
     console.error('[tick] could not install the built-in watchers:', err)
   }
-  const result = await runDue()
-  await maybeConsolidateMemory(new Date())
+  const result = await runDue(deadline)
+  await maybeConsolidateMemory(new Date(), deadline)
   await pruneModelEvents(30)
   // A proposal whose occasion has passed, or whose event got to the calendar
   // another way, is no longer a question for anyone. The lists already hide

@@ -122,12 +122,19 @@ function mediaIn(msg: Message): Media[] {
 /**
  * Pull down anything the model can look at. Failures are swallowed on purpose:
  * a photo we cannot fetch should degrade to a text-only reply, not an error.
+ * Nothing is still downloading at `until` (epoch ms), a stalled file included,
+ * and what is not in by then is left out the same way.
  */
-async function collectAttachments(media: Media[]): Promise<Attachment[]> {
+async function collectAttachments(media: Media[], until: number): Promise<Attachment[]> {
   const out: Attachment[] = []
-  for (const { fileId, kind, declared, name } of media) {
+  for (const [i, { fileId, kind, declared, name }] of media.entries()) {
+    const left = until - Date.now()
+    if (left <= 0) {
+      console.warn(`[telegram] out of time: ${media.length - i} attachment(s) not fetched`)
+      break
+    }
     try {
-      const { bytes, path } = await downloadFile(fileId)
+      const { bytes, path } = await downloadFile(fileId, AbortSignal.timeout(left))
       let mediaType = mediaTypeFor(name ?? path, declared)
       // A calendar export forwarded from a mail app often arrives with no
       // useful type or extension; the file itself says what it is.
@@ -668,8 +675,24 @@ async function refuseForStrangers(c: TelegramContext): Promise<boolean> {
   return true
 }
 
+/**
+ * How long after an update arrives its turn must be over. The function is
+ * stopped at 300 s, and the last minute of that is left for the reply, or the
+ * apology, its record and the traces.
+ */
+const UPDATE_BUDGET_MS = 240_000
+/**
+ * How much of that the downloads leave the turn. A file the host stalls on is
+ * given up this far from the end, and the message is answered without it.
+ */
+const ANSWER_RESERVE_MS = 60_000
+
 /** Full processing, run after the webhook has already acked. */
 export async function processUpdate(update: Update): Promise<void> {
+  // The turn's clock starts here, not when the turn does: the gate, an
+  // album's pause, the attachments and the wait for the turn ahead (up to
+  // 90 s) all run inside the same 300 s.
+  const deadline = Date.now() + UPDATE_BUDGET_MS
   if (await handleMembershipChange(update)) return
 
   const c = await parse(update)
@@ -741,7 +764,7 @@ export async function processUpdate(update: Update): Promise<void> {
     parts = album
   }
   const said = parts.map((p) => p.text).filter(Boolean).join('\n')
-  const attachments = await collectAttachments(parts.flatMap((p) => p.media))
+  const attachments = await collectAttachments(parts.flatMap((p) => p.media), deadline - ANSWER_RESERVE_MS)
   // Nothing to answer: a file with no caption turned out to be nothing a model reads.
   if (!said && attachments.length === 0) {
     await housekeeping(c.chatId)
@@ -759,6 +782,7 @@ export async function processUpdate(update: Update): Promise<void> {
       text: said,
       excludeMessageId: storedId,
       attachments,
+      deadline,
     })
 
     const reply = [result.text, ...unsaid(result.text, result.notices)]
