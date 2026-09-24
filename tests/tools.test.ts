@@ -30,6 +30,11 @@ vi.mock('@/lib/providers', async (orig) => {
   }
 })
 
+// Who Telegram says is in the room: everyone asked about, unless a test says otherwise.
+type Person = { telegramUserId: string; name: string }
+const presentIn = vi.hoisted(() => vi.fn(async (_chatId: string, people: Person[]) => people))
+vi.mock('@/lib/headcount', () => ({ presentIn }))
+
 // The PDF reader is a real dependency; here its answer is fixed so the test is about the tool.
 vi.mock('unpdf', () => ({
   extractText: vi.fn(async () => ({ totalPages: 2, text: 'Policy number HOM 1\nAmount due $3,101.20\nDue 22/10/2026' })),
@@ -58,7 +63,7 @@ beforeEach(async () => {
   process.env.APP_URL = 'https://hearth.example'
   client = (await freshDb()).client
   const member = await q.upsertMember('111', 'Rowan', { allowed: true })
-  ctx = { chatId: '-100', member, memberName: 'Rowan', now: new Date('2026-08-27T00:00:00Z'), notices: [] }
+  ctx = { chatId: '-100', member, memberName: 'Rowan', now: new Date('2026-08-27T00:00:00Z'), notices: [], shared: true }
   await q.saveConnection({ memberId: member.id, provider: 'google', email: 'a@b.com', refreshToken: 'r', scopes: null })
 })
 afterEach(async () => closeDb(client))
@@ -385,6 +390,41 @@ describe('read_email across the family', () => {
     const r = await call(mailTools(ctx), 'read_email', { id: 'm1', provider: 'google', of: 'Nobody' })
     expect(String(r.error)).toContain('Nobody')
   })
+
+  it("keeps another member's mail out of a room only the asker sees, a DM or an MCP client", async () => {
+    await q.upsertMember('222', 'Ada', { allowed: true })
+    readMail.mockResolvedValue({ id: 'm1', subject: 'S', body: 'B' })
+    readAttachment.mockResolvedValue({ filename: 'Results.pdf', mimeType: 'application/pdf', size: 4, bytes: new TextEncoder().encode('%PDF') })
+    for (const own of [{ ...ctx, chatId: '111', shared: false }, { ...ctx, shared: undefined, cursorScope: 'mcp:1' }]) {
+      const read = await call(mailTools(own), 'read_email', { id: 'm1', provider: 'google', of: 'Ada' })
+      expect(String(read.error)).toContain("Ada's mail is read only in the family group")
+      const file = await call(mailTools(own), 'read_attachment', { email_id: 'm1', provider: 'google', filename: 'Results.pdf', of: 'Ada' })
+      expect(String(file.error)).toContain('only in the family group')
+      // Their own mailbox is still theirs to read there.
+      expect((await call(mailTools(own), 'read_email', { id: 'm1', provider: 'google', of: 'Rowan' })).body).toBe('B')
+    }
+    expect(readAttachment).not.toHaveBeenCalled()
+    expect(readMail).toHaveBeenCalledTimes(2)
+  })
+
+  it("keeps another member's mail out of a group they are not in, such as one of the asker and the bot", async () => {
+    await q.upsertMember('222', 'Ada', { allowed: true })
+    const onlyRowan = async (chatId: string, people: Person[]) => {
+      expect(chatId).toBe('-100')
+      return people.filter((p) => p.name === 'Rowan')
+    }
+    presentIn.mockImplementationOnce(onlyRowan).mockImplementationOnce(onlyRowan)
+    readMail.mockResolvedValue({ id: 'm1', subject: 'S', body: 'B' })
+    const read = await call(mailTools(ctx), 'read_email', { id: 'm1', provider: 'google', of: 'Ada' })
+    expect(String(read.error)).toContain('Ada is not in this chat')
+    expect(readMail).not.toHaveBeenCalled()
+
+    // The sweep there reads only whoever is in the room.
+    listMail.mockResolvedValue([{ id: 'a', from: 'f', to: 't', subject: 's', snippet: '', date: '2026-08-26T23:00:00Z', unread: true }])
+    const sweep = await call(mailTools(ctx), 'new_mail', { limit: 10, everyone: true })
+    expect((sweep.accounts as { member: string }[]).map((a) => a.member)).toEqual(['Rowan'])
+    expect(clientsForMock).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('read_attachment', () => {
@@ -511,6 +551,16 @@ describe('new_mail', () => {
     expect((again.accounts as { messages: unknown[] }[]).every((a) => a.messages.length === 0)).toBe(true)
   })
 
+  it('refuses a family-wide sweep anywhere but a room the family shares', async () => {
+    await q.upsertMember('222', 'Ada', { allowed: true })
+    listMail.mockResolvedValue([mail('a', 2)])
+    for (const own of [{ ...ctx, chatId: '111', shared: false }, { ...ctx, shared: undefined, cursorScope: 'mcp:1' }]) {
+      const r = await call(mailTools(own), 'new_mail', { limit: 10, everyone: true })
+      expect(String(r.error)).toContain('only for the family group')
+    }
+    expect(listMail).not.toHaveBeenCalled()
+  })
+
   it('refuses a family-wide sweep while a stranger is in the room', async () => {
     await q.rememberChat('-100', 'group', 'Family')
     await q.noteStranger('-100', { id: '9', name: 'Guest' })
@@ -594,7 +644,7 @@ describe('new_mail', () => {
 
     clientsForMock.mockResolvedValueOnce([])
     const sweep = await call(mailTools(ctx), 'new_mail', { limit: 10, everyone: true })
-    expect(String(sweep.error)).toContain('Nobody has linked a mailbox yet')
+    expect(String(sweep.error)).toContain('Nobody in this chat has linked a mailbox yet')
   })
 })
 

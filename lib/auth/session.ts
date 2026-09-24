@@ -3,8 +3,9 @@ import { SignJWT, jwtVerify } from 'jose'
 import { eq } from 'drizzle-orm'
 import { db } from '../db'
 import { members, connections } from '../db/schema'
-import { required, idSet } from '../env'
+import { idSet } from '../env'
 import type { Member } from '../db/schema'
+import { signingSecret } from './keys'
 
 const COOKIE = 'hearth_session'
 const ALG = 'HS256'
@@ -13,9 +14,7 @@ const TTL_HOURS = 12
 export type Role = 'admin' | 'member'
 export type Session = { email: string; name: string; provider: string; role: Role }
 
-function secret(): Uint8Array {
-  return new TextEncoder().encode(required('TOKEN_ENC_KEY'))
-}
+const secret = () => signingSecret('session')
 
 const same = (a: string | null | undefined, b: string) =>
   (a ?? '').trim().toLowerCase() === b
@@ -52,7 +51,7 @@ export async function createSession(session: Session): Promise<void> {
     .setProtectedHeader({ alg: ALG })
     .setIssuedAt()
     .setExpirationTime(`${TTL_HOURS}h`)
-    .sign(secret())
+    .sign(await secret())
 
   const jar = await cookies()
   jar.set(COOKIE, token, {
@@ -68,7 +67,7 @@ export async function readSession(): Promise<Session | null> {
   const token = (await cookies()).get(COOKIE)?.value
   if (!token) return null
   try {
-    const { payload } = await jwtVerify(token, secret(), { algorithms: [ALG] })
+    const { payload } = await jwtVerify(token, await secret(), { algorithms: [ALG] })
     const { email, name, provider, role } = payload as Record<string, unknown>
     if (typeof email !== 'string') return null
     return {

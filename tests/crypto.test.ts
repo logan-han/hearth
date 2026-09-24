@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { encrypt, decrypt, randomToken, resetKeyCache } from '@/lib/crypto'
+import { encrypt, decrypt, randomToken, resetKeyCache, signingKey } from '@/lib/crypto'
 
 const HEX_KEY = 'a'.repeat(64)
 const B64_KEY = Buffer.alloc(32, 7).toString('base64')
@@ -55,6 +55,25 @@ describe('AES-256-GCM token encryption', () => {
     process.env.TOKEN_ENC_KEY = 'abcd'
     resetKeyCache()
     await expect(encrypt('x')).rejects.toThrow(/32 bytes/)
+  })
+})
+
+describe('signing keys', () => {
+  const hex = (b: Uint8Array) => Buffer.from(b).toString('hex')
+
+  it('is the same key for the same purpose and epoch, and never TOKEN_ENC_KEY itself', async () => {
+    const a = await signingKey('session', '')
+    expect(a).toHaveLength(32)
+    expect(hex(a)).toBe(hex(await signingKey('session', '')))
+    expect(hex(a)).not.toBe(HEX_KEY)
+  })
+
+  it('differs by purpose, by epoch and by TOKEN_ENC_KEY', async () => {
+    const base = hex(await signingKey('session', ''))
+    expect(hex(await signingKey('oauth-state', ''))).not.toBe(base)
+    expect(hex(await signingKey('session', 'next'))).not.toBe(base)
+    process.env.TOKEN_ENC_KEY = 'b'.repeat(64)
+    expect(hex(await signingKey('session', ''))).not.toBe(base)
   })
 })
 

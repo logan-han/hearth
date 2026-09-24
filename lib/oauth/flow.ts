@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server'
 import { authorizeUrl, exchangeCode, emailFromIdToken, type Provider } from './providers'
 import { signState, verifyState } from './state'
-import { upsertMember, saveConnection, connectionFor, recordMessage, memberByTelegramId } from '../db/queries'
-import { appUrl } from '../env'
+import { upsertMember, saveConnection, connectionFor, recordMessage, memberByTelegramId, allMembersWithLinks, allowedMembers } from '../db/queries'
+import { appUrl, idSet } from '../env'
 import { send } from '../telegram'
 import { createSession, resolveRole } from '../auth/session'
 
@@ -115,6 +115,36 @@ export async function completeAuth(req: Request, provider: Provider): Promise<Re
     )
   }
 
+  // A link acts for whoever it was sent to, not whoever opens it: forwarded to
+  // someone else, it would store their mailbox under the sender. An account
+  // the household already knows as another member's is theirs alone, so it is
+  // turned away and they are told, in case the "relink" was not their idea.
+  const owner = email ? await ownerOf(email, payload.tg) : undefined
+  if (owner) {
+    await send(
+      owner.telegramUserId,
+      `Your ${provider} account (${email}) was just offered to Hearth through ${payload.name}'s /connect link, and turned ` +
+        `away because it is yours; nothing changed. If you were asked to open a link to relink, that link was ${payload.name}'s, not yours.`,
+    ).catch((err) => console.error('[oauth] could not tell the owner of a refused link:', err))
+    return fail(`${email} is ${owner.name}'s account in this household, so it cannot be linked to ${payload.name} as well.`)
+  }
+
+  // An address in ADMIN_EMAILS is an admin's even before any row says so: a
+  // founder who came in through ALLOWED_TELEGRAM_IDS and has only signed in to
+  // the dashboard has no address on record and no link for ownerOf to find.
+  // Whose it is cannot be told, so every admin hears it was turned away.
+  if (email && (await adminsAddress(email, payload.tg))) {
+    const admins = (await allowedMembers().catch(() => [])).filter((m) => m.isAdmin)
+    for (const admin of admins) {
+      await send(
+        admin.telegramUserId,
+        `An admin's ${provider} account (${email}, in ADMIN_EMAILS) was just offered to Hearth through ${payload.name}'s /connect ` +
+          `link, and turned away; nothing changed. If it is yours and you were asked to open a link to relink, that link was ${payload.name}'s, not yours.`,
+      ).catch((err) => console.error('[oauth] could not tell an admin of a refused link:', err))
+    }
+    return fail(`${email} is an admin's address in this household, so it cannot be linked to ${payload.name}.`)
+  }
+
   const member = await upsertMember(payload.tg, payload.name)
   await saveConnection({
     memberId: member.id,
@@ -132,6 +162,26 @@ export async function completeAuth(req: Request, provider: Provider): Promise<Re
     .catch(() => {})
 
   return NextResponse.redirect(`${appUrl()}/connect?linked=${provider}`)
+}
+
+/** The other member an address belongs to, whether an admin recorded it or they linked a mailbox with it. */
+async function ownerOf(email: string, telegramUserId: string) {
+  const same = (a: string | null) => (a ?? '').trim().toLowerCase() === email.trim().toLowerCase()
+  return (await allMembersWithLinks()).find(
+    (m) => m.telegramUserId !== telegramUserId && (same(m.email) || m.linked.some((l) => same(l.email))),
+  )
+}
+
+/**
+ * Whether an address is an ADMIN_EMAILS one this member may not link: only an
+ * admin may, or the member an admin recorded it against. Anyone else holding
+ * it would also be who the dashboard takes that admin's sign-in to be.
+ */
+async function adminsAddress(email: string, telegramUserId: string): Promise<boolean> {
+  const address = email.trim().toLowerCase()
+  if (![...idSet('ADMIN_EMAILS')].some((e) => e.toLowerCase() === address)) return false
+  const linker = await memberByTelegramId(telegramUserId)
+  return !linker?.isAdmin && (linker?.email ?? '').trim().toLowerCase() !== address
 }
 
 function fail(message: string): Response {

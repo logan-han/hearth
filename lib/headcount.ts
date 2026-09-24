@@ -54,18 +54,10 @@ export async function unaccountedIn(chatId: string): Promise<number | null> {
 
   const present = new Set<number>()
   for (const id of ids) {
-    try {
-      const m = await api.getChatMember(chatId, id)
-      if (inRoom(m)) present.add(m.user.id)
-    } catch (err) {
-      if (transient(err)) throw err
-      // An id Telegram has never seen in this chat is simply not there. Any
-      // other refusal means the room cannot be seen, and a room that cannot be
-      // seen is not one to post into.
-      if (NOT_THERE.test(said(err))) continue
-      console.warn(`[headcount] could not look up a member of chat ${chatId}:`, said(err))
-      return null
-    }
+    // A room that cannot be seen is not one to post into.
+    const there = await isIn(chatId, id)
+    if (there === null) return null
+    if (there) present.add(id)
   }
   return Math.max(0, total - 1 - present.size)
 }
@@ -95,4 +87,34 @@ export async function flagRevoked(person: Pick<Member, 'id' | 'telegramUserId' |
     quiet.push(room.title ?? room.chatId)
   }
   return quiet
+}
+
+/**
+ * Those of these people Telegram says are in the group now. Another member's
+ * mail is read into a group only while they are there to see it asked for: a
+ * group of one member and the bot passes every other test of a household
+ * room, and would otherwise hand that member everyone's mail with nobody else
+ * watching. Someone Telegram will not say is there is taken as not there.
+ */
+export async function presentIn<T extends { telegramUserId: string }>(chatId: string, people: T[]): Promise<T[]> {
+  const out: T[] = []
+  for (const person of people) {
+    if (/^\d+$/.test(person.telegramUserId) && (await isIn(chatId, Number(person.telegramUserId)))) out.push(person)
+  }
+  return out
+}
+
+/** Whether Telegram says this person is in the chat, or null when it will not say. */
+async function isIn(chatId: string, id: number): Promise<boolean | null> {
+  try {
+    const m = await bot().api.getChatMember(chatId, id)
+    return inRoom(m)
+  } catch (err) {
+    if (transient(err)) throw err
+    // An id Telegram has never seen in this chat is simply not there. Any
+    // other refusal means the room cannot be seen.
+    if (NOT_THERE.test(said(err))) return false
+    console.warn(`[headcount] could not look up a member of chat ${chatId}:`, said(err))
+    return null
+  }
 }

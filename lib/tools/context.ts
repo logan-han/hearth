@@ -60,6 +60,14 @@ export type ToolContext = {
    * morning brief and 2Up posts.
    */
   cursorScope?: string
+  /**
+   * Whether what comes back is read in a room the family shares: a group chat,
+   * where everyone sees what was asked for and what it turned up. A private
+   * chat with the bot, an MCP client and a member's own scheduled instruction
+   * are one member's alone, so there another member's mailbox stays out of
+   * reach; see mailboxOwner, which in a group also wants its owner there.
+   */
+  shared?: boolean
 }
 
 export function requireMember(ctx: ToolContext): Member {

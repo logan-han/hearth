@@ -5,6 +5,7 @@ import { NotConnectedError, ReconnectNeededError } from '../providers/token'
 import type { Member } from '../db/schema'
 import { parseIcs, describeIcs } from '../ics-parse'
 import { createDraft, getDraft, markDraft, connectionsFor, allowedMembers, strangersIn, pendingDrafts } from '../db/queries'
+import { presentIn } from '../headcount'
 import { currentCursor, stageCursor } from './cursor'
 import type { ToolContext } from './context'
 import { requireMember } from './context'
@@ -24,7 +25,10 @@ async function linkedProviders(memberId: number): Promise<Provider[]> {
 /**
  * Whose mailbox a tool reads: the asker's, or a named family member's when
  * the message came up in a family sweep. Reading someone else's mail follows
- * the same house rule as the sweep: never in front of strangers.
+ * the same house rules as the sweep: only where the family sees it asked for,
+ * with its owner in the room, and never in front of strangers. A DM, an MCP
+ * client or a group of the asker and the bot would otherwise hand one member
+ * the others' mail, bodies and attachments and all, unseen.
  */
 export async function mailboxOwner(ctx: ToolContext, of?: string): Promise<{ owner: Member } | { error: string }> {
   const member = requireMember(ctx)
@@ -32,8 +36,14 @@ export async function mailboxOwner(ctx: ToolContext, of?: string): Promise<{ own
   if (!name || name === member.name.trim().toLowerCase()) return { owner: member }
   const target = (await allowedMembers()).find((m) => m.name.trim().toLowerCase() === name)
   if (!target) return { error: `No family member called "${of}".` }
+  if (!ctx.shared) {
+    return { error: `${target.name}'s mail is read only in the family group, where everyone can see it asked for. Here, only your own.` }
+  }
   if ((await strangersIn(ctx.chatId)).length > 0) {
     return { error: 'Not while someone unrecognised is in this chat. An admin can vouch for them with /allow.' }
+  }
+  if ((await presentIn(ctx.chatId, [target])).length === 0) {
+    return { error: `${target.name} is not in this chat, so their mail is not read here. Only in a group they are in, or your own.` }
   }
   return { owner: target }
 }
@@ -80,7 +90,7 @@ export function mailTools(ctx: ToolContext) {
         'Email that has arrived since this chat last checked. Advances its own marker per person, so the same ' +
         'message is never reported twice — built for scheduled sweeps. Returns empty lists when there is nothing new. ' +
         'Only the newest `limit` are listed; the rest are counted in more_not_shown and will not be listed again, so ask for a higher limit up front if they matter. ' +
-        "Acts on the asker's own mailbox(es); set everyone for a family-wide sweep across every linked member.",
+        "Acts on the asker's own mailbox(es); set everyone for a family-wide sweep across every linked member in this chat.",
       inputSchema: z.object({
         limit: z.number().int().min(1).max(30).default(10).describe('Per mailbox'),
         everyone: z
@@ -90,11 +100,15 @@ export function mailTools(ctx: ToolContext) {
       }),
       execute: async ({ limit, everyone }) => {
         // A family-wide sweep reads several people's mail into one room, so the
-        // same house rule as live questions applies: not in front of strangers.
+        // same house rules as live questions apply: only a room the family
+        // shares, not in front of strangers, and only the mail of those there.
+        if (everyone && !ctx.shared) {
+          return { error: 'A family-wide sweep is only for the family group. Here, leave everyone off for your own mail.' }
+        }
         if (everyone && (await strangersIn(ctx.chatId)).length > 0) {
           return { error: 'Not while someone unrecognised is in this chat. An admin can vouch for them with /allow.' }
         }
-        const members = everyone ? await allowedMembers() : [requireMember(ctx)]
+        const members = everyone ? await presentIn(ctx.chatId, await allowedMembers()) : [requireMember(ctx)]
         const max = limit ?? 10
 
         const accounts: object[] = []
@@ -151,7 +165,7 @@ export function mailTools(ctx: ToolContext) {
           }
         }
         if (accounts.length === 0) {
-          return { error: everyone ? 'Nobody has linked a mailbox yet. Send /connect to link one.' : 'No email account linked. Send /connect to link one.' }
+          return { error: everyone ? 'Nobody in this chat has linked a mailbox yet. Send /connect to link one.' : 'No email account linked. Send /connect to link one.' }
         }
         return { accounts }
       },

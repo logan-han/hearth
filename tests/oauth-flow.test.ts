@@ -123,6 +123,97 @@ describe('completeAuth', () => {
     expect(send).toHaveBeenCalledWith('111', expect.stringContaining('linked'))
   })
 
+  it("turns away an account already linked to another member, and tells them rather than the link's owner", async () => {
+    const mum = await q.upsertMember('222', 'Mum', { allowed: true })
+    await q.saveConnection({ memberId: mum.id, provider: 'google', email: 'mum@gmail.com', refreshToken: 'mums', scopes: null })
+    fetchMock.mockResolvedValueOnce(
+      tokenReply({ access_token: 'a', refresh_token: 'r3fr3sh', id_token: idToken({ email: 'Mum@Gmail.com' }) }),
+    )
+    const res = await completeAuth(req(await callbackUrl()), 'google')
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('Mum&#39;s account in this household')
+
+    // Nothing stored for the link's owner, and Mum's own link is as it was.
+    expect(await q.memberByTelegramId('111')).toBeUndefined()
+    expect(await q.decryptRefreshToken((await q.connectionFor(mum.id, 'google'))!)).toBe('mums')
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledWith('222', expect.stringContaining("through Rowan's /connect link"))
+  })
+
+  it('turns away an address an admin recorded against another member, before they have linked anything', async () => {
+    await q.saveMember({ telegramUserId: '333', name: 'Sam', email: 'sam@hearth.example', allowed: true, isAdmin: false })
+    fetchMock.mockResolvedValueOnce(
+      tokenReply({ access_token: 'a', refresh_token: 'r', id_token: idToken({ email: 'sam@hearth.example' }) }),
+    )
+    expect((await completeAuth(req(await callbackUrl()), 'google')).status).toBe(400)
+    expect(send).toHaveBeenCalledWith('333', expect.stringContaining('turned away'))
+  })
+
+  it('still turns the account away when its owner cannot be told', async () => {
+    await q.saveMember({ telegramUserId: '333', name: 'Sam', email: 'sam@hearth.example', allowed: true, isAdmin: false })
+    send.mockRejectedValueOnce(new Error('telegram unreachable'))
+    fetchMock.mockResolvedValueOnce(
+      tokenReply({ access_token: 'a', refresh_token: 'r', id_token: idToken({ email: 'sam@hearth.example' }) }),
+    )
+    expect((await completeAuth(req(await callbackUrl()), 'google')).status).toBe(400)
+    expect(console.error).toHaveBeenCalledWith('[oauth] could not tell the owner of a refused link:', expect.anything())
+  })
+
+  describe('an address in ADMIN_EMAILS', () => {
+    beforeEach(() => void (process.env.ADMIN_EMAILS = 'Parent@Gmail.com'))
+    afterEach(() => void delete process.env.ADMIN_EMAILS)
+
+    it('is turned away from a member who is not an admin, and every admin is told, though no row names its owner', async () => {
+      // A founder seeded by ALLOWED_TELEGRAM_IDS who has only ever signed in to
+      // the dashboard: no address on record and nothing linked.
+      await q.upsertMember('222', 'Parent', { allowed: true, isAdmin: true })
+      await q.upsertMember('111', 'Rowan', { allowed: true })
+      fetchMock.mockResolvedValueOnce(
+        tokenReply({ access_token: 'a', refresh_token: 'parents', id_token: idToken({ email: 'parent@gmail.com' }) }),
+      )
+      const res = await completeAuth(req(await callbackUrl()), 'google')
+      expect(res.status).toBe(400)
+      expect(await res.text()).toContain('an admin&#39;s address')
+      expect(await q.connectionFor((await q.memberByTelegramId('111'))!.id, 'google')).toBeUndefined()
+      expect(send).toHaveBeenCalledTimes(1)
+      expect(send).toHaveBeenCalledWith('222', expect.stringContaining("through Rowan's /connect link"))
+    })
+
+    it('links for an admin, or for the member an admin recorded it against', async () => {
+      await q.upsertMember('111', 'Rowan', { allowed: true, isAdmin: true })
+      fetchMock.mockResolvedValue(
+        tokenReply({ access_token: 'a', refresh_token: 'r', id_token: idToken({ email: 'parent@gmail.com' }) }),
+      )
+      expect((await completeAuth(req(await callbackUrl()), 'google')).status).toBe(307)
+
+      await q.saveMember({ telegramUserId: '111', name: 'Rowan', email: 'parent@gmail.com', allowed: true, isAdmin: false })
+      expect((await completeAuth(req(await callbackUrl()), 'microsoft')).status).toBe(307)
+      const me = await q.memberByTelegramId('111')
+      expect((await q.connectionFor(me!.id, 'microsoft'))!.email).toBe('parent@gmail.com')
+    })
+  })
+
+  it('links an account whose address the provider did not give, since nobody can be said to own it', async () => {
+    await q.saveMember({ telegramUserId: '333', name: 'Sam', email: 'sam@hearth.example', allowed: true, isAdmin: false })
+    fetchMock.mockResolvedValueOnce(tokenReply({ access_token: 'a', refresh_token: 'r' }))
+    expect((await completeAuth(req(await callbackUrl()), 'google')).status).toBe(307)
+    const member = await q.memberByTelegramId('111')
+    expect((await q.connectionFor(member!.id, 'google'))!.email).toBeNull()
+    expect(send).not.toHaveBeenCalledWith('333', expect.anything())
+  })
+
+  it("lets a member relink their own account, whether it came from their link or an admin's record", async () => {
+    const me = await q.saveMember({ telegramUserId: '111', name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false })
+    await q.saveConnection({ memberId: me.id, provider: 'microsoft', email: 'a@b.com', refreshToken: 'old', scopes: null })
+    fetchMock
+      .mockResolvedValueOnce(tokenReply({ access_token: 'a', refresh_token: 'new', id_token: idToken({ email: 'a@b.com' }) }))
+      .mockResolvedValueOnce(tokenReply({ access_token: 'a', refresh_token: 'g', id_token: idToken({ email: 'rowan@hearth.example' }) }))
+    expect((await completeAuth(req(await callbackUrl()), 'microsoft')).status).toBe(307)
+    expect(await q.decryptRefreshToken((await q.connectionFor(me.id, 'microsoft'))!)).toBe('new')
+    expect((await completeAuth(req(await callbackUrl()), 'google')).status).toBe(307)
+    expect((await q.connectionFor(me.id, 'google'))!.email).toBe('rowan@hearth.example')
+  })
+
   it('refuses a grant with no refresh token, which would expire in an hour', async () => {
     fetchMock.mockResolvedValueOnce(tokenReply({ access_token: 'a' }))
     const res = await completeAuth(req(await callbackUrl()), 'google')

@@ -325,13 +325,45 @@ describe('admin sessions', () => {
     expect(jar.store.get('hearth_session')?.split('.')).toHaveLength(3)
   })
 
-  const signRaw = async (claims: Record<string, unknown>) => {
+  const signRaw = async (claims: Record<string, unknown>, key?: Uint8Array) => {
     const { SignJWT } = await import('jose')
+    const { signingSecret } = await import('@/lib/auth/keys')
     return new SignJWT(claims)
       .setProtectedHeader({ alg: 'HS256' })
       .setExpirationTime('1h')
-      .sign(new TextEncoder().encode(process.env.TOKEN_ENC_KEY!))
+      .sign(key ?? (await signingSecret('session')))
   }
+
+  it('refuses a cookie signed with TOKEN_ENC_KEY itself, or with the key OAuth state is signed with', async () => {
+    const { signingSecret } = await import('@/lib/auth/keys')
+    const claims = { email: 'rowan@hearth.example', name: 'Rowan', provider: 'google', role: 'admin' }
+    jar.store.set('hearth_session', await signRaw(claims, new TextEncoder().encode(process.env.TOKEN_ENC_KEY!)))
+    expect(await readSession()).toBeNull()
+    jar.store.set('hearth_session', await signRaw(claims, await signingSecret('oauth-state')))
+    expect(await readSession()).toBeNull()
+    jar.store.set('hearth_session', await signRaw(claims))
+    expect(await readSession()).not.toBeNull()
+  })
+
+  it('ends every session when everyone is signed out, and leaves what is stored readable', async () => {
+    const { signOutEverywhere } = await import('@/lib/auth/keys')
+    await setSecret('TAVILY_API_KEY', 'tvly-secret', 'rowan@hearth.example')
+    const m = await q.upsertMember('555', 'Linked', { allowed: true })
+    await q.saveConnection({ memberId: m.id, provider: 'google', email: 'linked@hearth.example', refreshToken: 'r3fr3sh', scopes: null })
+    await createSession({ email: 'rowan@hearth.example', name: 'Rowan', provider: 'google', role: 'admin' })
+
+    await signOutEverywhere()
+    expect(await readSession()).toBeNull()
+    expect(await q.decryptRefreshToken((await q.connectionFor(m.id, 'google'))!)).toBe('r3fr3sh')
+    delete process.env.TAVILY_API_KEY
+    resetHydration()
+    await hydrateSecrets()
+    expect(process.env.TAVILY_API_KEY).toBe('tvly-secret')
+
+    // A fresh sign-in is signed under the new epoch, and holds.
+    await createSession({ email: 'rowan@hearth.example', name: 'Rowan', provider: 'google', role: 'admin' })
+    expect(await readSession()).not.toBeNull()
+  })
 
   it('refuses a token with no email claim', async () => {
     jar.store.set('hearth_session', await signRaw({ name: 'X', provider: 'google', role: 'admin' }))
@@ -404,10 +436,11 @@ describe('requireAdmin', () => {
 
   it('treats an unknown role claim as member, never as admin', async () => {
     const { SignJWT } = await import('jose')
+    const { signingSecret } = await import('@/lib/auth/keys')
     const token = await new SignJWT({ email: 'x@y.com', name: 'X', provider: 'google', role: 'root' })
       .setProtectedHeader({ alg: 'HS256' })
       .setExpirationTime('1h')
-      .sign(new TextEncoder().encode(process.env.TOKEN_ENC_KEY!))
+      .sign(await signingSecret('session'))
     jar.store.set('hearth_session', token)
     expect((await readSession())?.role).toBe('member')
     expect(await requireAdmin()).toBeNull()

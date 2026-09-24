@@ -628,6 +628,21 @@ describe('running due automations', () => {
     expect(prompt).toContain('no handover line')
   })
 
+  it("runs a member's own instruction on their mailbox alone, even in the group, and the brief on the room's", async () => {
+    // Its PROBLEM lines and held-back drafts reach its author first, so a
+    // sweep of everyone's mail there would be theirs to read alone.
+    dueAutomations.mockResolvedValue([automation({ memberId: 9, label: "check everyone's mail" })])
+    creatorRows.mockResolvedValue([{ id: 9, telegramUserId: '333', name: 'Teen', allowed: true, isAdmin: false }])
+    await authed()
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ chatType: 'group', shared: false }))
+
+    runAgent.mockClear()
+    dueAutomations.mockResolvedValue([automation({ kind: 'morning', label: 'Morning brief' })])
+    newMail.mockResolvedValue({ accounts: [{ member: 'Sam', mailbox: "Sam's Outlook", provider: 'microsoft', messages: [{ id: 'm1' }] }] })
+    await authed()
+    expect((runAgent.mock.calls[0][0] as { shared?: boolean }).shared).toBeUndefined()
+  })
+
   it('offers the agent a way to stay silent, alongside the instruction', async () => {
     dueAutomations.mockResolvedValue([automation()])
     await authed()
@@ -1310,6 +1325,9 @@ describe('ready-made watchers', () => {
     await authed()
     expect(newMail).toHaveBeenNthCalledWith(1, expect.objectContaining({ everyone: true }), expect.anything())
     expect(newMail).toHaveBeenNthCalledWith(2, expect.objectContaining({ everyone: false }), expect.anything())
+    // And the tools know it: without a shared room the group's sweep is refused.
+    expect(buildTools).toHaveBeenNthCalledWith(1, expect.objectContaining({ chatId: '-100999', shared: true }))
+    expect(buildTools).toHaveBeenNthCalledWith(2, expect.objectContaining({ chatId: '111', shared: false }))
     expect(runAgent).not.toHaveBeenCalled()
   })
 

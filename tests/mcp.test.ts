@@ -7,7 +7,8 @@ import type { Member } from '@/lib/db/schema'
 const send = vi.fn(async () => {})
 vi.mock('@/lib/telegram', () => ({ send }))
 const unaccountedIn = vi.hoisted(() => vi.fn(async (_chatId: string): Promise<number | null> => 0))
-vi.mock('@/lib/headcount', () => ({ unaccountedIn }))
+// Everyone is in the group, so only the MCP rule itself can keep their mail out.
+vi.mock('@/lib/headcount', () => ({ unaccountedIn, presentIn: async (_chatId: string, people: unknown[]) => people }))
 
 /** Linked mailboxes, none unless a test adds one. */
 const mailboxes = vi.hoisted(() => ({ list: [] as { provider: string; listMail: () => Promise<unknown[]> }[] }))
@@ -187,6 +188,21 @@ describe('calling a tool', () => {
     // Its own marker: what the client saw is still new to the family's brief.
     expect(await q.getSetting(`mail_cursor:mcp:${member.id}:${member.id}:google`)).not.toBeNull()
     expect(await q.getSetting(`mail_cursor:-100:${member.id}:google`)).toBeNull()
+  })
+
+  it("reads only the key holder's own mailbox, though it acts in the family group", async () => {
+    const ada = await q.upsertMember('222', 'Ada', { allowed: true })
+    await q.saveConnection({ memberId: ada.id, provider: 'google', email: 'ada@hearth.example', refreshToken: 'r', scopes: null })
+    const date = new Date(Date.now() - 3600_000).toISOString()
+    mailboxes.list = [{ provider: 'google', listMail: async () => [{ id: 'm1', from: 'bank', to: 'ada', subject: 'Statement', snippet: '…', date, unread: true }] }]
+    expect(await mcpChat(member)).toBe('-100')
+
+    const sweep = await callTool('new_mail', { limit: 10, everyone: true }, member)
+    expect(text(sweep)).toContain('only for the family group')
+    const read = await callTool('read_email', { id: 'm1', provider: 'google', of: 'Ada' }, member)
+    expect(text(read)).toContain("Ada's mail is read only in the family group")
+    const file = await callTool('read_attachment', { email_id: 'm1', provider: 'google', filename: 'Statement.pdf', of: 'Ada' }, member)
+    expect(text(file)).toContain('only in the family group')
   })
 
   it('stays quiet in the chat when the tool only read something', async () => {

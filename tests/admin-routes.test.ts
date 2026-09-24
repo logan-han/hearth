@@ -19,10 +19,10 @@ vi.mock('@/lib/telegram', () => ({ send, typing: vi.fn(), bot: vi.fn() }))
 
 const { GET, POST } = await import('@/app/api/admin/settings/route')
 const { POST: LOGOUT } = await import('@/app/api/admin/logout/route')
-const { createSession } = await import('@/lib/auth/session')
+const { createSession, readSession } = await import('@/lib/auth/session')
 const { resetHydration, listSettings, MANAGED_KEYS } = await import('@/lib/settings')
 const { startAuth, completeAuth } = await import('@/lib/oauth/flow')
-const { signState } = await import('@/lib/oauth/state')
+const { signState, verifyState } = await import('@/lib/oauth/state')
 
 const fetchMock = vi.fn()
 let client: PGlite
@@ -162,13 +162,53 @@ describe('the settings API respects the allowlist', () => {
 })
 
 describe('signing out', () => {
+  const logout = (everywhere = false) =>
+    LOGOUT(new Request('https://hearth.example/api/admin/logout', {
+      method: 'POST',
+      ...(everywhere ? { body: new URLSearchParams({ everywhere: '1' }) } : {}),
+    }))
+
+  /** A session signed in on some other browser, as its cookie. */
+  const elsewhere = async () => {
+    await createSession({ email: 'ada@hearth.example', name: 'Ada', provider: 'google', role: 'admin' })
+    return jar.store.get('hearth_session')!
+  }
+
   it('destroys the session and bounces to the sign-in screen', async () => {
     await signIn()
     expect(jar.store.has('hearth_session')).toBe(true)
-    const res = await LOGOUT()
+    const res = await logout()
     expect(res.status).toBe(303)
     expect(res.headers.get('location')).toBe('https://hearth.example/')
     expect(jar.store.has('hearth_session')).toBe(false)
+  })
+
+  it('leaves every other session alone when signing out one browser', async () => {
+    const other = await elsewhere()
+    await signIn()
+    await logout()
+    jar.store.set('hearth_session', other)
+    expect(await readSession()).not.toBeNull()
+  })
+
+  it('signs every browser out, and voids every link still out, when an admin asks for everywhere', async () => {
+    const other = await elsewhere()
+    const link = await signState({ tg: '111', name: 'Rowan', chat: '' }, '30m')
+    await signIn()
+    const res = await logout(true)
+    expect(res.status).toBe(303)
+    expect(jar.store.has('hearth_session')).toBe(false)
+    jar.store.set('hearth_session', other)
+    expect(await readSession()).toBeNull()
+    await expect(verifyState(link)).rejects.toThrow()
+  })
+
+  it('signs only themselves out when someone who is not an admin asks for everywhere', async () => {
+    const other = await elsewhere()
+    await createSession({ email: 'kid@hearth.example', name: 'Kid', provider: 'google', role: 'member' })
+    await logout(true)
+    jar.store.set('hearth_session', other)
+    expect(await readSession()).not.toBeNull()
   })
 })
 

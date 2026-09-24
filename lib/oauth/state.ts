@@ -1,11 +1,9 @@
 import { SignJWT, jwtVerify } from 'jose'
-import { required } from '../env'
+import { signingSecret } from '../auth/keys'
 
 const ALG = 'HS256'
 
-function secret(): Uint8Array {
-  return new TextEncoder().encode(required('TOKEN_ENC_KEY'))
-}
+const secret = () => signingSecret('oauth-state')
 
 /**
  * `purpose` separates the two things this round trip is used for: linking a
@@ -21,7 +19,7 @@ export async function signState(payload: StatePayload, ttl = '10m'): Promise<str
     .setProtectedHeader({ alg: ALG })
     .setIssuedAt()
     .setExpirationTime(ttl)
-    .sign(secret())
+    .sign(await secret())
 }
 
 /**
@@ -31,7 +29,7 @@ export async function signState(payload: StatePayload, ttl = '10m'): Promise<str
  * passes as a link bound to nobody.
  */
 export async function verifyState(token: string, expect?: 'link' | 'signin'): Promise<StatePayload> {
-  const { payload } = await jwtVerify(token, secret(), { algorithms: [ALG] })
+  const { payload } = await jwtVerify(token, await secret(), { algorithms: [ALG] })
   const { tg, name, chat, purpose } = payload as Record<string, unknown>
   const kind = purpose === 'signin' ? 'signin' : 'link'
   if (expect && kind !== expect) throw new Error(`state is for ${kind}, not ${expect}`)

@@ -426,7 +426,8 @@ worth saying**:
   arrived since the last brief and is worth knowing about (appointments,
   notices, bills, deliveries), with calendar-worthy dates proposed for the
   family calendar; anything overdue on the board; and the weather. In the
-  group it sweeps every member's linked mailbox, each on its own cursor via
+  group it sweeps the linked mailbox of every member Telegram says is in
+  it, each on its own cursor via
   `new_mail`, and says whose each item was by name (Sam's Outlook), never by
   provider. It reads exactly what arrived since the last brief, up to 20 a
   mailbox, and says how many more there were rather than dropping them without
@@ -485,6 +486,8 @@ Telegram, so the `/` menu lists them; nothing to remember. Anything the
 templates don't cover is a sentence away:
 describe a schedule in plain words and it becomes a custom automation with
 read-only tools, the same right to stay silent, and the same post decision.
+It reads its author's own mailbox and nobody else's, even in the group: its
+problems and held-back drafts go to its author first.
 
 What a watcher read counts as seen only once it has reached someone. A run
 that fails, reports a PROBLEM or has its post refused leaves the mail and the
@@ -690,7 +693,12 @@ admin view. Everyone else is signed in by the provider and then turned away,
 because the check happens on the way back rather than the way out. It happens on
 every request after that too: the session cookie only says who signed in, so a
 revoke or a demotion takes effect on the next click, not when the cookie runs
-out twelve hours later.
+out twelve hours later. For a session left open somewhere it should not be,
+**Sign everyone out** on Settings ends every session at once, the admin's own
+included, and voids every /connect link not yet used. Sessions and OAuth state
+are each signed with their own key, derived from `TOKEN_ENC_KEY` and salted
+with a stored epoch that the button replaces, so ending them never means
+replacing the key that decrypts every stored refresh token and setting.
 
 Admins manage the family from the same page: add someone by Telegram id and
 name, optionally with an email so they can sign in before linking anything,
@@ -759,12 +767,13 @@ claude mcp add --transport http hearth https://<your-deployment>/api/mcp \
   --header "Authorization: Bearer <the key it sent you>"
 ```
 
-The key *is* the member. Every call runs as whoever holds it — their mailbox,
-their calendar, their name on what it writes — so it is only ever sent in a DM,
-and `/mcp off` revokes it. Only the SHA-256 of a key is kept, which is why `/mcp`
-on its own reports what is there rather than quietly reissuing and breaking
-whatever is connected; `/mcp new` replaces it and stops the old one working. A
-member who is denied takes their key with them, like every other door here.
+The key *is* the member. Every call runs as whoever holds it — their mailbox and
+never another member's, their calendar, their name on what it writes — so it is
+only ever sent in a DM, and `/mcp off` revokes it. Only the SHA-256 of a key is
+kept, which is why `/mcp` on its own reports what is there rather than quietly
+reissuing and breaking whatever is connected; `/mcp new` replaces it and stops
+the old one working. A member who is denied takes their key with them, like
+every other door here.
 
 A key travels as a header, which is what Claude Code, Claude Desktop, Cursor and
 anything driven by `mcp-remote` take. Custom connectors on claude.ai want OAuth
@@ -842,7 +851,12 @@ scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
 - A group holding someone unrecognised is a group the bot stays quiet in. It
   notices them either when they join or when they first speak, says so once, and
   resumes when they are vouched for or leave. Without this, member-based auth
-  would still read a private inbox aloud in front of an outsider. Commands obey
+  would still read a private inbox aloud in front of an outsider. Another
+  member's mail is opened by name, or swept in by `new_mail`, only in a group
+  that member is in, by Telegram's word, where they see it asked for; a group
+  of one member and the bot reads that member's mail alone. A DM, an MCP
+  client or a member's own custom automation reads its own member's mailbox
+  and nobody else's. Commands obey
   it as well, bar the few that give nothing away (`/help`, `/whoami`, and
   `/allow`, which is how a room unmutes): `/calendar` in front of a stranger
   would hand them the feed. Someone who never speaks is caught by Telegram's
@@ -866,7 +880,13 @@ scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
 - OAuth `state` is a 10-minute signed JWT bound to one Telegram user, and each
   consumer says which purpose it takes: the sign-in state anyone can ask for
   never passes as a member's `/connect` link, and a link shows nothing to a
-  member revoked since it was sent.
+  member revoked since it was sent. A link acts for the member it was sent to,
+  so an account the household already knows as someone else's (linked by them,
+  or recorded against them by an admin) is turned away, and they are told: a
+  link forwarded with a "please relink" cannot collect another member's mailbox.
+  An address in `ADMIN_EMAILS` counts as an admin's even with no row naming
+  its owner, so only an admin, or the member an admin recorded it against,
+  may link it; anyone else is turned away and every admin is told.
 - Refresh tokens are AES-256-GCM encrypted with `TOKEN_ENC_KEY`.
 - The ICS feed sits behind a long random token, compared without early exit.
   `/calendar new` replaces the token if the URL gets out, and sends the new one

@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
+import type { PGlite } from '@electric-sql/pglite'
+import { freshDb, closeDb } from './helpers/db'
 import { signState, verifyState, connectLink } from '@/lib/oauth/state'
+import { signingSecret, signOutEverywhere } from '@/lib/auth/keys'
 import {
   authorizeUrl, redirectUri, providerConfig, exchangeCode, refreshAccessToken, emailFromIdToken,
 } from '@/lib/oauth/providers'
@@ -20,6 +23,10 @@ afterEach(() => vi.unstubAllGlobals())
 
 describe('oauth state', () => {
   const payload = { tg: '111', name: 'Rowan', chat: '-100' }
+  // The epoch the state is signed under lives in the store.
+  let client: PGlite
+  beforeEach(async () => { client = (await freshDb()).client })
+  afterEach(async () => closeDb(client))
 
   it('round-trips the telegram binding, defaulting to the linking purpose', async () => {
     expect(await verifyState(await signState(payload))).toEqual({ ...payload, purpose: 'link' })
@@ -35,7 +42,7 @@ describe('oauth state', () => {
     const token = await new SignJWT({ tg: '111', name: 'L', chat: '', purpose: 'root' })
       .setProtectedHeader({ alg: 'HS256' })
       .setExpirationTime('5m')
-      .sign(new TextEncoder().encode(process.env.TOKEN_ENC_KEY!))
+      .sign(await signingSecret('oauth-state'))
     expect((await verifyState(token)).purpose).toBe('link')
   })
 
@@ -43,6 +50,22 @@ describe('oauth state', () => {
     const token = await signState(payload)
     process.env.TOKEN_ENC_KEY = 'b'.repeat(64)
     await expect(verifyState(token)).rejects.toThrow()
+  })
+
+  it('will not take a token signed with TOKEN_ENC_KEY itself, or with the key sessions are signed with', async () => {
+    const { SignJWT } = await import('jose')
+    const sign = async (key: Uint8Array) =>
+      new SignJWT({ ...payload }).setProtectedHeader({ alg: 'HS256' }).setExpirationTime('5m').sign(key)
+    await expect(verifyState(await sign(new TextEncoder().encode(process.env.TOKEN_ENC_KEY!)))).rejects.toThrow()
+    await expect(verifyState(await sign(await signingSecret('session')))).rejects.toThrow()
+    expect(await verifyState(await sign(await signingSecret('oauth-state')))).toEqual({ ...payload, purpose: 'link' })
+  })
+
+  it('voids every link still out once everyone is signed out', async () => {
+    const link = new URL(await connectLink('https://hearth.example', payload)).searchParams.get('t')!
+    await signOutEverywhere()
+    await expect(verifyState(link)).rejects.toThrow()
+    expect(await verifyState(await signState(payload))).toEqual({ ...payload, purpose: 'link' })
   })
 
   it('rejects an expired token', async () => {
@@ -60,7 +83,7 @@ describe('oauth state', () => {
     const token = await new SignJWT({ name: 'x' })
       .setProtectedHeader({ alg: 'HS256' })
       .setExpirationTime('5m')
-      .sign(new TextEncoder().encode(process.env.TOKEN_ENC_KEY!))
+      .sign(await signingSecret('oauth-state'))
     await expect(verifyState(token)).rejects.toThrow(/telegram id/)
   })
 
@@ -69,7 +92,7 @@ describe('oauth state', () => {
     const token = await new SignJWT({ purpose: 'signin' })
       .setProtectedHeader({ alg: 'HS256' })
       .setExpirationTime('5m')
-      .sign(new TextEncoder().encode(process.env.TOKEN_ENC_KEY!))
+      .sign(await signingSecret('oauth-state'))
     expect(await verifyState(token)).toEqual({ tg: '', name: 'Family member', chat: '', purpose: 'signin' })
   })
 
@@ -78,7 +101,7 @@ describe('oauth state', () => {
     const token = await new SignJWT({ tg: '111' })
       .setProtectedHeader({ alg: 'HS256' })
       .setExpirationTime('5m')
-      .sign(new TextEncoder().encode(process.env.TOKEN_ENC_KEY!))
+      .sign(await signingSecret('oauth-state'))
     expect(await verifyState(token)).toEqual({ tg: '111', name: 'Family member', chat: '', purpose: 'link' })
   })
 

@@ -258,7 +258,7 @@ const factsGiven = (r: AgentResult) => (r.facts ? `${r.facts}\n\n` : '')
 async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | undefined): Promise<void> {
   const now = new Date()
   const memberName = member?.name ?? 'the family'
-  const ctx: ToolContext = { chatId: a.chatId, member: member ?? null, memberName, now, notices: [] }
+  const ctx: ToolContext = { chatId: a.chatId, member: member ?? null, memberName, now, notices: [], shared: isGroupChat(a.chatId) }
   const tools = buildTools(ctx)
 
   const fetched = await fetchFor(kind, a, ctx, tools)
@@ -301,6 +301,11 @@ async function runCustom(a: Automation, member: Member | undefined): Promise<voi
   const result = await counted(a, member, looksBefore, () => runAgent({
     chatId: a.chatId,
     chatType: isGroupChat(a.chatId) ? 'group' : 'private',
+    // One member's words, which nobody else saw asked for (over MCP, nobody
+    // did at all), and whose PROBLEM lines and held-back drafts go to that
+    // member's DM first. So it reads its author's mailbox only, even in the
+    // group; the ready-made brief's sweep is written in code.
+    shared: false,
     member: member ?? null,
     memberName: member?.name ?? 'the family',
     mode: 'watcher',

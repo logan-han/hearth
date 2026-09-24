@@ -65,6 +65,8 @@ export type AgentInput = {
   maxOutputTokens?: number
   /** When the turn must be over, in epoch ms. Defaults to TURN_BUDGET_MS from the start; a caller with its own clock running can pass a nearer one. */
   deadline?: number
+  /** Whether the tools may read into a room the family shares; see ToolContext.shared. Defaults to any chat but a private one. */
+  shared?: boolean
 }
 
 export type AgentResult = {
@@ -615,6 +617,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     notices: [],
     // A photo, PDF or file sent with the message is outside text as much as an email is.
     readUntrusted: (input.attachments?.length ?? 0) > 0,
+    shared: input.shared ?? input.chatType !== 'private',
   }
 
   const [ambient, history] = await Promise.all([

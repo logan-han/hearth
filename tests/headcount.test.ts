@@ -14,7 +14,7 @@ const { getChatMemberCount, getChatMember, getMe, allowedMembers, groupChats, ro
 vi.mock('@/lib/telegram', () => ({ bot: () => ({ api: { getChatMemberCount, getChatMember, getMe } }) }))
 vi.mock('@/lib/db/queries', () => ({ allowedMembers, groupChats, roomsOf, noteStranger }))
 
-const { unaccountedIn, flagRevoked } = await import('@/lib/headcount')
+const { unaccountedIn, flagRevoked, presentIn } = await import('@/lib/headcount')
 
 /** Telegram's answer for one person: a status, and who it is about. */
 const as = (status: string, id: number, isMember?: boolean) => ({ status, user: { id }, ...(isMember === undefined ? {} : { is_member: isMember }) })
@@ -151,5 +151,36 @@ describe('flagRevoked', () => {
     getChatMember.mockImplementation(async (_c, id) => as('member', id))
     noteStranger.mockResolvedValueOnce(false)
     expect(await flagRevoked(nan)).toEqual(['Family'])
+  })
+})
+
+describe('presentIn', () => {
+  const people = [{ telegramUserId: '111' }, { telegramUserId: '222' }, { telegramUserId: '333' }, { telegramUserId: '0444' }]
+
+  it('keeps only those Telegram says are in the room, however their id was written', async () => {
+    getChatMember.mockImplementation(async (_c, id) => {
+      if (id === 111) return as('creator', id)
+      if (id === 222) return as('restricted', id, true)
+      if (id === 444) return as('member', id)
+      throw refusal(400, 'Bad Request: user not found')
+    })
+    expect(await presentIn('-100', people)).toEqual([people[0], people[1], people[3]])
+  })
+
+  it('takes someone who left, was removed, or whom Telegram will not show, as not there', async () => {
+    getChatMember.mockImplementation(async (_c, id) => {
+      if (id === 111) return as('left', id)
+      if (id === 222) return as('kicked', id)
+      if (id === 333) return as('restricted', id, false)
+      throw refusal(400, 'Bad Request: CHAT_ADMIN_REQUIRED')
+    })
+    expect(await presentIn('-100', people)).toEqual([])
+  })
+
+  it('never asks about an id that is not one, and throws a hiccup on', async () => {
+    expect(await presentIn('-100', [{ telegramUserId: 'not-an-id' }])).toEqual([])
+    expect(getChatMember).not.toHaveBeenCalled()
+    getChatMember.mockRejectedValueOnce(refusal(429, 'Too Many Requests: retry after 5'))
+    await expect(presentIn('-100', people)).rejects.toThrow(/Too Many Requests/)
   })
 })

@@ -59,6 +59,28 @@ export async function decrypt(payload: string): Promise<string> {
   return new TextDecoder().decode(pt)
 }
 
+/**
+ * A key for signing one kind of token, derived from TOKEN_ENC_KEY by HKDF
+ * rather than being it. Each purpose gets its own, so a session can never
+ * pass as OAuth state or the other way round, and the salt is an epoch the
+ * caller stores: changing it voids everything signed before, while the key
+ * that decrypts every stored refresh token and setting stays as it was.
+ */
+export async function signingKey(purpose: 'session' | 'oauth-state', epoch: string): Promise<Uint8Array> {
+  const root = await crypto.subtle.importKey('raw', keyMaterial() as BufferSource, 'HKDF', false, ['deriveBits'])
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: new TextEncoder().encode(epoch),
+      info: new TextEncoder().encode(`hearth ${purpose}`),
+    },
+    root,
+    256,
+  )
+  return new Uint8Array(bits)
+}
+
 /** URL-safe random token, used for the ICS feed address. */
 export function randomToken(bytes = 24): string {
   return Buffer.from(crypto.getRandomValues(new Uint8Array(bytes)))

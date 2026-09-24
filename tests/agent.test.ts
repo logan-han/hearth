@@ -18,6 +18,10 @@ vi.mock('@typesafe-ai/sdk', async (orig) => {
   return { ...actual, TypeSafeClient }
 })
 
+// Nobody Telegram is asked about is in the room: a group turn that reaches
+// that question has been let past the shared-room rule, which is the point.
+vi.mock('@/lib/headcount', () => ({ presentIn: vi.fn(async () => []), unaccountedIn: vi.fn(async () => 0) }))
+
 const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, isStructuredOutputError, unconfirmedLine } = await import('@/lib/agent')
 const { generateText: sdkGenerateText } = await vi.importActual<typeof import('ai')>('ai')
 const { MockLanguageModelV4 } = await import('ai/test')
@@ -246,6 +250,22 @@ describe('runAgent', () => {
     const system = String(generateText.mock.calls[0][0].system)
     expect(system).toContain('Sam (microsoft: sam@outlook.example)')
     expect(system).toContain('Juno (nothing linked)')
+  })
+
+  it("hands its tools a group as a room the family shares, and a DM, or a run told otherwise, as one member's", async () => {
+    const rowan = await q.upsertMember('111', 'Rowan', { allowed: true })
+    await q.upsertMember('222', 'Ada', { allowed: true })
+    const said: string[] = []
+    for (const over of [{ chatType: 'private' }, { chatType: 'group' }, { chatType: 'group', shared: false }]) {
+      generateText.mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<{ error?: string }> }> }) => {
+        said.push(String((await opts.tools.read_email.execute({ id: 'm1', provider: 'google', of: 'Ada' }, {})).error))
+        return reply('ok')
+      })
+      await runAgent({ ...input, member: rowan, ...over })
+    }
+    expect(said[0]).toContain('only in the family group')
+    expect(said[1]).toContain('Ada is not in this chat')
+    expect(said[2]).toContain('only in the family group')
   })
 
   it('carries pending draft ids in context, so "send it" has something to act on', async () => {
