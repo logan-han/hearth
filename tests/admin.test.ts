@@ -18,7 +18,7 @@ vi.mock('next/headers', () => ({ cookies: jar.cookies }))
 
 const {
   MANAGED_KEYS, isManaged, isSecretShaped, setSecret, clearSecret, listSettings,
-  hydrateSecrets, resetHydration,
+  hydrateSecrets, resetHydration, recheckSecrets,
 } = await import('@/lib/settings')
 const { createSession, readSession, destroySession, resolveRole, requireAdmin, requireMember } = await import('@/lib/auth/session')
 
@@ -197,6 +197,60 @@ describe('hydration is resilient', () => {
     expect(reads).toBe(1)
     await hydrateSecrets()
     expect(reads).toBe(2)
+  })
+
+  it('reads the store for a caller it would turn away at most once an hour', async () => {
+    const { __setDb } = await import('@/lib/db')
+    let reads = 0
+    __setDb({
+      select: () => {
+        reads++
+        return { from: async () => [] }
+      },
+    })
+    const start = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(start)
+    // A fresh instance holds nothing yet, so its first look is not counted.
+    expect(await recheckSecrets()).toBe(true)
+    expect(await recheckSecrets()).toBe(true)
+    clock.mockReturnValue(start + 59 * 60_000)
+    expect(await recheckSecrets()).toBe(false)
+    expect(reads).toBe(2)
+    clock.mockReturnValue(start + 60 * 60_000)
+    expect(await recheckSecrets()).toBe(true)
+    expect(reads).toBe(3)
+    clock.mockRestore()
+  })
+
+  it('shares a read under way with a caller it would turn away, and counts no read that failed', async () => {
+    const { __setDb } = await import('@/lib/db')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    let reads = 0
+    let down = true
+    __setDb({
+      select: () => {
+        reads++
+        return {
+          from: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 10))
+            if (down) throw new Error('no database')
+            return []
+          },
+        }
+      },
+    })
+    // The database is down: each refusal still gets its look, as nothing was learnt.
+    expect(await recheckSecrets()).toBe(true)
+    expect(await recheckSecrets()).toBe(true)
+    expect(reads).toBe(2)
+    down = false
+    // Callers arriving together share the one read.
+    expect(await Promise.all([recheckSecrets(), recheckSecrets(), recheckSecrets()])).toEqual([true, true, true])
+    expect(reads).toBe(3)
+    // That was this instance's first read that worked; the next starts the hour.
+    expect(await recheckSecrets()).toBe(true)
+    expect(await recheckSecrets()).toBe(false)
+    expect(reads).toBe(4)
   })
 
   it('skips a row it cannot decrypt and keeps the rest', async () => {

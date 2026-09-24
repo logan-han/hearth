@@ -248,6 +248,15 @@ describe('messages', () => {
     expect(history.map((h) => h.content)).toEqual(['first'])
   })
 
+  it('leaves out what members said after the message being answered, but keeps the replies since', async () => {
+    await q.recordMessage({ chatId: 'c', authorName: 'Rowan', role: 'user', content: 'add milk' })
+    const id = await q.recordMessage({ chatId: 'c', authorName: 'Rowan', role: 'user', content: 'actually, oat milk' })
+    await q.recordMessage({ chatId: 'c', role: 'assistant', content: 'Added milk.' })
+    await q.recordMessage({ chatId: 'c', authorName: 'Sam', role: 'user', content: 'and bread' })
+    const history = await q.recentMessages('c', 30, id)
+    expect(history.map((h) => h.content)).toEqual(['add milk', 'Added milk.'])
+  })
+
   it('returns oldest first', async () => {
     for (const t of ['a', 'b', 'c']) {
       await q.recordMessage({ chatId: 'c', role: 'user', content: t })

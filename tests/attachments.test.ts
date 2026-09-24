@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 // vi.mock factories are hoisted above ordinary consts, so the doubles they
 // close over have to be hoisted too.
-const { downloadFile, runAgent, recordMessage, send } = vi.hoisted(() => ({
+const { downloadFile, runAgent, recordMessage, send, memberByTelegramId, albums } = vi.hoisted(() => ({
   downloadFile: vi.fn<(id: string) => Promise<{ bytes: Uint8Array; path: string }>>(),
   runAgent: vi.fn(
     async (_input: { text: string; attachments?: { mediaType: string; kind: string }[] }) => ({
@@ -12,7 +12,9 @@ const { downloadFile, runAgent, recordMessage, send } = vi.hoisted(() => ({
     }),
   ),
   recordMessage: vi.fn(async () => 1),
-  send: vi.fn(async () => {}),
+  send: vi.fn(async (_chatId: string, _text: string, _replyTo?: number) => {}),
+  memberByTelegramId: vi.fn(async (_id: string) => undefined as unknown),
+  albums: new Map<string, { messageId: number }[]>(),
 }))
 
 vi.mock('@/lib/telegram', async (orig) => ({
@@ -26,7 +28,7 @@ vi.mock('@/lib/agent', () => ({ runAgent, shouldChimeIn: vi.fn(async () => false
 vi.mock('@/lib/summary', () => ({ maybeSummarise: vi.fn(async () => false) }))
 vi.mock('@/lib/db/queries', () => ({
   upsertMember: vi.fn(async () => ({ id: 3, telegramUserId: '111', name: 'Rowan', allowed: true, isAdmin: true })),
-  memberByTelegramId: vi.fn(async () => undefined),
+  memberByTelegramId,
   setMemberAllowed: vi.fn(async () => undefined),
   allowedMembers: vi.fn(async () => []),
   rememberChat: vi.fn(async () => {}),
@@ -41,6 +43,22 @@ vi.mock('@/lib/db/queries', () => ({
   calendarToken: vi.fn(async () => 'tok'),
 }))
 vi.mock('@vercel/functions', () => ({ waitUntil: (p: Promise<unknown>) => p }))
+
+// The chat's turn and an album's items are held in the database; here a map
+// stands in for the album rows, emptied by the first take.
+vi.mock('@/lib/turns', () => ({
+  awaitTurn: vi.fn(async () => 'hold'),
+  endTurn: vi.fn(async () => {}),
+  noteAlbumItem: vi.fn(async (chatId: string, albumId: string, item: { messageId: number }) => {
+    albums.set(`${chatId}:${albumId}`, [...(albums.get(`${chatId}:${albumId}`) ?? []), item])
+  }),
+  takeAlbum: vi.fn(async (chatId: string, albumId: string) => {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const items = albums.get(`${chatId}:${albumId}`)
+    albums.delete(`${chatId}:${albumId}`)
+    return items?.sort((a, b) => a.messageId - b.messageId) ?? null
+  }),
+}))
 
 const { processUpdate } = await import('@/lib/handler')
 const { mediaTypeFor } = await import('@/lib/telegram')
@@ -63,6 +81,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.spyOn(console, 'warn').mockImplementation(() => {})
   process.env.ALLOWED_TELEGRAM_IDS = '111'
+  albums.clear()
   downloadFile.mockResolvedValue({ bytes: new Uint8Array([137, 80, 78, 71]), path: 'photos/file_1.jpg' })
 })
 
@@ -202,5 +221,94 @@ describe('voice, audio and unlabelled files', () => {
     downloadFile.mockResolvedValue({ bytes: new TextEncoder().encode('BEGIN:VCALENDAR\nEND:VCALENDAR'), path: 'documents/file_3' })
     await processUpdate(withMedia({ document: { file_id: 'd1', mime_type: 'application/octet-stream', file_name: 'invite.bin' } }))
     expect(attachmentsSent()).toEqual([expect.objectContaining({ kind: 'document', mediaType: 'text/calendar', filename: 'invite.bin' })])
+  })
+})
+
+describe('nothing is fetched before it is wanted', () => {
+  const sent = (from: number, chat: { id: number; type: string }, media: Record<string, unknown>) => ({
+    update_id: 3,
+    message: {
+      message_id: 9, date: 1787000000,
+      from: { id: from, is_bot: false, first_name: `User${from}` },
+      chat: { ...chat, title: 'Family' },
+      ...media,
+    },
+  }) as never
+  const dm = { id: 111, type: 'private' }
+
+  it('downloads nothing a stranger sends', async () => {
+    const pdf = { file_id: 'big', file_unique_id: 'big', file_name: 'notice.pdf', mime_type: 'application/pdf' }
+    await processUpdate(sent(999, { id: 999, type: 'private' }, { document: pdf }))
+    expect(downloadFile).not.toHaveBeenCalled()
+  })
+
+  it('downloads nothing from a group message nobody addressed, though the history still says a photo was sent', async () => {
+    const photo = [{ file_id: 'p', file_unique_id: 'p', width: 1, height: 1 }]
+    await processUpdate(sent(111, { id: -100, type: 'group' }, { photo, caption: 'look at this' }))
+    expect(downloadFile).not.toHaveBeenCalled()
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(recordMessage).toHaveBeenCalledWith(expect.objectContaining({ content: 'look at this [sent photo]' }))
+  })
+
+  it('never fetches a document whose declared type no model reads, but still fetches a calendar export however it is labelled', async () => {
+    const zip = { file_id: 'zip', file_unique_id: 'zip', file_name: 'photos.zip', mime_type: 'application/zip' }
+    await processUpdate(sent(111, dm, { document: zip, caption: 'here' }))
+    expect(downloadFile).not.toHaveBeenCalled()
+    expect(runAgent.mock.calls[0][0].attachments).toHaveLength(0)
+
+    downloadFile.mockResolvedValue({ bytes: new TextEncoder().encode('BEGIN:VCALENDAR\nEND:VCALENDAR'), path: 'documents/file_4.ics' })
+    const ics = { file_id: 'ics', file_unique_id: 'ics', file_name: 'camp.ics', mime_type: 'application/ics' }
+    await processUpdate(sent(111, dm, { document: ics }))
+    expect(downloadFile).toHaveBeenCalledWith('ics')
+    expect(runAgent.mock.calls[1][0].attachments).toEqual([expect.objectContaining({ mediaType: 'text/calendar' })])
+  })
+
+  it('says nothing when a file with no caption turns out to be nothing a model reads', async () => {
+    downloadFile.mockResolvedValue({ bytes: new Uint8Array([80, 75, 3, 4]), path: 'documents/file_5' })
+    const blob = { file_id: 'blob', file_unique_id: 'blob', file_name: 'scan.bin', mime_type: 'application/octet-stream' }
+    await processUpdate(sent(111, dm, { document: blob }))
+    expect(downloadFile).toHaveBeenCalledWith('blob')
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+  })
+})
+
+describe('an album', () => {
+  const page = (n: number, chat: { id: number; type: string }, caption?: string) => ({
+    update_id: 20 + n,
+    message: {
+      message_id: 30 + n, date: 1787000000, media_group_id: 'notice',
+      from: { id: 111, is_bot: false, first_name: 'Rowan' },
+      chat: { ...chat, title: 'Family' },
+      photo: [{ file_id: `page${n}`, file_unique_id: `page${n}`, width: 1280, height: 1280 }],
+      ...(caption ? { caption } : {}),
+    },
+  }) as never
+
+  it('is answered once in a DM, with every page and the caption, however many updates it came as', async () => {
+    const dm = { id: 111, type: 'private' }
+    await Promise.all([processUpdate(page(1, dm, 'add these dates')), processUpdate(page(2, dm)), processUpdate(page(3, dm))])
+    expect(runAgent).toHaveBeenCalledTimes(1)
+    const arg = runAgent.mock.calls[0][0]
+    expect(arg.text).toBe('add these dates')
+    expect(arg.attachments).toHaveLength(3)
+    expect(downloadFile.mock.calls.map(([id]) => id)).toEqual(['page1', 'page2', 'page3'])
+    expect(send).toHaveBeenCalledTimes(1)
+    // Each page is still a line of history of its own, besides the reply.
+    expect(recordMessage).toHaveBeenCalledTimes(4)
+  })
+
+  it('is read whole in a group, where only the captioned page is addressed to the bot', async () => {
+    const group = { id: -100, type: 'group' }
+    await Promise.all([
+      processUpdate(page(1, group)),
+      processUpdate(page(2, group, '@heart_family_bot add these dates')),
+      processUpdate(page(3, group)),
+    ])
+    expect(runAgent).toHaveBeenCalledTimes(1)
+    expect(runAgent.mock.calls[0][0].attachments).toHaveLength(3)
+    expect(runAgent.mock.calls[0][0].text).toBe('add these dates')
+    // The reply threads onto the page that asked.
+    expect(send).toHaveBeenCalledWith('-100', 'Looks like school photo day.', 32)
   })
 })

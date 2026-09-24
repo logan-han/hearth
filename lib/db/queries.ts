@@ -295,11 +295,14 @@ export async function recordMessage(input: {
 
 /**
  * The last `limit` messages in a chat, oldest first. `excludeId` drops the
- * message currently being answered, which the caller has already stored.
+ * message currently being answered, which the caller has already stored, and
+ * whatever members said after it: that came later, and read as history it sat
+ * ahead of the question it followed. The bot's own replies since are kept, so
+ * a turn that waited for the one before it sees what that one said.
  */
 export async function recentMessages(chatId: string, limit = CONTEXT_WINDOW, excludeId?: number) {
   const where = excludeId
-    ? and(eq(messages.chatId, chatId), ne(messages.id, excludeId))
+    ? and(eq(messages.chatId, chatId), or(lt(messages.id, excludeId), ne(messages.role, 'user')))
     : eq(messages.chatId, chatId)
   const rows = await db()
     .select()

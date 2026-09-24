@@ -83,7 +83,12 @@ export const FROM_ENVIRONMENT = 'environment'
 /** What the store holds for one key, decrypted: the value and who last wrote it. */
 type StoredValue = { value: string; updatedAt: Date; updatedBy: string | null }
 
-let reading: Promise<Map<ManagedKey, StoredValue>> | null = null
+/** What one read of the store found, and whether the read itself worked. */
+type Store = { values: Map<ManagedKey, StoredValue>; ok: boolean }
+
+let reading: Promise<Store> | null = null
+/** Whether this instance has ever read the store without the read failing. */
+let everRead = false
 
 /** Put a value where the rest of the code reads it. An empty value is an unset key. */
 function apply(key: string, value: string): void {
@@ -111,7 +116,7 @@ export function hydrateSecrets(): Promise<void> {
   return readStore().then(() => undefined)
 }
 
-function readStore(): Promise<Map<ManagedKey, StoredValue>> {
+function readStore(): Promise<Store> {
   if (!reading) {
     reading = load().finally(() => {
       reading = null
@@ -120,10 +125,13 @@ function readStore(): Promise<Map<ManagedKey, StoredValue>> {
   return reading
 }
 
-async function load(): Promise<Map<ManagedKey, StoredValue>> {
+async function load(): Promise<Store> {
   const out = new Map<ManagedKey, StoredValue>()
+  let ok = false
   try {
     const stored = new Map((await db().select().from(secrets)).map((r) => [r.key, r]))
+    ok = true
+    everRead = true
     for (const key of MANAGED_KEYS) {
       const row = stored.get(key)
       if (row) {
@@ -146,7 +154,7 @@ async function load(): Promise<Map<ManagedKey, StoredValue>> {
     // down; whatever the deployment's env vars say still applies.
     console.error('[settings] could not read the settings store, using the environment:', err)
   }
-  return out
+  return { values: out, ok }
 }
 
 /**
@@ -173,9 +181,47 @@ async function seed(key: ManagedKey, value: string): Promise<StoredValue> {
   return { value: plain, updatedAt: row.updatedAt, updatedBy: row.updatedBy }
 }
 
-/** Test seam: forget a read in flight. */
+/** When this instance last read the store for a caller it was about to turn away. */
+let recheckedAt = -Infinity
+const RECHECK_MS = 60 * 60_000
+
+/**
+ * For a route that checks its caller's credential against what this instance
+ * already holds, before anything touches the database: a caller that fails
+ * the check gets one fresh read of the store, in case the credential changed
+ * on another instance, but no more than one an hour. Each read wakes the
+ * database for five minutes. A read for every refusal let anyone who knew the
+ * host keep it awake around the clock by posting junk every few minutes,
+ * which runs out the month's compute hours (see the README's QStash note),
+ * and Neon then suspends the whole deployment. Returns whether it read.
+ *
+ * The hour starts only after a read of its own that worked, on an instance
+ * that had read the store before. A caller arriving while a read is under
+ * way shares it rather than being refused: an album's pages reach a fresh
+ * instance together, and all but the first were turned away while the first
+ * was still reading. An instance that has never read the store holds nothing
+ * yet, so its first delivery has to come this way and must not use up the
+ * hour. A read that failed changed nothing, so it does not count either, or a
+ * database that was down left the instance refusing every delivery for an
+ * hour after it was back.
+ */
+export async function recheckSecrets(): Promise<boolean> {
+  if (reading) {
+    await reading
+    return true
+  }
+  if (everRead && Date.now() - recheckedAt < RECHECK_MS) return false
+  const first = !everRead
+  const { ok } = await readStore()
+  if (ok && !first) recheckedAt = Date.now()
+  return true
+}
+
+/** Test seam: forget a read in flight, whether the store was ever read, and when it was last read for a refusal. */
 export function resetHydration(): void {
   reading = null
+  everRead = false
+  recheckedAt = -Infinity
 }
 
 export async function setSecret(key: ManagedKey, value: string, updatedBy: string): Promise<void> {
@@ -381,7 +427,7 @@ export type SettingView = {
  * so, whatever this instance had applied.
  */
 export async function listSettings(): Promise<SettingView[]> {
-  const stored = await readStore()
+  const stored = (await readStore()).values
 
   return MANAGED_KEYS.map((key) => {
     const row = stored.get(key)

@@ -30,6 +30,8 @@ const runAgent = vi.fn(async () => ({ text: 'sure', notices: [], model: 'test' }
 const shouldChimeIn = vi.fn(async () => false)
 vi.mock('@/lib/agent', () => ({ runAgent, shouldChimeIn }))
 vi.mock('@vercel/functions', () => ({ waitUntil: (p: Promise<unknown>) => p }))
+// A chat's turn is held in the database, which this file does without.
+vi.mock('@/lib/turns', () => ({ awaitTurn: vi.fn(async () => null), endTurn: vi.fn(async () => {}) }))
 
 const { processUpdate, processInBackground } = await import('@/lib/handler')
 
@@ -207,6 +209,15 @@ describe("the bot's own identity", () => {
     await processUpdate(message({ from: '111', chat: '111', type: 'private' }))
     expect(getMe).toHaveBeenCalledTimes(2)
     expect(send).toHaveBeenCalledTimes(3)
+  })
+
+  it('is asked again after a failed lookup, rather than failing every update after it', async () => {
+    theBot = { api: { getMe } }
+    getMe.mockRejectedValueOnce(new Error('502 Bad Gateway'))
+    await expect(processUpdate(message({ from: '111', chat: '111', type: 'private' }))).rejects.toThrow('502')
+    await processUpdate(message({ from: '111', chat: '111', type: 'private' }))
+    expect(getMe).toHaveBeenCalledTimes(2)
+    expect(runAgent).toHaveBeenCalledTimes(1)
   })
 })
 

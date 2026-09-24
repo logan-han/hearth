@@ -362,7 +362,9 @@ is logged.
 Send the bot a photo of a notice, a letter or an invitation and it reads the
 picture, not just the caption. A message with no text at all is
 still processed, which is the usual case for a snap of something on the fridge.
-PDFs and voice notes go the same way.
+PDFs and voice notes go the same way. An album is one message: the pages of a
+notice sent together get one answer that has read them all, in a group too,
+where only the page with the caption names the bot.
 
 Anything with a date in it becomes a **proposal** rather than a calendar entry:
 the bot shows what it found and waits for someone to say yes. Nothing the bot
@@ -374,7 +376,10 @@ the older `minimax-m2.7` cannot, and fails with a clear error the fallback
 simply steps past, which is one reason the paid tail in `.env.example` is
 `minimax/minimax-m3` rather than m2.7: same price, newer, and it reads what the
 free head reads. Attachments that cannot be fetched or are of a type no model
-reads are dropped, and the bot answers on the text alone.
+reads are dropped, and the bot answers on the text alone. Nothing is fetched
+until the bot is answering, so a stranger's file or a group photo nobody asked
+about costs no download, and a file that declares a type no model reads is
+never fetched at all.
 
 Text files are read in code and handed to the model as text, because the
 model endpoints accept no file type beyond images, PDFs and audio. A calendar
@@ -723,7 +728,15 @@ then on, with the env var never read again. Removing a setting leaves it
 unset, whatever the environment still says. The store is read at the start of
 every request, on every instance, so a change made in Settings applies to the
 next message or tick; nothing is cached per instance, and the page shows what
-the store holds rather than what one instance last loaded.
+the store holds rather than what one instance last loaded. The webhook and the
+tick read it only once the caller has passed a first check against what the
+instance already holds; a caller that fails it gets one fresh look at the
+store an hour, in case the secret changed elsewhere, and callers that reach a
+fresh instance together share its first read. The calendar feed treats its
+token the same way. Someone fetching junk from any of the three every few
+minutes cannot keep the database awake and run out the free plan's compute
+hours. `/api/mcp` is not covered yet: it looks up every bearer key it is sent,
+so a made-up key still wakes the database.
 
 ## Claude, and anything else that speaks MCP
 
@@ -850,6 +863,10 @@ scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
 - The ICS feed sits behind a long random token, compared without early exit.
   `/calendar new` replaces the token if the URL gets out, and sends the new one
   to the admin by DM to pass on; everyone subscribed then subscribes again.
+  The old address stops working at once. An instance reads the token again
+  for an address it does not recognise only once an hour, so one that has
+  already done so this hour may turn the new address away until the hour is
+  up; the calendar app's next try then gets it.
 - `/api/mcp` accepts only a bearer key it can match to an allowed member, and
   keys are stored as SHA-256 digests, so the store cannot hand one back out.
 - `/api/tick` verifies the QStash signature.

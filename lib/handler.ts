@@ -37,6 +37,7 @@ import { describeError } from './errors'
 import { unsaid } from './notices'
 import { commitCursors } from './tools/cursor'
 import { flagRevoked } from './headcount'
+import { awaitTurn, endTurn, noteAlbumItem, takeAlbum } from './turns'
 
 /**
  * Authorisation is per person, never per room. `ALLOWED_TELEGRAM_IDS` seeds the
@@ -66,8 +67,12 @@ type TelegramContext = {
   isReplyToBot: boolean
   isMention: boolean
   isCommand: boolean
-  /** Photos, voice notes and documents the model should look at. */
-  attachments: Attachment[]
+  /** A command naming another bot (`/roll@dice_bot`), which is that bot's to answer. */
+  forAnotherBot: boolean
+  /** Photos, voice notes and documents the model might look at, not yet fetched. */
+  media: Media[]
+  /** Telegram's media_group_id: the album this message is one item of. */
+  albumId?: string
   /** Author of the message being replied to, for `/allow` without an id. */
   replyToUserId?: string
   replyToUserName?: string
@@ -84,34 +89,53 @@ function isCalendarBytes(bytes: Uint8Array): boolean {
   return /^\s*BEGIN:VCALENDAR/i.test(new TextDecoder().decode(bytes.slice(0, 64)))
 }
 
+/** A file a message carries, as Telegram describes it, before anything is fetched. */
+type Media = { fileId: string; kind: Attachment['kind']; declared?: string; name?: string }
+
+/**
+ * What a message carries that the model might read. Nothing is fetched here:
+ * that waits until the sender is known to be a member and the message is being
+ * answered, so a stranger's forwarded 20 MB file, or a photo in the group
+ * nobody asked about, costs no download. A document whose declared type is one
+ * no model reads is not worth fetching at all; one that declares nothing
+ * useful may still be a calendar export, which only its name or its bytes give
+ * away.
+ */
+function mediaIn(msg: Message): Media[] {
+  const out: Media[] = []
+  // Telegram sends several resolutions; the last is the largest.
+  const photo = msg.photo?.at(-1)
+  if (photo) out.push({ fileId: photo.file_id, kind: 'photo' })
+  if (msg.voice) out.push({ fileId: msg.voice.file_id, kind: 'voice', declared: msg.voice.mime_type, name: 'voice.oga' })
+  if (msg.audio) out.push({ fileId: msg.audio.file_id, kind: 'voice', declared: msg.audio.mime_type, name: msg.audio.file_name })
+  const doc = msg.document
+  if (doc) {
+    const type = mediaTypeFor(doc.file_name ?? '', doc.mime_type)
+    if (SUPPORTED_DOC_TYPES.test(type) || type === 'application/octet-stream' || /\.ics$/i.test(doc.file_name ?? '')) {
+      out.push({ fileId: doc.file_id, kind: 'document', declared: doc.mime_type, name: doc.file_name })
+    }
+  }
+  return out
+}
+
 /**
  * Pull down anything the model can look at. Failures are swallowed on purpose:
  * a photo we cannot fetch should degrade to a text-only reply, not an error.
  */
-async function collectAttachments(msg: Message): Promise<Attachment[]> {
+async function collectAttachments(media: Media[]): Promise<Attachment[]> {
   const out: Attachment[] = []
-
-  const grab = async (fileId: string, kind: Attachment['kind'], declared?: string, name?: string) => {
+  for (const { fileId, kind, declared, name } of media) {
     try {
       const { bytes, path } = await downloadFile(fileId)
       let mediaType = mediaTypeFor(name ?? path, declared)
       // A calendar export forwarded from a mail app often arrives with no
       // useful type or extension; the file itself says what it is.
       if (!SUPPORTED_DOC_TYPES.test(mediaType) && isCalendarBytes(bytes)) mediaType = 'text/calendar'
-      if (!SUPPORTED_DOC_TYPES.test(mediaType)) return
+      if (!SUPPORTED_DOC_TYPES.test(mediaType)) continue
       out.push({ bytes, mediaType, filename: name, kind })
     } catch (err) {
       console.warn('[telegram] could not fetch attachment:', describeError(err))
     }
-  }
-
-  // Telegram sends several resolutions; the last is the largest.
-  const photo = msg.photo?.at(-1)
-  if (photo) await grab(photo.file_id, 'photo')
-  if (msg.voice) await grab(msg.voice.file_id, 'voice', msg.voice.mime_type, 'voice.oga')
-  if (msg.audio) await grab(msg.audio.file_id, 'voice', msg.audio.mime_type, msg.audio.file_name)
-  if (msg.document) {
-    await grab(msg.document.file_id, 'document', msg.document.mime_type, msg.document.file_name)
   }
   return out
 }
@@ -129,7 +153,16 @@ let meCache: {
 
 function me() {
   const b = bot()
-  if (meCache?.for !== b) meCache = { for: b, info: b.api.getMe() }
+  if (meCache?.for !== b) {
+    const info = b.api.getMe()
+    meCache = { for: b, info }
+    // A failed lookup is not the bot's identity. Kept, one 502 from Telegram
+    // failed every update this instance served until it was recycled; dropped,
+    // the next update asks again.
+    info.catch(() => {
+      if (meCache?.info === info) meCache = null
+    })
+  }
   return meCache.info
 }
 
@@ -138,18 +171,26 @@ function displayName(from: NonNullable<Message['from']>): string {
 }
 
 async function parse(update: Update): Promise<TelegramContext | null> {
-  const msg = update.message ?? update.edited_message
+  // An edit is not a new message. Answered again, "milk and eggs" corrected to
+  // "milk and bread" put milk on the list twice, and a reminder whose time was
+  // corrected fired at both. Webhooks registered before edits were dropped
+  // from allowed_updates still deliver them.
+  const msg = update.message
   if (!msg?.from || msg.from.is_bot) return null
 
   const text = msg.text ?? msg.caption ?? ''
-  const attachments = await collectAttachments(msg)
+  const media = mediaIn(msg)
   // A photo with no caption is still worth reading; a message with neither is not.
-  if (!text.trim() && attachments.length === 0) return null
+  if (!text.trim() && media.length === 0) return null
 
   const self = await me()
   const replyAuthor = msg.reply_to_message?.from
   const mentionTag = self.username ? `@${self.username}`.toLowerCase() : ''
   const isMention = Boolean(mentionTag) && text.toLowerCase().includes(mentionTag)
+  // In a group with several bots, Telegram's menu names the bot a command is
+  // for. Only a bare command, or one naming this bot, is Hearth's.
+  const addressee = /^\/\w+@(\w+)/.exec(text.trimStart())?.[1]?.toLowerCase()
+  const forAnotherBot = addressee !== undefined && addressee !== self.username?.toLowerCase()
 
   return {
     chatId: String(msg.chat.id),
@@ -161,8 +202,10 @@ async function parse(update: Update): Promise<TelegramContext | null> {
     messageId: msg.message_id,
     isReplyToBot: msg.reply_to_message?.from?.id === self.id,
     isMention,
-    isCommand: text.trimStart().startsWith('/'),
-    attachments,
+    isCommand: text.trimStart().startsWith('/') && !forAnotherBot,
+    forAnotherBot,
+    media,
+    albumId: msg.media_group_id,
     replyToUserId: replyAuthor && !replyAuthor.is_bot ? String(replyAuthor.id) : undefined,
     replyToUserName: replyAuthor && !replyAuthor.is_bot ? displayName(replyAuthor) : undefined,
   }
@@ -496,6 +539,8 @@ async function handleMcp(c: TelegramContext, member: Member): Promise<void> {
 
 /** Decide whether this message deserves a full agent run. */
 async function shouldRespond(c: TelegramContext, messageId: number): Promise<boolean> {
+  // Even as a reply to one of ours: the command names who it is for.
+  if (c.forAnotherBot) return false
   if (c.chatType === 'private') return true
   if (c.isMention || c.isReplyToBot || c.isCommand) return true
   if (!ambientMode()) return false
@@ -644,8 +689,8 @@ export async function processUpdate(update: Update): Promise<void> {
   // History is text-only, so note that something was attached rather than
   // leaving a bare caption with no explanation of what it described. A file's
   // name goes in too, so a later "the .ics I sent" can at least be recognised.
-  const forHistory = c.attachments.length
-    ? `${text} [sent ${c.attachments.map((a) => (a.filename ? `${a.kind} ${a.filename}` : a.kind)).join(', ')}]`.trim()
+  const forHistory = c.media.length
+    ? `${text} [sent ${c.media.map((m) => (m.name ? `${m.kind} ${m.name}` : m.kind)).join(', ')}]`.trim()
     : text
 
   // Every group message becomes context, whether or not we reply to it.
@@ -667,6 +712,10 @@ export async function processUpdate(update: Update): Promise<void> {
     }
     if (await handleCommand(c, member)) return
   }
+  // Every item of an album is noted, answering or not, so that the one that
+  // answers has all of them.
+  const part = { messageId: c.messageId, text, media: c.media }
+  if (c.albumId) await noteAlbumItem(c.chatId, c.albumId, part)
   if (!(await shouldRespond(c, storedId))) {
     await housekeeping(c.chatId)
     return
@@ -678,6 +727,26 @@ export async function processUpdate(update: Update): Promise<void> {
     return
   }
 
+  // An album is one message to the family, so it gets one answer, from
+  // whichever of its items takes the album first, with every page in it.
+  let parts = [part]
+  if (c.albumId) {
+    const album = await takeAlbum<typeof part>(c.chatId, c.albumId)
+    if (!album) {
+      await housekeeping(c.chatId)
+      return
+    }
+    parts = album
+  }
+  const said = parts.map((p) => p.text).filter(Boolean).join('\n')
+  const attachments = await collectAttachments(parts.flatMap((p) => p.media))
+  // Nothing to answer: a file with no caption turned out to be nothing a model reads.
+  if (!said && attachments.length === 0) {
+    await housekeeping(c.chatId)
+    return
+  }
+
+  const turn = await awaitTurn(c.chatId, storedId)
   await typing(c.chatId)
   try {
     const result = await runAgent({
@@ -685,9 +754,9 @@ export async function processUpdate(update: Update): Promise<void> {
       chatType: c.chatType,
       member,
       memberName: c.userName,
-      text,
+      text: said,
       excludeMessageId: storedId,
-      attachments: c.attachments,
+      attachments,
     })
 
     const reply = [result.text, ...unsaid(result.text, result.notices)]
@@ -703,6 +772,7 @@ export async function processUpdate(update: Update): Promise<void> {
     console.error('[agent] run failed:', err)
     await send(c.chatId, `Sorry, that went wrong: ${describeError(err)}`)
   } finally {
+    await endTurn(c.chatId, turn)
     await housekeeping(c.chatId)
   }
 }

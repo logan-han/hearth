@@ -142,7 +142,8 @@ describe('the Telegram admin API', () => {
     expect(hooked.secret_token).toBe(process.env.TELEGRAM_WEBHOOK_SECRET)
     expect(String(hooked.secret_token)).toMatch(/^[0-9a-f]{64}$/)
     // The bot's own removal from a room arrives only if it is asked for.
-    expect(hooked.allowed_updates).toEqual(['message', 'edited_message', 'my_chat_member'])
+    // Not edits: answered again, an edit makes the same change twice.
+    expect(hooked.allowed_updates).toEqual(['message', 'my_chat_member'])
     // The "/" menu is registered alongside, so commands are discoverable.
     expect((commands as { command: string }[]).map((c) => c.command)).toContain('watch')
     const body = await res.json()

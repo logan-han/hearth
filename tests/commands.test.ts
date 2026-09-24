@@ -611,6 +611,113 @@ describe('unknown commands', () => {
   })
 })
 
+describe('a command naming another bot', () => {
+  it('is that bot\'s to answer, even as a reply to one of ours, and is kept only as history', async () => {
+    await processUpdate(group('/help@dice_bot'))
+    await processUpdate(group('/roll@Dice_Bot 2d6'))
+    await processUpdate(group('/deny@modbot 333'))
+    const toUs = (text: string) => ({
+      update_id: 7,
+      message: {
+        message_id: 8, date: 1787000000,
+        from: { id: 111, is_bot: false, first_name: 'User111' },
+        chat: { id: -100, type: 'group', title: 'Family' },
+        text,
+        reply_to_message: { message_id: 1, date: 1787000000, chat: { id: -100, type: 'group' }, from: { id: 1, is_bot: true, first_name: 'Hearth' }, text: 'hi' },
+      },
+    }) as never
+    await processUpdate(toUs('/roll@dice_bot'))
+    expect(send).not.toHaveBeenCalled()
+    expect(runAgent).not.toHaveBeenCalled()
+    expect((await q.recentMessages('-100')).map((m) => m.content)).toEqual(['/help@dice_bot', '/roll@Dice_Bot 2d6', '/deny@modbot 333', '/roll@dice_bot'])
+  })
+
+  it('is still ours when it names this bot, in any case', async () => {
+    await processUpdate(group('/help@Heart_Family_Bot'))
+    expect(lastSent()).toContain('/connect')
+  })
+})
+
+describe('two messages in one chat', () => {
+  it('answers the second once the reply to the first exists, with that reply in view', async () => {
+    let finish!: () => void
+    let seen: string[] = []
+    runAgent
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (finish = () => resolve({ text: 'Added milk.', notices: [], model: 'g' }))),
+      )
+      .mockImplementationOnce((async (input: { excludeMessageId: number }) => {
+        // What this turn reads as history.
+        seen = (await q.recentMessages('111', 15, input.excludeMessageId)).map((m) => m.content)
+        return { text: 'Swapped it for oat milk.', notices: [], model: 'g' }
+      }) as never)
+    const first = processUpdate(dm('add milk'))
+    await vi.waitFor(() => expect(runAgent).toHaveBeenCalledTimes(1))
+    const second = processUpdate(dm('actually, oat milk'))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(runAgent).toHaveBeenCalledTimes(1)
+
+    finish()
+    await Promise.all([first, second])
+    expect(runAgent).toHaveBeenCalledTimes(2)
+    expect(runAgent.mock.calls[1]).toEqual([expect.objectContaining({ text: 'actually, oat milk' })])
+    expect(seen).toEqual(['add milk', 'Added milk.'])
+  })
+})
+
+describe('three messages in one chat', () => {
+  it('answers them in the order they came, even when the third looks first once the chat is free', async () => {
+    // Each waiter's one-second pause is held here, so the test says who looks when.
+    const pauses: (() => void)[] = []
+    const realSetTimeout = globalThis.setTimeout
+    const timers = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+      if (ms === 1_000) {
+        pauses.push(fn)
+        return 0
+      }
+      return realSetTimeout(fn, ms)
+    }) as typeof setTimeout)
+    try {
+      let finish!: () => void
+      let seenByBread: string[] = []
+      runAgent
+        .mockImplementationOnce(
+          () => new Promise((resolve) => (finish = () => resolve({ text: 'Added milk.', notices: [], model: 'g' }))),
+        )
+        .mockImplementationOnce(async () => ({ text: 'Added eggs.', notices: [], model: 'g' }))
+        .mockImplementationOnce((async (input: { excludeMessageId: number }) => {
+          seenByBread = (await q.recentMessages('111', 15, input.excludeMessageId)).map((m) => m.content)
+          return { text: 'Added bread.', notices: [], model: 'g' }
+        }) as never)
+      const milk = processUpdate(dm('add milk'))
+      await vi.waitFor(() => expect(runAgent).toHaveBeenCalledTimes(1))
+      const eggs = processUpdate(dm('and eggs'))
+      await vi.waitFor(() => expect(pauses).toHaveLength(1))
+      const bread = processUpdate(dm('and bread'))
+      await vi.waitFor(() => expect(pauses).toHaveLength(2))
+
+      finish()
+      await milk
+      // The chat is free and the bread looks first, but the eggs came before it.
+      pauses[1]()
+      await vi.waitFor(() => expect(pauses.length + runAgent.mock.calls.length).toBeGreaterThan(3))
+      expect(runAgent).toHaveBeenCalledTimes(1)
+
+      pauses[0]()
+      await eggs
+      pauses[2]()
+      await bread
+      expect(runAgent.mock.calls).toEqual(
+        ['add milk', 'and eggs', 'and bread'].map((text) => [expect.objectContaining({ text })]),
+      )
+      // The bread is answered with the eggs, and the reply to them, in view.
+      expect(seenByBread).toEqual(['add milk', 'and eggs', 'Added milk.', 'Added eggs.'])
+    } finally {
+      timers.mockRestore()
+    }
+  })
+})
+
 describe('what a reply reports as new', () => {
   const staged = [{ key: 'mail_cursor:111:1:google', at: '2026-09-24T01:00:00.000Z', ids: ['a'], prev: null }]
 
@@ -680,10 +787,12 @@ describe('the shapes Telegram sends', () => {
     expect(lastSent()).toContain('**user111**')
   })
 
-  it('treats an edited message like a new one', async () => {
-    const edited = dm('/help') as { update_id: number; message: unknown }
+  it('leaves an edit alone, which answered again would make the same change twice', async () => {
+    const edited = dm('add milk and bread to the shopping list') as { update_id: number; message: unknown }
     await processUpdate({ update_id: 10, edited_message: edited.message } as never)
-    expect(lastSent()).toContain('/connect')
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+    expect(await q.recentMessages('111')).toEqual([])
   })
 
   it('ignores a message from another bot', async () => {

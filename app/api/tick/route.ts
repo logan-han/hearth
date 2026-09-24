@@ -19,7 +19,7 @@ import { installBuiltins } from '@/lib/builtins'
 import { unaccountedIn } from '@/lib/headcount'
 import { commitCursors, type StagedCursor } from '@/lib/tools/cursor'
 import { send } from '@/lib/telegram'
-import { hydrateSecrets } from '@/lib/settings'
+import { hydrateSecrets, recheckSecrets } from '@/lib/settings'
 import { flushTelemetry } from '@/lib/telemetry'
 import { pruneModelEvents } from '@/lib/model-events'
 import { parseLog, prune, underCap, recordPost, shouldWarn, markWarned, PROACTIVE_POSTS_PER_HOUR } from '@/lib/rate-cap'
@@ -804,10 +804,13 @@ async function runDue(): Promise<{ ran: number; skipped: number }> {
 }
 
 export async function POST(req: Request) {
-  // Automations run the agent and message Telegram, so dashboard-managed
-  // settings must be hydrated the same as on the webhook path.
-  await hydrateSecrets()
+  // Checked first against the keys this instance already holds, so a
+  // stranger's call costs no database read (see recheckSecrets). Automations
+  // run the agent and message Telegram, so dashboard-managed settings are then
+  // hydrated the same as on the webhook path, and the call checked again.
   const body = await req.text()
+  if (await authorised(req, body)) await hydrateSecrets()
+  else if (!(await recheckSecrets())) return NextResponse.json({ ok: false }, { status: 401 })
   const via = await authorised(req, body)
   if (!via) {
     return NextResponse.json({ ok: false }, { status: 401 })

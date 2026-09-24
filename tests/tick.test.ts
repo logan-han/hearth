@@ -44,6 +44,14 @@ const { unaccountedIn, memberByTelegramId, creatorRows, setAutomationEnabled } =
 }))
 vi.mock('@/lib/headcount', () => ({ unaccountedIn }))
 
+// The environment is the whole configuration here; a second look at the
+// store finds nothing new unless a test says otherwise.
+const { hydrateSecrets, recheckSecrets } = vi.hoisted(() => ({
+  hydrateSecrets: vi.fn(async () => {}),
+  recheckSecrets: vi.fn(async () => true),
+}))
+vi.mock('@/lib/settings', () => ({ hydrateSecrets, recheckSecrets }))
+
 const { recordMessage, messagesSince, getSetting, setSetting, recordTick, retireStaleProposals } = vi.hoisted(() => ({
   recordMessage: vi.fn(async () => 1),
   messagesSince: vi.fn(async () => [] as unknown[]),
@@ -206,6 +214,40 @@ describe('POST /api/tick authorisation', () => {
     expect((await tick({ 'x-tick-secret': 'nope' })).status).toBe(401)
     // A manual poke is not the scheduler's pulse.
     expect(recordTick).not.toHaveBeenCalled()
+  })
+
+  it('checks the keys it holds before reading the store, and reads it fresh only once they pass', async () => {
+    process.env.TICK_SECRET = 'let-me-in'
+    expect((await tick({ 'x-tick-secret': 'let-me-in' })).status).toBe(200)
+    expect(hydrateSecrets).toHaveBeenCalledTimes(1)
+    expect(recheckSecrets).not.toHaveBeenCalled()
+  })
+
+  it('turns a stranger away without touching the database once it has looked this hour', async () => {
+    process.env.TICK_SECRET = 'let-me-in'
+    recheckSecrets.mockResolvedValueOnce(false)
+    expect((await tick({ 'x-tick-secret': 'guess' })).status).toBe(401)
+    expect(hydrateSecrets).not.toHaveBeenCalled()
+    expect(dueAutomations).not.toHaveBeenCalled()
+  })
+
+  it('takes a key changed on another instance once a second look finds it', async () => {
+    process.env.TICK_SECRET = 'before-the-change'
+    recheckSecrets.mockImplementationOnce(async () => {
+      process.env.TICK_SECRET = 'let-me-in'
+      return true
+    })
+    expect((await tick({ 'x-tick-secret': 'let-me-in' })).status).toBe(200)
+    expect(dueAutomations).toHaveBeenCalled()
+  })
+
+  it('refuses the key it held once the store says it has changed', async () => {
+    process.env.TICK_SECRET = 'let-me-in'
+    hydrateSecrets.mockImplementationOnce(async () => {
+      process.env.TICK_SECRET = 'rotated'
+    })
+    expect((await tick({ 'x-tick-secret': 'let-me-in' })).status).toBe(401)
+    expect(dueAutomations).not.toHaveBeenCalled()
   })
 })
 
