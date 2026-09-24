@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { similarity, rankSimilar, tokens, DUPLICATE, RELATED } from '@/lib/memory-match'
+import { similarity, rankSimilar, findCorrected, tokens, DUPLICATE, RELATED } from '@/lib/memory-match'
 
 describe('memory likeness', () => {
   it('drops filler and plural endings', () => {
@@ -64,6 +64,51 @@ describe('memory likeness', () => {
       ['Ada is in year 3 at Riverbend Primary School', 'Juno is in year 3 at Riverbend Primary School'],
     ]
     for (const [ada, juno] of siblings) expect(similarity(ada, juno), juno).toBeLessThan(DUPLICATE)
+  })
+
+  it('finds the fact a "not" or a number corrects, and only that one', () => {
+    const rows = [
+      { id: 1, content: 'Juno is in year 3' },
+      { id: 2, content: 'Ada is in year 3 at Riverbend' },
+      { id: 3, content: 'Ada is in year 3' },
+      { id: 4, content: 'Ada is allergic to peanuts' },
+    ]
+    expect(findCorrected('Ada is in year 4', rows)?.id).toBe(3)
+    expect(findCorrected('Ada is not allergic to peanuts', rows)?.id).toBe(4)
+    // A rewording corrects nothing, and neither does a fact about another child.
+    expect(findCorrected('Ada is in year 3 now', rows)).toBeUndefined()
+    expect(findCorrected('Mia is in year 4', rows)).toBeUndefined()
+    expect(findCorrected('bin night is Monday', [])).toBeUndefined()
+    const closer = [
+      { id: 5, content: 'Ada is in year 3 at Riverbend Primary' },
+      { id: 6, content: 'Ada is in year 3 at Riverbend Primary School' },
+    ]
+    expect(findCorrected('Ada is in year 4 at Riverbend Primary School', closer)?.id).toBe(6)
+  })
+
+  it('finds nothing corrected when the fact leaves part of the old one out', () => {
+    const partial: [string, string][] = [
+      ['Ada is allergic to peanuts and eggs', 'Ada is not allergic to eggs'],
+      ['Ada wears size 7 shoes and size 8 clothes', 'Ada wears size 9 shoes'],
+      ['Ada has piano on Tuesday at 4', 'Ada has piano on Tuesday'],
+      ['Ada has piano on Tuesday at 4 and swimming on Thursday at 5', 'Ada has piano on Tuesday at 6 and swimming on Thursday'],
+    ]
+    for (const [was, now] of partial) expect(findCorrected(now, [{ content: was }]), now).toBeUndefined()
+  })
+
+  it('finds the fact a number corrects however many digits it has', () => {
+    const corrections: [string, string][] = [
+      ['Ada wears size 10 shoes', 'Ada wears size 11 shoes'],
+      ['Ada is in year 10', 'Ada is in year 11'],
+      ['Ada is 9', 'Ada is 10'],
+      ["Ada's bedtime is 7:30", "Ada's bedtime is 8:00"],
+      ['Swimming is at 4pm on Tuesday', 'Swimming is at 5pm on Tuesday'],
+    ]
+    for (const [was, now] of corrections) expect(findCorrected(now, [{ content: was }])?.content, now).toBe(was)
+    expect(findCorrected('Ada is in year 11', [{ content: 'Juno is in year 10' }])).toBeUndefined()
+    // The same number with a different "am" or "pm" is neither a correction nor the same fact.
+    expect(findCorrected('Swimming is at 4am', [{ content: 'Swimming is at 4pm' }])).toBeUndefined()
+    expect(similarity('Swimming is at 4pm', 'Swimming is at 4am')).toBeLessThan(DUPLICATE)
   })
 
   it('sees nothing in common between unrelated facts', () => {

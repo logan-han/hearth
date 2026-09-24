@@ -1308,6 +1308,16 @@ describe('memory questions', () => {
     expect((await call(memoryTools(ctx), 'recall', {})).memories).toHaveLength(1)
     expect(await q.openQuestions()).toHaveLength(0)
   })
+
+  it('retires the Known fact a yes corrects, and says so', async () => {
+    const old = await call(memoryTools(ctx), 'remember', { fact: 'Ada wears size 7 shoes' })
+    const asked = await call(memoryTools(ctx), 'unsure', { question: 'Is Ada in size 8 shoes now?', fact: 'Ada wears size 8 shoes' })
+    expect(asked.asked).toBe(true)
+    const yes = await call(memoryTools(ctx), 'answer_question', { id: asked.question_id, fact: 'Ada now wears size 8 shoes' })
+    expect(yes).toEqual({ kept: 'Ada now wears size 8 shoes', memory_id: expect.any(Number), replaced: old.id })
+    const facts = (await call(memoryTools(ctx), 'recall', {})).memories as { fact: string }[]
+    expect(facts.map((f) => f.fact)).toEqual(['Ada now wears size 8 shoes'])
+  })
 })
 
 describe('automation tools', () => {

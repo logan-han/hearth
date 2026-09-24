@@ -551,7 +551,12 @@ or it rests on a notice, bill or email rather than on a person, the pass does
 not guess: it puts a question to the family instead. The next morning brief
 asks it once, Home lists it under Remembered until it is answered, and any
 member can answer in either place. A yes keeps the fact in their words, a
-correction keeps the corrected version, a no keeps nothing. One-off events and
+correction keeps the corrected version, a no keeps nothing. A yes that changes
+only a number or a "not" in a Known fact, such as "Ada is in year 4" against
+"Ada is in year 3", retires the old one, so the two do not both stand. A yes
+that corrects only part of one, such as "Ada is not allergic to eggs" against
+"Ada is allergic to peanuts and eggs", retires nothing, so the rest is not
+lost; both stay on Home for a member to forget by hand. One-off events and
 their venues, contact details from notices, and anything the calendar already
 holds are left out altogether.
 

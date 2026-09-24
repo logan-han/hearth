@@ -100,7 +100,12 @@ export function memoryTools(ctx: ToolContext) {
       execute: async ({ id, fact }) => {
         const settled = await answerQuestion(id, fact?.trim() || null, ctx.member?.id ?? null)
         if (!settled) return { error: `Question ${id} is not open.` }
-        return settled.memory ? { kept: settled.memory.content, memory_id: settled.memory.id } : { dismissed: id }
+        if (!settled.memory) return { dismissed: id }
+        return {
+          kept: settled.memory.content,
+          memory_id: settled.memory.id,
+          ...(settled.replaced ? { replaced: settled.replaced } : {}),
+        }
       },
     }),
   }

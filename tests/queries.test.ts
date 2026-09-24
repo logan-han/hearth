@@ -500,6 +500,45 @@ describe('memory questions', () => {
     expect(yes!.memory!.id).toBe(known.id)
     expect(await q.listMemories()).toHaveLength(1)
   })
+
+  it('retires the Known fact a yes corrects by a number or a "not", and no other', async () => {
+    const year = await q.addMemory('Ada is in year 3')
+    const peanuts = await q.addMemory('Ada is allergic to peanuts')
+    const sibling = await q.addMemory('Juno is in year 3')
+    const first = await q.askQuestion({ question: 'Is Ada in year 4 now?', candidate: 'Ada is in year 4' })
+    const second = await q.askQuestion({ question: 'Has Ada grown out of the peanut allergy?', candidate: 'Ada is no longer allergic to peanuts' })
+
+    const yes = await q.answerQuestion(first.row.id, 'Ada is in year 4', null)
+    expect(yes!.replaced).toBe(year.id)
+    const also = await q.answerQuestion(second.row.id, 'Ada is no longer allergic to peanuts', null)
+    expect(also!.replaced).toBe(peanuts.id)
+    expect((await q.listMemories()).map((m) => m.content).sort()).toEqual(
+      ['Ada is in year 4', 'Ada is no longer allergic to peanuts', 'Juno is in year 3'],
+    )
+    const { db, schema } = await import('@/lib/db')
+    const rows = await db().select().from(schema.memories)
+    expect(rows.find((r) => r.id === year.id)?.supersededBy).toBe(yes!.memory!.id)
+    expect(rows.find((r) => r.id === sibling.id)?.invalidatedAt).toBeNull()
+  })
+
+  it('keeps a Known fact a yes corrects only in part, and retires one a longer number changes', async () => {
+    const allergies = await q.addMemory('Ada is allergic to peanuts and eggs')
+    const shoes = await q.addMemory('Ada wears size 10 shoes')
+    const eggs = await q.askQuestion({ question: 'Has Ada grown out of the egg allergy?', candidate: 'Ada is not allergic to eggs' })
+    const size = await q.askQuestion({ question: 'Is Ada in size 11 shoes now?', candidate: 'Ada wears size 11 shoes' })
+
+    const partial = await q.answerQuestion(eggs.row.id, 'Ada is not allergic to eggs', null)
+    expect(partial!.replaced).toBeUndefined()
+    const bigger = await q.answerQuestion(size.row.id, 'Ada wears size 11 shoes', null)
+    expect(bigger!.replaced).toBe(shoes.id)
+    expect((await q.listMemories()).map((m) => m.content).sort()).toEqual(
+      ['Ada is allergic to peanuts and eggs', 'Ada is not allergic to eggs', 'Ada wears size 11 shoes'],
+    )
+    const { db, schema } = await import('@/lib/db')
+    const rows = await db().select().from(schema.memories)
+    expect(rows.find((r) => r.id === allergies.id)?.invalidatedAt).toBeNull()
+    expect(rows.find((r) => r.id === shoes.id)?.supersededBy).toBe(bigger!.memory!.id)
+  })
 })
 
 describe('chat summaries', () => {

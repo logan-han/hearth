@@ -202,6 +202,15 @@ describe('the family API', () => {
     expect(await q.openQuestions()).toHaveLength(0)
   })
 
+  it('answers a question with a correction that retires the fact it corrects', async () => {
+    await asMember()
+    await q.addMemory('Ada is in year 3')
+    const { row } = await q.askQuestion({ question: 'Is Ada in year 4 now?', candidate: 'Ada is in year 4' })
+    const yes = await post({ action: 'answer_question', id: row.id, fact: 'Ada is in year 4' })
+    expect(yes.status).toBe(200)
+    expect((await q.listMemories()).map((m) => m.content)).toEqual(['Ada is in year 4'])
+  })
+
   it('ticks, unticks, deletes and adds list items', async () => {
     await asMember()
     const list = await q.findOrCreateList('shopping')

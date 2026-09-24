@@ -7,7 +7,7 @@ import {
   type List, type ListItem, type EventProposal, type Memory, type MemoryQuestion,
 } from './schema'
 import { encrypt, decrypt, randomToken, hashToken, mintMcpKey, mcpKeyHolder } from '../crypto'
-import { rankSimilar, DUPLICATE } from '../memory-match'
+import { rankSimilar, findCorrected, DUPLICATE } from '../memory-match'
 import type { Provider } from '../oauth/providers'
 
 export const MAX_HISTORY = 200
@@ -596,13 +596,16 @@ export async function markQuestionsAsked(ids: number[], at: Date = new Date()): 
  * A yes files the fact as the family stated it and closes the question; a no
  * closes it with nothing filed. The close comes first, so two answers to the
  * same question cannot file the fact twice, and a fact already Known in other
- * words is pointed at rather than filed again.
+ * words is pointed at rather than filed again. A yes that differs from a Known
+ * fact only by a "not" or a number corrects it, and retires it as remember
+ * does with replaces: neither Home nor answer_question takes the old id, and
+ * left alone the two would both stand as Known.
  */
 export async function answerQuestion(
   id: number,
   fact: string | null,
   createdBy?: number | null,
-): Promise<{ question: MemoryQuestion; memory: Memory | null } | undefined> {
+): Promise<{ question: MemoryQuestion; memory: Memory | null; replaced?: number } | undefined> {
   const [claimed] = await db()
     .update(memoryQuestions)
     .set({ settledAt: new Date(), outcome: fact ? 'confirmed' : 'dismissed' })
@@ -611,14 +614,17 @@ export async function answerQuestion(
   if (!claimed) return undefined
   if (!fact) return { question: claimed, memory: null }
 
-  const known = rankSimilar(fact, await listMemories(500))[0]
-  const memory = known && known.score >= DUPLICATE ? known.row : await addMemory(fact, createdBy ?? null)
+  const current = await listMemories(500)
+  const known = rankSimilar(fact, current)[0]
+  const duplicate = known && known.score >= DUPLICATE ? known.row : undefined
+  const corrected = duplicate ? undefined : findCorrected(fact, current)
+  const memory = duplicate ?? (await addMemory(fact, createdBy ?? null, corrected?.id ?? null))
   const [question] = await db()
     .update(memoryQuestions)
     .set({ memoryId: memory.id })
     .where(eq(memoryQuestions.id, id))
     .returning()
-  return { question, memory }
+  return { question, memory, ...(corrected ? { replaced: corrected.id } : {}) }
 }
 
 /* ------------------------------------------------------------ automations */
