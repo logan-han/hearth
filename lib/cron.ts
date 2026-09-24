@@ -51,6 +51,32 @@ export function nextLocalMidnight(d: Date, tz: string = timezone()): Date {
   return localToUtc(dayAfter(localDateKey(d, tz)), tz)
 }
 
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
+
+/**
+ * Read a start and optional end the way the model gives them, for every tool
+ * that makes an event. A date with no time IS an all-day event: the model
+ * omitted the time because it does not know one, and midnight would be an
+ * invention. All-day ends are exclusive and taken as the household's dates, so
+ * a one-day event runs to the next local midnight, by the calendar: the day
+ * the clocks go back is 25 hours long, and 24 would end it where it began.
+ */
+export function resolveSpan(input: { start: string; end?: string; allDay: boolean }): {
+  startsAt: Date
+  endsAt: Date
+  allDay: boolean
+} {
+  const start = input.start.trim()
+  if (input.allDay || DATE_ONLY.test(start)) {
+    const first = start.slice(0, 10)
+    const until = input.end?.trim().slice(0, 10)
+    return { startsAt: localToUtc(first), endsAt: localToUtc(until && until > first ? until : dayAfter(first)), allDay: true }
+  }
+  const startsAt = localToUtc(start)
+  const endsAt = input.end ? localToUtc(input.end) : new Date(startsAt.getTime() + 60 * 60 * 1000)
+  return { startsAt, endsAt, allDay: false }
+}
+
 /** ISO-8601 date (YYYY-MM-DD) for `d` as seen in `tz`. */
 export function localDateKey(d: Date, tz: string = timezone()): string {
   return new Intl.DateTimeFormat('en-CA', {

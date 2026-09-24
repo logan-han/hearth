@@ -50,6 +50,7 @@ describe('parseIcs', () => {
         vevent('SUMMARY:Ninety', 'DTSTART:20260930T090000Z', 'DURATION:PT1H30M'),
         vevent('SUMMARY:Hour', 'DTSTART:20260930T090000Z'),
         vevent('SUMMARY:Day', 'DTSTART;VALUE=DATE:20260930'),
+        vevent('SUMMARY:Long day', 'DTSTART;VALUE=DATE:20260405'),
       ),
       MEL,
     )
@@ -58,6 +59,8 @@ describe('parseIcs', () => {
       return e.endsAt.getTime() - e.startsAt.getTime()
     }
     expect(span('Ninety')).toBe(90 * 60_000)
+    // A date alone is a day by the calendar: 5 April 2026 is 25 hours long in Melbourne.
+    expect(span('Long day')).toBe(25 * 3_600_000)
     expect(span('Hour')).toBe(3_600_000)
     expect(span('Day')).toBe(86_400_000)
   })

@@ -322,6 +322,11 @@ describe('access tokens', () => {
     expect(err).toBeInstanceOf(ReconnectNeededError)
     expect(err.provider).toBe('google')
 
+    // Microsoft asking for a fresh sign-in or consent is the same: only the member can fix it.
+    clearTokenCache()
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 400, text: async () => '{"error":"interaction_required"}' })
+    await expect(accessTokenFor(m.id, 'google')).rejects.toBeInstanceOf(ReconnectNeededError)
+
     // Anything else stays the error it was.
     fetchMock.mockResolvedValueOnce({ ok: false, status: 503, text: async () => 'upstream down' })
     await expect(accessTokenFor(m.id, 'google')).rejects.toThrow(/token request failed \(503\): upstream down/)

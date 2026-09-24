@@ -43,15 +43,26 @@ export function buildTools(ctx: ToolContext) {
 }
 
 /**
+ * Writes that would happen twice if the turn were run again: nothing in them
+ * checks for an earlier copy. Every other write tool supersedes, dedupes or
+ * claims before it writes (see ToolContext.wrote).
+ */
+const UNREPEATABLE: ReadonlySet<string> = new Set([
+  'add_to_list', 'create_automation', 'create_calendar_event',
+  'jira_create_issue', 'jira_comment', 'jira_attach_email_file', 'notion_append_to_page',
+])
+
+/**
  * Wrap the tools that leave a mark on the turn: an outside-content tool marks
- * it as having read something untrusted when called, and a write tool records
- * itself once it has succeeded (a result with an `error` changed nothing).
+ * it as having read something untrusted when called, and an unrepeatable write
+ * records itself once it has succeeded (a result with an `error` changed nothing).
  */
 function instrument<T extends Record<string, { execute?: (...args: never[]) => unknown }>>(ctx: ToolContext, tools: T): T {
   const out: Record<string, unknown> = { ...tools }
   for (const [name, t] of Object.entries(tools)) {
     const untrusted = UNTRUSTED_SOURCES.has(name)
     const writes = WRITE_TOOLS.has(name as ToolName)
+    const unrepeatable = UNREPEATABLE.has(name)
     if (!t.execute || (!untrusted && !writes)) continue
     const execute = t.execute
     out[name] = {
@@ -60,7 +71,8 @@ function instrument<T extends Record<string, { execute?: (...args: never[]) => u
         if (untrusted) ctx.readUntrusted = true
         const result = await execute(...args)
         const failed = typeof result === 'object' && result !== null && 'error' in result
-        if (writes && !failed) (ctx.wrote ??= []).push(name)
+        if (writes && !failed) (ctx.changed ??= []).push(name)
+        if (unrepeatable && !failed) (ctx.wrote ??= []).push(name)
         return result
       },
     }

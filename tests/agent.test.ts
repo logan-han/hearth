@@ -455,7 +455,7 @@ describe('runAgent', () => {
     const r = await runAgent({ ...input, text: 'add milk and eggs to the shopping list' })
     // No second slot, so nothing is added twice.
     expect(generateText).toHaveBeenCalledTimes(1)
-    expect(r.text).toBe('Done: added to a list. My reply was cut off after that, so there is no need to ask again.')
+    expect(r.text).toBe('Done so far: added to a list. My reply was cut off there, so ask again only for anything else you wanted.')
     const list = await q.findOrCreateList('shopping')
     expect((await q.listContents(list.id)).map((i) => i.content)).toEqual(['milk', 'eggs'])
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('failed after changing something'), expect.stringContaining('429'))
@@ -470,15 +470,18 @@ describe('runAgent', () => {
     })
     const r = await runAgent(input)
     expect(generateText).toHaveBeenCalledTimes(1)
-    expect(r.text).toBe('Done: added to a list, noted a household fact. My reply was cut off after that, so there is no need to ask again.')
+    // Only what would double is listed; the fact would not be stored twice.
+    expect(r.text).toBe('Done so far: added to a list. My reply was cut off there, so ask again only for anything else you wanted.')
   })
 
   it('still hands the turn on when nothing was changed, a refused write included', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     generateText
       .mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-        // No member, so the draft is refused: nothing was written.
+        // No member, so the draft is refused by a throw; a schedule that never fires, by an error result.
         await opts.tools.draft_email.execute({ to: ['a@b.com'], subject: 's', body: 'b' }, {}).catch(() => null)
+        const refused = await opts.tools.create_automation.execute({ label: 'never', cron: '0 0 31 2 *', instruction: 'x' }, {})
+        expect(refused).toHaveProperty('error')
         await opts.tools.recall.execute({}, {})
         throw new Error('429 quota')
       })
@@ -486,6 +489,38 @@ describe('runAgent', () => {
     const r = await runAgent(input)
     expect(r.text).toBe('Second here.')
     expect(r.model).toContain('openrouter')
+    expect(await q.listAutomations()).toHaveLength(0)
+  })
+
+  it('hands the turn on after a write that checks for itself, so a draft is still shown in full', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+    await q.saveConnection({ memberId: member.id, provider: 'google', email: 'r@example.com', refreshToken: 'r', scopes: null })
+    generateText
+      .mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
+        await opts.tools.draft_email.execute({ to: ['school@example.com'], subject: 'Absence', body: 'Juno is unwell.' }, {})
+        throw new Error('429 quota')
+      })
+      .mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
+        // The second model drafts it again, which supersedes the first rather than adding to it.
+        await opts.tools.draft_email.execute({ to: ['school@example.com'], subject: 'Absence', body: 'Juno is unwell today.' }, {})
+        return reply('Here is the draft: Juno is unwell today. Send it?')
+      })
+    const r = await runAgent({ ...input, member })
+    expect(r.text).toContain('Here is the draft')
+    expect(r.model).toContain('openrouter')
+    expect((await q.pendingDrafts('-100')).map((d) => d.body)).toEqual(['Juno is unwell today.'])
+  })
+
+  it('has an unattended run post nothing but tell an admin, when it fails after a write', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText.mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
+      await opts.tools.add_to_list.execute({ items: ['bin bags'], list: 'shopping' }, {})
+      throw new Error('429 quota')
+    })
+    const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['add_to_list', 'recall'] })
+    expect(generateText).toHaveBeenCalledTimes(1)
+    expect(r.text).toMatch(/^PROBLEM: gemini:gemini-3\.5-flash-lite failed \(429 quota\) after it had added to a list, so this run posted nothing\.\nSKIP$/)
   })
 
   it('treats an empty completion as a failure worth retrying', async () => {
@@ -635,16 +670,18 @@ describe('a reply that reports a change no tool made', () => {
     expect((await runAgent(input)).text).toMatch(/^Replaced it\.\n\nI did not change anything this turn\./)
   })
 
-  it('does not say nothing changed when the second try made the change before it failed', async () => {
+  it('does not say nothing changed when the second try was making the change as it failed', async () => {
     generateText
-      .mockResolvedValueOnce(reply('Added milk.'))
+      .mockResolvedValueOnce(reply('Replaced it.'))
       .mockResolvedValueOnce(judged('claims_change'))
       .mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-        await opts.tools.add_to_list.execute({ items: ['milk'], list: 'shopping' }, {})
+        // A write that checks for itself counts here too: it may have gone through.
+        const e = await q.addFamilyEvent({ title: 'Vacation care', startsAt: new Date('2026-09-29T23:00:00Z'), endsAt: new Date('2026-09-30T07:00:00Z') })
+        await opts.tools.update_family_event.execute({ id: e.id, title: 'Scouts Cuboree' }, {})
         throw new Error('429 quota')
       })
     const r = await runAgent(input)
-    expect(r.text).toBe('Done: added to a list. My reply was cut off after that, so there is no need to ask again.')
+    expect(r.text).toBe('Replaced it.\n\nMy reply was cut off while I was making that change, so check whether it went through before asking again.')
     expect(r.text).not.toContain('did not change anything')
   })
 

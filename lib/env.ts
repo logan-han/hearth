@@ -30,7 +30,7 @@ export function idSet(name: string): Set<string> {
 }
 
 const DEFAULT_TIMEZONE = 'Australia/Melbourne'
-let zoneChecked: { value: string; ok: boolean } | null = null
+let zoneChecked: { value: string; zone: string | null } | null = null
 
 /**
  * The household's timezone, not the viewer's. Bin night, school pickup and a
@@ -44,20 +44,30 @@ export function timezone(): string {
   const value = process.env.TIMEZONE?.trim()
   if (!value) return DEFAULT_TIMEZONE
   if (zoneChecked?.value !== value) {
-    zoneChecked = { value, ok: isTimeZone(value) }
-    if (!zoneChecked.ok) console.warn(`[env] TIMEZONE "${value}" is not a time zone; using ${DEFAULT_TIMEZONE}`)
+    zoneChecked = { value, zone: canonicalTimeZone(value) }
+    if (!zoneChecked.zone) console.warn(`[env] TIMEZONE "${value}" is not a time zone; using ${DEFAULT_TIMEZONE}`)
   }
-  return zoneChecked.ok ? value : DEFAULT_TIMEZONE
+  return zoneChecked.zone ?? DEFAULT_TIMEZONE
 }
 
-/** True for a zone Intl can format in, such as Australia/Melbourne. */
-export function isTimeZone(value: string): boolean {
+/**
+ * A zone's own name, as Google, Graph, Postgres and the weather all expect it
+ * ('australia/perth' is Australia/Perth), or null when it is no zone. An
+ * offset such as +10:00 is refused: it knows nothing of daylight saving, and
+ * Postgres reads its sign the other way round.
+ */
+export function canonicalTimeZone(value: string): string | null {
   try {
-    new Intl.DateTimeFormat('en', { timeZone: value })
-    return true
+    const zone = new Intl.DateTimeFormat('en', { timeZone: value.trim() }).resolvedOptions().timeZone
+    return /^[+-]/.test(zone) ? null : zone
   } catch {
-    return false
+    return null
   }
+}
+
+/** True for a zone Intl can format in, such as Australia/Melbourne; see canonicalTimeZone. */
+export function isTimeZone(value: string): boolean {
+  return canonicalTimeZone(value) !== null
 }
 
 /** Read at call time, like timezone(), so a dashboard change applies without a redeploy. */

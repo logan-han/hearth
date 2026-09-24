@@ -25,11 +25,21 @@ export type ToolContext = {
    */
   readUntrusted?: boolean
   /**
-   * Every write tool that succeeded this turn, in order. Once there is one, a
-   * failing model does not hand the turn to the next in the chain: that one
-   * would start from the message again and do it all a second time.
+   * Every write this turn that would double if done again, in order: a list
+   * item, a reminder, an invitation, a ticket. Once there is one, a failing
+   * model does not hand the turn to the next in the chain, which would start
+   * from the message again and do it a second time. Writes that check for
+   * themselves first (a draft, a proposal, an event, a fact) are not listed:
+   * doing those again is harmless, and the next model can still finish.
    */
   wrote?: string[]
+  /**
+   * Every write tool that returned without an error this turn, repeatable or
+   * not. It may still have changed nothing (an event already there, a fact
+   * already known), so it decides only what a reply can honestly say after a
+   * failure, never what the turn claims was done.
+   */
+  changed?: string[]
 }
 
 export function requireMember(ctx: ToolContext): Member {

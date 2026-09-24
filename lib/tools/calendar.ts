@@ -2,7 +2,7 @@ import { tool } from 'ai'
 import { z } from 'zod'
 import { clientFor, clientsFor } from '../providers'
 import { NotConnectedError, ReconnectNeededError } from '../providers/token'
-import { localToUtc, formatLocal, formatLocalDate, dayAfter } from '../cron'
+import { localToUtc, formatLocal, formatLocalDate, resolveSpan } from '../cron'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
 import { requireMember } from './context'
@@ -14,24 +14,6 @@ const LOCAL_DATETIME = z
   .string()
   .describe(`Local ${timezone()} time as YYYY-MM-DDTHH:mm (or YYYY-MM-DD for all-day)`)
 
-const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
-
-/**
- * An event's span, the way add_family_event reads one: a date alone means
- * all day, and an all-day end is exclusive and at least a day on, both taken
- * as the household's dates. The instants are local midnights, which the
- * providers turn back into dates in the same zone.
- */
-function resolveSpan(start: string, end: string | undefined, allDay: boolean): { startAt: Date; endAt: Date; allDay: boolean } {
-  const s = start.trim()
-  if (allDay || DATE_ONLY.test(s)) {
-    const first = s.slice(0, 10)
-    const until = end?.trim().slice(0, 10)
-    return { startAt: localToUtc(first), endAt: localToUtc(until && until > first ? until : dayAfter(first)), allDay: true }
-  }
-  const startAt = localToUtc(s)
-  return { startAt, endAt: end ? localToUtc(end) : new Date(startAt.getTime() + 60 * 60 * 1000), allDay: false }
-}
 
 export function calendarTools(ctx: ToolContext) {
   return {
@@ -58,7 +40,9 @@ export function calendarTools(ctx: ToolContext) {
                 provider: c.provider,
                 events: events.map((e) => ({
                   ...e,
-                  start_local: e.start ? formatLocal(new Date(e.start)) : '',
+                  // An all-day entry has a date, not a time: read as a UTC
+                  // instant it would show as 10am, or the day before west of Greenwich.
+                  start_local: !e.start ? '' : e.allDay ? formatLocalDate(localToUtc(e.start.slice(0, 10))) : formatLocal(new Date(e.start)),
                 })),
               }
             } catch (e) {
@@ -88,12 +72,14 @@ export function calendarTools(ctx: ToolContext) {
         const clients = provider ? [clientFor(member.id, provider)] : await clientsFor(member.id)
         if (clients.length === 0) return { error: 'No calendar linked. Send /connect to link one.' }
 
-        const span = resolveSpan(start, end, all_day)
+        // Read as add_family_event reads it. The instants are local midnights
+        // for an all-day event, which the providers turn back into dates.
+        const span = resolveSpan({ start, end, allDay: all_day })
         try {
           const created = await clients[0].createEvent({
             title,
-            start: span.startAt,
-            end: span.endAt,
+            start: span.startsAt,
+            end: span.endsAt,
             allDay: span.allDay,
             location,
             description,
@@ -102,7 +88,7 @@ export function calendarTools(ctx: ToolContext) {
           return {
             created,
             provider: clients[0].provider,
-            start_local: span.allDay ? formatLocalDate(span.startAt) : formatLocal(span.startAt),
+            start_local: span.allDay ? formatLocalDate(span.startsAt) : formatLocal(span.startsAt),
           }
         } catch (e) {
           return { error: describe(e) }

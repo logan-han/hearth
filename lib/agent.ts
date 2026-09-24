@@ -465,6 +465,8 @@ const unmadeActionNote = (who: string) =>
   `If ${who} was only telling you something, reply without saying you did it.`
 
 const NOTHING_CHANGED = 'I did not change anything this turn. If that is not what you expected, tell me exactly what to change.'
+/** After a retry that was making the change when it failed: it may or may not have gone through. */
+const CUT_OFF_MID_CHANGE = 'My reply was cut off while I was making that change, so check whether it went through before asking again.'
 
 async function historyMessages(chatId: string, excludeId?: number): Promise<ModelMessage[]> {
   const rows = await recentMessages(chatId, undefined, excludeId).catch(() => [])
@@ -500,40 +502,34 @@ export function collectEvidence(steps: ReadonlyArray<{ toolResults?: ReadonlyArr
 }
 
 /**
- * What a write tool did, in the words a reply would use. Tools that announce
- * themselves in the chat (the family calendar, a new board ticket) are left
- * out: their own line is posted anyway.
+ * What an unrepeatable write did, in the words a reply would use (see
+ * ToolContext.wrote). A new board ticket announces itself in the chat, so its
+ * own line says it.
  */
 const DONE: Partial<Record<ToolName, string>> = {
-  propose_family_event: 'proposed an event for the family calendar',
-  reject_event_proposal: 'turned down a proposal',
   add_to_list: 'added to a list',
-  check_off_list: 'ticked something off a list',
-  remove_from_list: 'removed something from a list',
-  clear_list: 'cleared a list',
-  remember: 'noted a household fact',
-  forget: 'forgot a household fact',
-  unsure: 'put a question to the family',
-  answer_question: 'settled a question',
-  draft_email: 'drafted an email',
-  send_email: 'sent an email',
-  cancel_draft: 'cancelled a draft',
+  create_automation: 'set up a reminder',
   create_calendar_event: 'added an event to your calendar',
-  notion_append_to_page: 'added to a Notion page',
-  jira_update_issue: 'updated a board ticket',
-  jira_move_issue: 'moved a board ticket',
   jira_comment: 'commented on a board ticket',
   jira_attach_email_file: 'attached a file to a board ticket',
-  create_automation: 'set up a reminder',
-  delete_automation: 'deleted a reminder',
-  pause_automation: 'paused or resumed a reminder',
+  notion_append_to_page: 'added to a Notion page',
 }
 
-/** The reply for a turn that changed things and then lost its model before it could say so. */
+/** What the turn did before its model failed, for a reply that cannot say it any other way. */
+function doneSoFar(ctx: ToolContext): string {
+  return [...new Set((ctx.wrote ?? []).map((t) => DONE[t as ToolName]).filter(Boolean))].join(', ')
+}
+
+/**
+ * The reply for a turn that changed things and then lost its model. It says
+ * what was done, so it is not asked for again, and not that the rest was: a
+ * request for three things may have got through one.
+ */
 function doneLine(ctx: ToolContext): string {
-  const done = [...new Set((ctx.wrote ?? []).map((t) => DONE[t as ToolName]).filter(Boolean))]
-  if (done.length === 0) return ''
-  return `Done: ${done.join(', ')}. My reply was cut off after that, so there is no need to ask again.`
+  const done = doneSoFar(ctx)
+  return done
+    ? `Done so far: ${done}. My reply was cut off there, so ask again only for anything else you wanted.`
+    : 'My reply was cut off after I had started on that, so check what changed before asking again.'
 }
 
 export async function runAgent(input: AgentInput): Promise<AgentResult> {
@@ -638,7 +634,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           if (mode === 'chat' && (await claimsUnmadeAction(slot, cleaned.text, r.steps ?? [], ctx))) {
             console.warn(`[agent] ${slot.name} reported an action it never took; asking it to act or retract`)
             await recordModelEvent({ slot: slot.name, purpose: `hearth.${mode}`, outcome: 'claim_retry' })
-            const wroteBefore = ctx.wrote?.length ?? 0
+            const changedBefore = ctx.changed?.length ?? 0
             try {
               const again = await call([
                 ...messages,
@@ -655,8 +651,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
               console.error(`[agent] ${slot.name} retry after an untaken action failed:`, describeError(err))
               // The retry may have made the change before it failed; saying
               // nothing changed would then be the untrue report this is here to stop.
-              cleaned = (ctx.wrote?.length ?? 0) > wroteBefore
-                ? { text: doneLine(ctx), stripped: true }
+              cleaned = (ctx.changed?.length ?? 0) > changedBefore
+                ? { text: `${cleaned.text}\n\n${CUT_OFF_MID_CHANGE}`, stripped: true }
                 : { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
             }
           }
@@ -675,8 +671,15 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         } catch (err) {
           if (!ctx.wrote?.length) throw err
           console.error(`[agent] ${slot.name} failed after changing something, so no other slot gets the turn:`, describeError(err))
-          // A watcher or the nightly pass says nothing: what it changed shows on Home.
-          return { text: mode === 'chat' ? doneLine(ctx) : '', model: slot.name, evidence: undefined }
+          if (mode === 'chat') return { text: doneLine(ctx), model: slot.name, evidence: undefined }
+          // Unattended, the run posts nothing and an admin hears why, the way a
+          // watcher's own PROBLEM line reaches them.
+          const done = doneSoFar(ctx) || 'changed something'
+          return {
+            text: `PROBLEM: ${slot.name} failed (${describeError(err)}) after it had ${done}, so this run posted nothing.\nSKIP`,
+            model: slot.name,
+            evidence: undefined,
+          }
         }
       },
     ),

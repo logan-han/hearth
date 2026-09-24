@@ -512,6 +512,16 @@ describe('calendar tools', () => {
     expect(String((r.accounts as { error?: string }[])[0].error)).toContain('Graph said 503')
   })
 
+  it('gives an all-day entry its date, not a made-up 10am', async () => {
+    listEvents.mockResolvedValue([
+      { id: 'g', title: 'Show and tell', start: '2026-09-02', end: '2026-09-03', allDay: true },
+      { id: 'm', title: 'Pupil free day', start: '2026-09-04T00:00:00.0000000', end: '2026-09-05T00:00:00.0000000', allDay: true },
+    ])
+    const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-09-01T00:00', to: '2026-09-07T00:00' })
+    const shown = (r.accounts as { events: { start_local: string }[] }[])[0].events.map((e) => e.start_local)
+    expect(shown).toEqual(['Wed, 2 Sept 2026', 'Fri, 4 Sept 2026'])
+  })
+
   it('turns a missing link into the /connect nudge', async () => {
     const { NotConnectedError } = await import('@/lib/providers/token')
     listEvents.mockRejectedValue(new NotConnectedError('google'))
@@ -655,6 +665,13 @@ describe('family calendar tools', () => {
     expect(e).toMatchObject({ id: a.id, title: 'Scouts Cuboree', allDay: true, cancelled: false })
     expect(ctx.notices.at(-1)).toContain('Updated on the family calendar: **Scouts Cuboree**')
     expect(ctx.notices.at(-1)).toContain('(was "Vacation care")')
+  })
+
+  it('keeps an all-day event a whole day when its end is moved onto its own start, the day the clocks go back included', async () => {
+    const a = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Swap day', start: '2026-04-05', all_day: true })
+    await call(familyCalendarTools(ctx), 'update_family_event', { id: a.id, end: '2026-04-05' })
+    const [e] = await q.listFamilyEvents(new Date('2026-04-01'), new Date('2026-04-10'))
+    expect(e.endsAt.getTime() - e.startsAt.getTime()).toBe(25 * 3_600_000)
   })
 
   it('moves a timed event keeping its length, unless given a new end', async () => {

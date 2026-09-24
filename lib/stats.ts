@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm'
 import { db } from './db'
-import { formatLocal, formatLocalDate, localDateKey, timezone } from './cron'
+import { formatLocal, formatLocalDate, localDateKey, dayAfter, timezone } from './cron'
 import * as up from './providers/up'
 import * as ps from './providers/pocketsmith'
 import * as notion from './providers/notion'
@@ -390,17 +390,19 @@ function buildMonth(view: ReturnType<typeof monthView>, evented: Row[]) {
     const starts = new Date(r.starts_at as string)
     const ends = new Date(r.ends_at as string)
     const allDay = Boolean(r.all_day)
-    // An event spanning days should appear on each of them.
-    for (let at = starts.getTime(); at <= Math.max(starts.getTime(), ends.getTime() - 1); at += DAY_MS) {
-      const key = localDateKey(new Date(at))
-      if (!key.startsWith(view.key)) continue
+    // An event spanning days appears on each of them, stepped by the
+    // calendar: 24-hour steps from the start instant miss the last day of a
+    // timed trip and land an all-day event twice on the day the clocks go back.
+    const last = localDateKey(new Date(Math.max(starts.getTime(), ends.getTime() - 1)))
+    const monthStart = `${view.key}-01`
+    for (let key = localDateKey(starts) < monthStart ? monthStart : localDateKey(starts); key <= last; key = dayAfter(key)) {
+      if (!key.startsWith(view.key)) break
       const list = byDate.get(key) ?? []
       list.push({
         title: String(r.title),
         time: allDay ? null : timeOnly(starts),
       })
       byDate.set(key, list)
-      if (allDay && ends.getTime() - starts.getTime() <= DAY_MS) break
     }
   }
 

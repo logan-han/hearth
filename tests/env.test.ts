@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { required, optional, appUrl, idSet, reasoningLevel, timezone, isTimeZone } from '@/lib/env'
+import { required, optional, appUrl, idSet, reasoningLevel, timezone, isTimeZone, canonicalTimeZone } from '@/lib/env'
 
 const KEYS = ['APP_URL', 'VERCEL_PROJECT_PRODUCTION_URL', 'VERCEL_URL', 'SOME_KEY', 'LLM_REASONING']
 
@@ -79,6 +79,17 @@ describe('timezone', () => {
     expect(isTimeZone('australia/perth')).toBe(true)
     expect(isTimeZone('Perth')).toBe(false)
     expect(isTimeZone('')).toBe(false)
+  })
+
+  it('gives a zone its own name, and refuses an offset, which knows nothing of daylight saving', () => {
+    expect(canonicalTimeZone(' australia/perth ')).toBe('Australia/Perth')
+    expect(canonicalTimeZone('utc')).toBe('UTC')
+    expect(canonicalTimeZone('+10:00')).toBeNull()
+    expect(canonicalTimeZone('-05:00')).toBeNull()
+    // And the household's zone is read under that name, whatever the case it was stored in.
+    process.env.TIMEZONE = 'australia/perth'
+    expect(timezone()).toBe('Australia/Perth')
+    delete process.env.TIMEZONE
   })
 })
 

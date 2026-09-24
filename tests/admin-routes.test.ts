@@ -104,6 +104,14 @@ describe('the settings API respects the allowlist', () => {
     expect(process.env.TIMEZONE).toBe('Australia/Sydney')
   })
 
+  it('stores a time zone under its own name, and refuses an offset', async () => {
+    expect((await post({ key: 'TIMEZONE', value: 'australia/perth' })).status).toBe(200)
+    expect(process.env.TIMEZONE).toBe('Australia/Perth')
+    const offset = await post({ key: 'TIMEZONE', value: '+08:00' })
+    expect(offset.status).toBe(400)
+    expect(process.env.TIMEZONE).toBe('Australia/Perth')
+  })
+
   it('holds a setting with a fixed set of answers to that set, and trims what is pasted', async () => {
     const bad = await post({ key: 'UNITS', value: 'furlongs' })
     expect(bad.status).toBe(400)

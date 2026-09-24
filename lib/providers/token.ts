@@ -23,6 +23,12 @@ export class ReconnectNeededError extends Error {
   }
 }
 
+/**
+ * How a token endpoint says only the member can fix this: the grant expired
+ * or was revoked, or Microsoft wants them to sign in or consent again.
+ */
+const RECONNECT = new Set(['invalid_grant', 'interaction_required', 'consent_required', 'login_required'])
+
 export async function accessTokenFor(memberId: number, provider: Provider): Promise<string> {
   const key = `${memberId}:${provider}`
   const hit = cache.get(key)
@@ -36,7 +42,7 @@ export async function accessTokenFor(memberId: number, provider: Provider): Prom
   try {
     res = await refreshAccessToken(provider, refresh)
   } catch (err) {
-    if (err instanceof TokenRequestError && err.code === 'invalid_grant') throw new ReconnectNeededError(provider)
+    if (err instanceof TokenRequestError && err.code && RECONNECT.has(err.code)) throw new ReconnectNeededError(provider)
     throw err
   }
   const expiresAt = Date.now() + (res.expires_in ?? 3600) * 1000

@@ -91,6 +91,28 @@ describe('the month grid', () => {
     expect(showing.map((d) => d.date)).toEqual(['2026-09-15', '2026-09-16', '2026-09-17'])
   })
 
+  it('shows a one-day all-day event once, even on the day the clocks go back', async () => {
+    // 5 April 2026 is 25 hours long in Melbourne; its all-day event runs midnight to midnight.
+    await q.addFamilyEvent({ title: 'Swap day', startsAt: at('2026-04-04T13:00:00Z'), endsAt: at('2026-04-05T14:00:00Z'), allDay: true })
+    const { calendar } = await gatherCalendar('2026-04')
+    expect(calendar.days.filter((d) => d.events.some((e) => e.title === 'Swap day')).map((d) => d.date)).toEqual(['2026-04-05'])
+  })
+
+  it('shows a timed trip on every day it touches, the last one included', async () => {
+    // Friday 6pm to Sunday 10am, Melbourne time.
+    await q.addFamilyEvent({ title: 'Weekend away', startsAt: at('2026-09-25T08:00:00Z'), endsAt: at('2026-09-27T00:00:00Z') })
+    const { calendar } = await gatherCalendar('2026-09')
+    const showing = calendar.days.filter((d) => d.events.some((e) => e.title === 'Weekend away')).map((d) => d.date)
+    expect(showing).toEqual(['2026-09-25', '2026-09-26', '2026-09-27'])
+  })
+
+  it('shows only the part of a long event that falls in the month asked for', async () => {
+    await q.addFamilyEvent({ title: 'Long leave', startsAt: at('2026-08-20T14:00:00Z'), endsAt: at('2026-09-02T14:00:00Z'), allDay: true })
+    const { calendar } = await gatherCalendar('2026-09')
+    const showing = calendar.days.filter((d) => d.events.some((e) => e.title === 'Long leave')).map((d) => d.date)
+    expect(showing).toEqual(['2026-09-01', '2026-09-02'])
+  })
+
   it('leaves a cancelled event off the grid', async () => {
     const e = await q.addFamilyEvent({
       title: 'Called off', startsAt: at('2026-09-10T00:00:00Z'), endsAt: at('2026-09-10T01:00:00Z'),

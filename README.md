@@ -252,10 +252,13 @@ endpoints are deprioritised under load, so the same model can serve in 5s or
 turning into a failed reply. A rate limit, timeout,
 provider outage, or a model that cannot drive tools all collapse to the same
 behaviour: move to the next slot. The one exception is a turn that has already
-changed something (added to a list, set up a reminder, sent an invitation):
-the next slot would start from the message again and do it twice, so the turn
-ends there with a line saying what was done. Every model in the chain must
-support tool calling.
+done something that would double if done again (added to a list, set up a
+reminder, sent an invitation, opened a ticket): the next slot would start from
+the message again and do it twice, so the turn ends there with a line saying
+what was done so far. Writes that check for themselves first (a draft, a
+proposal, a calendar entry, a fact) do not stop the chain, and an unattended
+run that stops this way tells an admin instead of posting. Every model in the
+chain must support tool calling.
 
 `LLM_REASONING` (none, minimal, low, medium, high) is passed through as
 `reasoning_effort` when set. Leave it empty for the provider default. Gemini's

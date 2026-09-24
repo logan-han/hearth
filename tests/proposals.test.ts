@@ -53,6 +53,16 @@ describe('propose_family_event', () => {
     expect(String(r.next_step)).toContain('Do not add it yourself')
   })
 
+  it('reads a date alone as all day, a whole local day long even on the day the clocks go back', async () => {
+    const r = await run('propose_family_event', { title: 'Swap day', start: '2026-04-05', all_day: false, source: 'google:swap' })
+    const row = rows.at(-1)!
+    expect(row.allDay).toBe(true)
+    // Melbourne midnight on 5 April 2026 is 13:00 UTC the day before, and the day is 25 hours long.
+    expect((row.startsAt as Date).toISOString()).toBe('2026-04-04T13:00:00.000Z')
+    expect((row.endsAt as Date).getTime() - (row.startsAt as Date).getTime()).toBe(25 * 3_600_000)
+    expect(r).toMatchObject({ all_day: true, start_local: 'Sun, 5 Apr 2026' })
+  })
+
   it('reads the local time as Melbourne, not UTC', async () => {
     await run('propose_family_event', NOTICE)
     // 9am on 9 Sep in Melbourne is 23:00 UTC the day before (AEST, UTC+10).

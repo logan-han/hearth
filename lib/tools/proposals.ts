@@ -3,7 +3,7 @@ import { z } from 'zod'
 import {
   addProposal, pendingProposals, settleProposal, proposalForSource, addFamilyEvent, listFamilyEvents,
 } from '../db/queries'
-import { localToUtc, formatLocal, localDateKey } from '../cron'
+import { localToUtc, formatLocal, formatLocalDate, localDateKey, resolveSpan } from '../cron'
 import { timezone } from '../env'
 import { announce, type ToolContext } from './context'
 import { FEED_LAG } from './familycal'
@@ -85,21 +85,20 @@ export function proposalTools(ctx: ToolContext) {
           }
         }
 
-        const startsAt = localToUtc(start)
-        const endsAt = end
-          ? localToUtc(end)
-          : new Date(startsAt.getTime() + (all_day ? 24 : 1) * 60 * 60 * 1000)
+        // Read as add_family_event will read it once accepted: a date alone
+        // is all day, and an all-day end is a whole local day on at least.
+        const { startsAt, endsAt, allDay } = resolveSpan({ start, end, allDay: all_day })
 
         const row = await addProposal({
           chatId: ctx.chatId,
           memberId: ctx.member?.id ?? null,
-          title, description, location, startsAt, endsAt, allDay: all_day, source,
+          title, description, location, startsAt, endsAt, allDay, source,
         })
         return {
           proposal_id: row.id,
           title,
-          start_local: formatLocal(startsAt),
-          all_day,
+          start_local: allDay ? formatLocalDate(startsAt) : formatLocal(startsAt),
+          all_day: allDay,
           location,
           next_step: 'Show this to the family and ask whether to add it. Do not add it yourself.',
         }

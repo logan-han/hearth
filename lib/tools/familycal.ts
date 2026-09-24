@@ -3,7 +3,7 @@ import { z } from 'zod'
 import {
   addFamilyEvent, listFamilyEvents, cancelFamilyEvent, updateFamilyEvent, getFamilyEvent, calendarToken,
 } from '../db/queries'
-import { localToUtc, localDateKey, formatLocal, formatLocalDate, dayAfter, nextLocalMidnight } from '../cron'
+import { localToUtc, localDateKey, formatLocal, formatLocalDate, dayAfter, nextLocalMidnight, resolveSpan } from '../cron'
 import { timezone, appUrl } from '../env'
 import { announce, type ToolContext } from './context'
 
@@ -13,30 +13,6 @@ const LOCAL_DATETIME = z
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
 
-/**
- * Read a start and optional end the way the model gives them. A date with no
- * time IS an all-day event: the model omitted the time because it does not
- * know one, and midnight would be an invention. All-day ends are exclusive,
- * so a one-day event runs to the next local midnight.
- */
-function resolveTimes(input: { start: string; end?: string; allDay: boolean }): {
-  startsAt: Date
-  endsAt: Date
-  allDay: boolean
-} {
-  const start = input.start.trim()
-  const allDay = input.allDay || DATE_ONLY.test(start)
-  if (allDay) {
-    const startsAt = localToUtc(start.slice(0, 10))
-    const endBase = input.end ? localToUtc(input.end.trim().slice(0, 10)) : startsAt
-    // By the calendar: the day the clocks go back is 25 hours long, and 24 would end it where it began.
-    const endsAt = endBase.getTime() > startsAt.getTime() ? endBase : nextLocalMidnight(startsAt)
-    return { startsAt, endsAt, allDay }
-  }
-  const startsAt = localToUtc(start)
-  const endsAt = input.end ? localToUtc(input.end) : new Date(startsAt.getTime() + 60 * 60 * 1000)
-  return { startsAt, endsAt, allDay }
-}
 
 /** When an event is, worded for a chat: a date alone for all-day, else date and time. */
 export function whenLabel(startsAt: Date, allDay: boolean): string {
@@ -78,7 +54,7 @@ export function familyCalendarTools(ctx: ToolContext) {
         description: z.string().optional(),
       }),
       execute: async ({ title, start, end, all_day, location, description }) => {
-        const { startsAt, endsAt, allDay } = resolveTimes({ start, end, allDay: all_day })
+        const { startsAt, endsAt, allDay } = resolveSpan({ start, end, allDay: all_day })
 
         const clash = await findClash(title, startsAt, endsAt)
         if (clash) {
@@ -137,7 +113,7 @@ export function familyCalendarTools(ctx: ToolContext) {
         if (start !== undefined || end !== undefined || all_day !== undefined) {
           const allDay = all_day ?? (start !== undefined ? DATE_ONLY.test(start.trim()) : existing.allDay)
           if (start !== undefined) {
-            const times = resolveTimes({ start, end, allDay })
+            const times = resolveSpan({ start, end, allDay })
             // A moved event keeps its length unless told otherwise.
             const endsAt = end !== undefined || allDay
               ? times.endsAt

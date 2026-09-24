@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireAdmin } from '@/lib/auth/session'
 import { isManaged, setSecret, clearSecret, listSettings, SETTING_META } from '@/lib/settings'
-import { isTimeZone } from '@/lib/env'
+import { canonicalTimeZone } from '@/lib/env'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -29,9 +29,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: `"${key}" is not an editable setting.` }, { status: 400 })
   }
   // A pasted key brings its trailing newline with it.
-  const value = typeof body.value === 'string' ? body.value.trim() : body.value
+  let value = typeof body.value === 'string' ? body.value.trim() : body.value
   const refused = value ? invalid(key, value) : null
   if (refused) return NextResponse.json({ error: refused }, { status: 400 })
+  // Stored under the zone's own name, which every provider it is handed to expects.
+  if (key === 'TIMEZONE' && value) value = canonicalTimeZone(value) ?? value
 
   try {
     if (value === undefined || value === '') await clearSecret(key, session.email)
@@ -45,7 +47,7 @@ export async function POST(req: Request) {
 
 /** Why this value cannot be stored, or null. Checked here, since a value that gets in is read by every page. */
 function invalid(key: string, value: string): string | null {
-  if (key === 'TIMEZONE' && !isTimeZone(value)) {
+  if (key === 'TIMEZONE' && !canonicalTimeZone(value)) {
     return `"${value}" is not a time zone. Use a name like Australia/Melbourne or Europe/London.`
   }
   const options = (SETTING_META as Record<string, { options?: readonly string[] }>)[key]?.options

@@ -1,4 +1,4 @@
-import { localToUtc, formatLocal, formatLocalDate } from './cron'
+import { localToUtc, formatLocal, formatLocalDate, nextLocalMidnight } from './cron'
 import { timezone } from './env'
 
 /**
@@ -164,7 +164,8 @@ function toEvent(props: Prop[], tz: string): IcsEvent | null {
   }
   // No end at all: a date is a day, a time is an hour, as add_family_event reads them.
   if (!endsAt || endsAt.getTime() <= start.at.getTime()) {
-    endsAt = new Date(start.at.getTime() + (start.allDay ? 86_400_000 : 3_600_000))
+    // A day by the calendar, which is 25 hours on the day the clocks go back.
+    endsAt = start.allDay ? nextLocalMidnight(start.at, tz) : new Date(start.at.getTime() + 3_600_000)
   }
 
   const text = (n: string) => {
