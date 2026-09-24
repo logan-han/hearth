@@ -486,7 +486,7 @@ were skipped. Only a failure about what was sent counts towards that (a
 request the model rejects as it stands, a post Telegram cannot parse, a
 PROBLEM about the mail itself): a model chain, service or network that is
 down, rate limited, out of credit or refusing its key says nothing about the
-items, and a count that has not got there in eight days is forgotten. A post
+items, and a count left untouched for eight days is forgotten. A post
 longer than the model's output allowance goes to the next model in the chain
 first; the last one's, or the first one's when no later model answers at all,
 loses its cut-off last line rather than going out mid-bullet, still faces the

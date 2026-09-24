@@ -424,7 +424,7 @@ describe('running due automations', () => {
     runAgent.mockRejectedValueOnce(failure)
     looksBefore.mockImplementation((err) => (err === failure ? [look] : []))
     getSetting.mockImplementation(async (key: string) =>
-      key === 'unspent:1' ? JSON.stringify({ [look.key]: { from: '-', since, runs: 2, move: look } }) : key === 'memory_sweep_day' ? today() : null,
+      key === 'unspent:1' ? JSON.stringify({ [look.key]: { from: '-', since, last: since, runs: 2, move: look } }) : key === 'memory_sweep_day' ? today() : null,
     )
     await authed()
     expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.stringContaining('m1'))
@@ -962,7 +962,8 @@ describe('ready-made watchers', () => {
       getSetting.mockImplementation(async (key: string) =>
         key === 'unspent:1' ? JSON.stringify(entries) : key === 'memory_sweep_day' ? today() : null,
       )
-    const entry = (runs: number, hoursAgo: number, ids = ['m1']) => ({ from: '-', since: new Date(Date.now() - hoursAgo * HOUR).toISOString(), runs, move: move(ids) })
+    const ago = (hours: number) => new Date(Date.now() - hours * HOUR).toISOString()
+    const entry = (runs: number, hoursAgo: number, ids = ['m1']) => ({ from: '-', since: ago(hoursAgo), last: ago(hoursAgo), runs, move: move(ids) })
     const written = () => {
       const call = setSetting.mock.calls.findLast(([k]) => k === 'unspent:1')
       return call?.[1] ? JSON.parse(call[1]) : call ? {} : undefined
@@ -987,7 +988,8 @@ describe('ready-made watchers', () => {
       stuckAt({ [KEY]: first })
       runAgent.mockRejectedValueOnce(new Error('the attachment cannot be read'))
       await authed()
-      expect(written()[KEY]).toEqual({ ...first, runs: 2 })
+      expect(written()[KEY]).toMatchObject({ from: '-', since: first.since, runs: 2, move: first.move })
+      expect(Date.parse(written()[KEY].last)).toBeGreaterThan(Date.parse(first.last))
     })
 
     const apiError = (message: string, statusCode: number | undefined, isRetryable = false) =>
@@ -998,6 +1000,7 @@ describe('ready-made watchers', () => {
 
     it.each([
       ['a rate limit', () => retried(apiError('Provider returned error', 429, true))],
+      ['a retried call whose last try the provider marked retryable, in words that say nothing', () => retried(apiError('Conflict', 409, true))],
       ['a gateway error', () => apiError('Bad Gateway', 502, true)],
       ['no credit left', () => apiError('Insufficient credits', 402)],
       ['a key the provider refuses', () => apiError('User not found.', 401)],
@@ -1026,10 +1029,10 @@ describe('ready-made watchers', () => {
       expect(setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
     })
 
-    it('counts a post Telegram cannot parse, which would fail the same way next time', async () => {
+    it('counts a post Telegram rejects as it stands, rather than turning the chat away', async () => {
       stuckAt({ [KEY]: entry(2, 20) })
       runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.', notices: [], model: 'primary:test' })
-      send.mockRejectedValueOnce(grammy(400, "Bad Request: can't parse entities: Can't find end of the entity starting at byte offset 12"))
+      send.mockRejectedValueOnce(grammy(400, 'Bad Request: message text is empty'))
       await authed()
       expect(setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
     })
@@ -1046,7 +1049,7 @@ describe('ready-made watchers', () => {
       expect(setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
     })
 
-    it('forgets a count that has not got there in over a week', async () => {
+    it('forgets a count not added to in over a week', async () => {
       stuckAt({ [KEY]: entry(2, 9 * 24) })
       runAgent.mockResolvedValue(problem)
       await authed()
@@ -1054,11 +1057,25 @@ describe('ready-made watchers', () => {
       expect(setSetting).not.toHaveBeenCalledWith(KEY, expect.anything())
     })
 
+    it('still moves a weekly automation on, whose runs are a week apart', async () => {
+      stuckAt({ [KEY]: { ...entry(2, 14 * 24), last: ago(7 * 24) } })
+      runAgent.mockResolvedValue(problem)
+      await authed()
+      expect(setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
+    })
+
+    it('counts a PROBLEM whose status is a link in the mail, not a service', async () => {
+      stuckAt({ [KEY]: entry(2, 20) })
+      runAgent.mockResolvedValue({ text: 'PROBLEM: read_url on the school newsletter link failed: The page answered 403.\nSKIP', notices: [], model: 'primary:test' })
+      await authed()
+      expect(setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
+    })
+
     it('moves a cursor held at a real place on no further than it has got since, naming the span', async () => {
       const from = '2026-09-22T21:00:00.000Z'
       const ahead = '2026-09-24T03:00:00.000Z'
       stagedFrom = from
-      const first = { from, since: new Date(Date.now() - 20 * HOUR).toISOString(), runs: 2, move: { key: KEY, at: '2026-09-23T01:00:00.000Z', ids: ['m0'], prev: { at: from, ids: [] } } }
+      const first = { from, since: ago(20), last: ago(20), runs: 2, move: { key: KEY, at: '2026-09-23T01:00:00.000Z', ids: ['m0'], prev: { at: from, ids: [] } } }
       // A chat turn has meanwhile moved the stored cursor on past the stuck move.
       getSetting.mockImplementation(async (key: string) =>
         key === 'unspent:1' ? JSON.stringify({ [KEY]: first })

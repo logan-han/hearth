@@ -372,6 +372,15 @@ function passing(err: unknown): boolean {
 }
 
 /**
+ * A PROBLEM line is the model's own words, and a status or a timeout there is
+ * as likely the item's (a link in the mail that answered 403, an attachment
+ * that took too long) as a service's. Only words that can only be a service
+ * down, unset or with its link lapsed let one pass.
+ */
+const SERVICE_PROBLEM =
+  /rate.?limit|quota|too many requests|service unavailable|temporarily unavailable|overloaded|ECONNREFUSED|ECONNRESET|EAI_AGAIN|cannot connect|not configured|not connected|api key|insufficient credits|expired or been revoked|reconnect/i
+
+/**
  * Post-or-skip is decided in a fresh context against the evidence, by a
  * judge that answers two questions and never sees the writer's draft as its
  * own. Each judge draws its own line (Jev's in lib/jev.ts, the chain's in
@@ -504,7 +513,7 @@ async function deliver(
     }
     // Counted against the stuck guard only when a problem is about what was
     // read, not a tool whose service is down or whose link has lapsed.
-    return problems.every((line) => PASSING_WORDS.test(line)) ? 'unavailable' : 'problem'
+    return problems.every((line) => SERVICE_PROBLEM.test(line)) ? 'unavailable' : 'problem'
   }
 
   // The last guard: however the run got here, a chat hears from its watchers
@@ -558,14 +567,15 @@ async function deliver(
 const STUCK_RUNS = 3
 const STUCK_FOR_MS = 12 * 3600_000
 /**
- * A count that has not got there in this long is forgotten: runs that far
- * apart are not one failure repeating, and a mailbox unlinked meanwhile must
- * not have its old place committed onto it when it is linked again.
+ * A count not added to in this long is forgotten: a failure that has stopped
+ * repeating is not stuck, and a mailbox unlinked meanwhile must not have its
+ * old place committed onto it when it is linked again. Longer than a week, so
+ * a weekly automation's runs still count as in a row.
  */
 const STUCK_FORGOTTEN_MS = 8 * 86_400_000
 
-/** One cursor held at the same place: since when, how many runs, and the first stuck run's move. */
-type Stuck = { from: string; since: string; runs: number; move: StagedCursor }
+/** One cursor held at the same place: since when, the last counted run, how many, and the first stuck run's move. */
+type Stuck = { from: string; since: string; last: string; runs: number; move: StagedCursor }
 
 async function readStuck(a: Automation): Promise<Record<string, Stuck>> {
   let parsed: unknown
@@ -575,11 +585,11 @@ async function readStuck(a: Automation): Promise<Record<string, Stuck>> {
     return {}
   }
   if (!parsed || typeof parsed !== 'object') return {}
-  // Anything unreadable counts as never stuck, and anything that old as forgotten.
+  // Anything unreadable counts as never stuck, and anything left that long as forgotten.
   const cutoff = Date.now() - STUCK_FORGOTTEN_MS
   return Object.fromEntries(
     Object.entries(parsed).filter(
-      ([, v]) => typeof v?.from === 'string' && typeof v?.move?.key === 'string' && Date.parse(v?.since) > cutoff,
+      ([, v]) => typeof v?.from === 'string' && typeof v?.move?.key === 'string' && Date.parse(v?.last ?? v?.since) > cutoff,
     ),
   ) as Record<string, Stuck>
 }
@@ -620,7 +630,8 @@ async function unspent(a: Automation, member: Member | undefined, staged: Staged
   for (const s of last.values()) {
     const from = s.prev?.at ?? '-'
     const was = stuck[s.key]
-    const entry: Stuck = was?.from === from ? { ...was, runs: was.runs + 1 } : { from, since: new Date(now).toISOString(), runs: 1, move: s }
+    const at = new Date(now).toISOString()
+    const entry: Stuck = was?.from === from ? { ...was, last: at, runs: was.runs + 1 } : { from, since: at, last: at, runs: 1, move: s }
     if (entry.runs >= STUCK_RUNS && now - Date.parse(entry.since) >= STUCK_FOR_MS) {
       moved.push(entry)
       delete stuck[s.key]
