@@ -123,8 +123,9 @@ describe('the settings API respects the allowlist', () => {
   })
 
   it('answers 500 when the store cannot be written, rather than pretending', async () => {
-    const { __setDb } = await import('@/lib/db')
-    __setDb({ insert: () => { throw new Error('db exploded') } })
+    // Only the write fails: the admin check before it still reads the members table.
+    const { db } = await import('@/lib/db')
+    vi.spyOn(db(), 'insert').mockImplementation(() => { throw new Error('db exploded') })
     const res = await post({ key: 'GEMINI_MODEL', value: 'x' })
     expect(res.status).toBe(500)
     expect((await res.json()).error).toContain('Could not save')

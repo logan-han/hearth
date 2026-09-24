@@ -300,6 +300,8 @@ describe('join and leave events', () => {
     expect(noteStranger).toHaveBeenCalledTimes(1)
     expect(noteStranger).toHaveBeenCalledWith('-100999', { id: '4242', name: 'Spammer' })
     expect(rememberChat).toHaveBeenCalledWith('-100999', 'group', null)
+    // The flag lives on the chat's row, so the row comes first.
+    expect(rememberChat.mock.invocationCallOrder[0]).toBeLessThan(noteStranger.mock.invocationCallOrder[0])
     expect(send).toHaveBeenCalledWith('-100999', expect.stringContaining('Spammer (4242)'))
   })
 
@@ -307,7 +309,13 @@ describe('join and leave events', () => {
     noteStranger.mockResolvedValue(false)
     await processUpdate(joinUpdate(999))
     expect(send).not.toHaveBeenCalled()
+  })
+
+  it('writes nothing when everyone joining is allowed', async () => {
+    await processUpdate(joinOf([{ id: 111, is_bot: false, first_name: 'Rowan' }], 'Family'))
     expect(rememberChat).not.toHaveBeenCalled()
+    expect(noteStranger).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
   })
 
   it('clears the flag when someone leaves', async () => {
