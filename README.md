@@ -917,7 +917,9 @@ scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
 - The ICS feed sits behind a long random token, compared without early exit.
   `/calendar new` replaces the token if the URL gets out, and sends the new one
   to the admin by DM to pass on; everyone subscribed then subscribes again.
-  The old address stops working at once. An instance reads the token again
+  Hearth stops answering the old address at once, though for up to an hour
+  (the feed's `s-maxage`) the edge can still hand out a copy it cached before
+  the change; nothing added since reaches it. An instance reads the token again
   for an address it does not recognise only once an hour, so one that has
   already done so this hour may turn the new address away until the hour is
   up; the calendar app's next try then gets it.

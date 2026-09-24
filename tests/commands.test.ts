@@ -355,6 +355,13 @@ describe('/calendar', () => {
     expect(lastSent()).toContain('stopped working')
   })
 
+  it('says the old url can still be answered for as long as the edge keeps the feed, an hour', async () => {
+    await processUpdate(group('/calendar new'))
+    const said = send.mock.calls.map(([, text]) => String(text))
+    expect(said).toHaveLength(2)
+    for (const text of said) expect(text).toContain('a cached copy can answer for up to 60 minutes')
+  })
+
   it('sends the replacement to the admin alone when asked in a group, since the old one may have got out there', async () => {
     await processUpdate(group('/calendar new'))
     const token = await q.calendarToken()

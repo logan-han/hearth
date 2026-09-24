@@ -5,6 +5,7 @@ import { upsertMember, saveConnection, connectionFor, recordMessage, memberByTel
 import { appUrl, idSet } from '../env'
 import { send } from '../telegram'
 import { createSession, resolveRole } from '../auth/session'
+import { hydrateSecrets } from '../settings'
 
 /**
  * Step 1: bounce to the provider. Two entry points share this: a family member
@@ -114,6 +115,12 @@ export async function completeAuth(req: Request, provider: Provider): Promise<Re
       'No refresh token was returned. Remove Hearth from your account permissions and link again.',
     )
   }
+
+  // Every outcome from here is told to someone in Telegram, and the bot's
+  // token may live only in the dashboard's store: an instance that has not
+  // read it has no token to send with, and one that read it earlier may hold
+  // one replaced since.
+  await hydrateSecrets()
 
   // A link acts for whoever it was sent to, not whoever opens it: forwarded to
   // someone else, it would store their mailbox under the sender. An account

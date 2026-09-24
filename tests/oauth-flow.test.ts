@@ -24,6 +24,8 @@ const { startAuth, completeAuth } = await import('@/lib/oauth/flow')
 const { signState } = await import('@/lib/oauth/state')
 const { accessTokenFor, clearTokenCache, NotConnectedError, ReconnectNeededError } = await import('@/lib/providers/token')
 const { clientsFor, clientFor } = await import('@/lib/providers')
+const { setSecret } = await import('@/lib/settings')
+const { required } = await import('@/lib/env')
 
 const fetchMock = vi.fn()
 let client: PGlite
@@ -190,6 +192,56 @@ describe('completeAuth', () => {
       expect((await completeAuth(req(await callbackUrl()), 'microsoft')).status).toBe(307)
       const me = await q.memberByTelegramId('111')
       expect((await q.connectionFor(me!.id, 'microsoft'))!.email).toBe('parent@gmail.com')
+    })
+  })
+
+  describe('on an instance that has not read the settings store', () => {
+    // The bot's token was typed into the dashboard, so the store holds it and
+    // this instance's environment does not. Without it, send cannot say a word.
+    beforeEach(async () => {
+      await setSecret('TELEGRAM_BOT_TOKEN', '123:stored', 'rowan@hearth.example')
+      delete process.env.TELEGRAM_BOT_TOKEN
+      send.mockImplementation(async () => void required('TELEGRAM_BOT_TOKEN'))
+    })
+    afterEach(() => {
+      delete process.env.TELEGRAM_BOT_TOKEN
+      send.mockImplementation(async () => {})
+    })
+
+    it('still tells the owner of an account it turns away', async () => {
+      await q.saveMember({ telegramUserId: '333', name: 'Sam', email: 'sam@hearth.example', allowed: true, isAdmin: false })
+      fetchMock.mockResolvedValueOnce(
+        tokenReply({ access_token: 'a', refresh_token: 'r', id_token: idToken({ email: 'sam@hearth.example' }) }),
+      )
+      expect((await completeAuth(req(await callbackUrl()), 'google')).status).toBe(400)
+      expect(send).toHaveBeenCalledWith('333', expect.stringContaining('turned away'))
+      expect(send).toHaveResolvedTimes(1)
+    })
+
+    it('still tells every admin of an ADMIN_EMAILS address it turns away', async () => {
+      process.env.ADMIN_EMAILS = 'parent@gmail.com'
+      try {
+        await q.upsertMember('222', 'Parent', { allowed: true, isAdmin: true })
+        fetchMock.mockResolvedValueOnce(
+          tokenReply({ access_token: 'a', refresh_token: 'r', id_token: idToken({ email: 'parent@gmail.com' }) }),
+        )
+        expect((await completeAuth(req(await callbackUrl()), 'google')).status).toBe(400)
+        expect(send).toHaveBeenCalledWith('222', expect.stringContaining('turned away'))
+        expect(send).toHaveResolvedTimes(1)
+      } finally {
+        delete process.env.ADMIN_EMAILS
+      }
+    })
+
+    it('still confirms a link to the member who made it', async () => {
+      fetchMock.mockResolvedValueOnce(
+        tokenReply({ access_token: 'a', refresh_token: 'r', id_token: idToken({ email: 'a@b.com' }) }),
+      )
+      expect((await completeAuth(req(await callbackUrl()), 'google')).status).toBe(307)
+      // The confirmation goes into the history only once Telegram has taken it.
+      await vi.waitFor(async () => {
+        expect((await q.messagesAfter('111', 0)).map((h) => h.content)).toEqual([expect.stringContaining('linked')])
+      })
     })
   })
 

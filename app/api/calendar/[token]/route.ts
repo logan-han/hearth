@@ -1,4 +1,4 @@
-import { calendarToken, allFamilyEventsForFeed } from '@/lib/db/queries'
+import { calendarToken, allFamilyEventsForFeed, FEED_EDGE_SECONDS } from '@/lib/db/queries'
 import { buildCalendar } from '@/lib/ics'
 
 export const runtime = 'nodejs'
@@ -74,7 +74,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ token: 
       // and each edge region misses on its own. No stale-while-revalidate:
       // Google polls a few times a day, and would always be handed the copy
       // from its last visit.
-      'cache-control': 'public, max-age=300, s-maxage=3600',
+      'cache-control': `public, max-age=300, s-maxage=${FEED_EDGE_SECONDS}`,
     },
   })
 }

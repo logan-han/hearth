@@ -21,6 +21,7 @@ import {
   deleteConnection,
   calendarToken,
   rotateCalendarToken,
+  FEED_EDGE_SECONDS,
   addAutomation,
   listAutomations,
   setAutomationEnabled,
@@ -469,7 +470,7 @@ async function handleCommand(c: TelegramContext, member: Member): Promise<boolea
       // The old URL got out somewhere, quite possibly in this room, so the new
       // one goes to the admin alone to pass on.
       const url = `${appUrl()}/api/calendar/${await rotateCalendarToken()}/family.ics`
-      const note = 'The old calendar URL has stopped working (a cached copy can answer for up to half an hour). '
+      const note = `The old calendar URL has stopped working (a cached copy can answer for up to ${FEED_EDGE_SECONDS / 60} minutes). `
       try {
         await send(c.userId, `${note}Everyone subscribed needs to subscribe again with this one:\n\`${url}\`\n\n${howTo}`)
         if (c.chatType !== 'private') await send(c.chatId, `${note}${c.userName}, I have sent you the new one in a DM to pass on.`)

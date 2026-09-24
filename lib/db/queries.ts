@@ -756,6 +756,13 @@ export async function calendarToken(): Promise<string> {
 }
 
 /**
+ * How long the edge answers the feed from its own copy: the s-maxage it is
+ * served with, and so how long a replaced address can still be answered,
+ * which `/calendar new` tells the admin.
+ */
+export const FEED_EDGE_SECONDS = 60 * 60
+
+/**
  * A fresh feed token, for when the URL has got out. The old one stops matching
  * at once, though the edge may keep serving a cached copy for up to its
  * s-maxage, and every subscriber has to subscribe again.

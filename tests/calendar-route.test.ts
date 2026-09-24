@@ -5,7 +5,11 @@ const { calendarToken, allFamilyEventsForFeed } = vi.hoisted(() => ({
   calendarToken: vi.fn(async () => 'the-token'),
   allFamilyEventsForFeed: vi.fn(async () => [] as FamilyEvent[]),
 }))
-vi.mock('@/lib/db/queries', () => ({ calendarToken, allFamilyEventsForFeed }))
+vi.mock('@/lib/db/queries', async (orig) => ({
+  calendarToken,
+  allFamilyEventsForFeed,
+  FEED_EDGE_SECONDS: (await orig<typeof import('@/lib/db/queries')>()).FEED_EDGE_SECONDS,
+}))
 
 const { GET } = await import('@/app/api/calendar/[token]/[file]/route')
 

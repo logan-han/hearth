@@ -7,7 +7,11 @@ const allFamilyEventsForFeed = vi.fn<(since: Date) => Promise<FamilyEvent[]>>()
 
 vi.mock('@/lib/handler', () => ({ processInBackground }))
 vi.mock('@/lib/summary', () => ({ maybeSummarise: vi.fn(async () => false) }))
-vi.mock('@/lib/db/queries', () => ({ calendarToken, allFamilyEventsForFeed }))
+vi.mock('@/lib/db/queries', async (orig) => ({
+  calendarToken,
+  allFamilyEventsForFeed,
+  FEED_EDGE_SECONDS: (await orig<typeof import('@/lib/db/queries')>()).FEED_EDGE_SECONDS,
+}))
 // Here the environment is the whole configuration: a read of the store finds
 // nothing new, and a test that needs a second look says what it finds.
 const { hydrateSecrets, recheckSecrets } = vi.hoisted(() => ({
