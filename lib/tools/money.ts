@@ -50,6 +50,13 @@ function currentMonth(now: Date): { start: string; end: string } {
 /** How far past the limit one look reads, so what does not fit can at least be counted. */
 const TRANSACTION_SLACK = 50
 
+/**
+ * Beside a summary whose read stopped at the provider's bound: the range
+ * can hold more than was summed, and a total given as the whole would be short.
+ */
+const readShort = (read: number) =>
+  `the read stopped at the most one summary takes (${read} transactions), so the range may hold more than these figures count; a shorter range counts them all`
+
 export function moneyTools(ctx: ToolContext) {
   return {
     list_bank_accounts: tool({
@@ -144,15 +151,20 @@ export function moneyTools(ctx: ToolContext) {
             const txns = await up.listTransactions({
               since: localToUtc(start),
               until: localToUtc(`${end}T23:59:59`),
-              limit: 300,
+              limit: up.MAX_TRANSACTIONS,
             })
-            const spent = txns.filter((t) => t.amount < 0).reduce((s, t) => s + t.amount, 0)
-            const received = txns.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0)
+            // A move to a saver or into 2Up is spent from one account and
+            // received into another; Up names the account on the other side,
+            // and counting it would inflate both totals.
+            const real = txns.filter((t) => !t.transferAccountId)
+            const spent = real.filter((t) => t.amount < 0).reduce((s, t) => s + t.amount, 0)
+            const received = real.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0)
             return {
-              source: 'up', from: start, to: end, transactions: txns.length,
+              source: 'up', from: start, to: end, transactions: real.length,
+              ...(txns.length >= up.MAX_TRANSACTIONS ? { incomplete: readShort(txns.length) } : {}),
               spent: money(Math.abs(spent)), received: money(received),
               net: money(received + spent),
-              largest: [...txns]
+              largest: [...real]
                 .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))
                 .slice(0, 6)
                 .map((t) => ({
@@ -165,7 +177,7 @@ export function moneyTools(ctx: ToolContext) {
           }
 
           if (!ps.pocketsmithConfigured()) return { error: 'PocketSmith is not configured.' }
-          const txns = await ps.listTransactions({ startDate: start, endDate: end, limit: 1000 })
+          const txns = await ps.listTransactions({ startDate: start, endDate: end, limit: ps.MAX_TRANSACTIONS })
           // Transfers move money between our own accounts (or square up a
           // reimbursement); counting them would double the total and make
           // every summary wrong. PocketSmith marks them two ways: a flag on
@@ -192,6 +204,7 @@ export function moneyTools(ctx: ToolContext) {
 
           return {
             source: 'pocketsmith', from: start, to: end, transactions: real.length,
+            ...(txns.length >= ps.MAX_TRANSACTIONS ? { incomplete: readShort(txns.length) } : {}),
             spent: money(total), received: money(received),
             ...(deductions > 0 ? { deductions: money(deductions), net_income: money(received - deductions) } : {}),
             net: money(received - deductions - total),
@@ -277,7 +290,7 @@ export function moneyTools(ctx: ToolContext) {
               const history = await up.listTransactions({
                 accountId: acct.id,
                 since: new Date(ctx.now.getTime() - HISTORY_DAYS * 24 * 3600_000),
-                limit: 300,
+                limit: up.MAX_TRANSACTIONS,
               })
               const report = flagTransactions(fresh, history)
               flags = report.flags

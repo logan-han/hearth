@@ -8,6 +8,8 @@ const BASE = 'https://api.pocketsmith.com/v2'
 /** The API rejects anything outside this range outright. */
 const MIN_PAGE = 10
 const MAX_PAGE = 1000
+/** The most one read pages through: five of the largest pages. */
+export const MAX_TRANSACTIONS = 5000
 
 export type PsAccount = {
   id: number
@@ -104,13 +106,23 @@ export async function listTransactions(opts: {
   endDate: string
   limit?: number
 }): Promise<PsTransaction[]> {
-  const perPage = Math.min(Math.max(opts.limit ?? 100, MIN_PAGE), MAX_PAGE)
-  const rows = await api<any[]>(`/users/${await userId()}/transactions`, {
-    start_date: opts.startDate,
-    end_date: opts.endDate,
-    per_page: String(perPage),
-  })
-  return rows.map((t) => ({
+  const limit = Math.min(opts.limit ?? 100, MAX_TRANSACTIONS)
+  const perPage = Math.min(Math.max(limit, MIN_PAGE), MAX_PAGE)
+  const path = `/users/${await userId()}/transactions`
+  const rows: any[] = []
+  // PocketSmith pages by number, and only the last page comes back short;
+  // one page alone would sum a long range as if its first thousand were all.
+  for (let page = 1; ; page++) {
+    const batch = await api<any[]>(path, {
+      start_date: opts.startDate,
+      end_date: opts.endDate,
+      per_page: String(perPage),
+      page: String(page),
+    })
+    rows.push(...batch)
+    if (batch.length < perPage || rows.length >= limit) break
+  }
+  return rows.slice(0, limit).map((t) => ({
     id: t.id,
     date: t.date,
     payee: t.payee,

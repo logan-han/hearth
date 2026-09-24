@@ -4,6 +4,9 @@
  */
 const BASE = 'https://api.up.com.au/api/v1'
 
+/** The most one read pages through: twenty of Up's hundred-transaction pages. */
+export const MAX_TRANSACTIONS = 2000
+
 export type UpAccount = {
   id: string
   name: string
@@ -28,6 +31,11 @@ export type UpTransaction = {
   /** On a 2Up account, which partner made the purchase. */
   performedBy: string | null
   accountId: string | null
+  /**
+   * The household's own account on the other side, when Up counts this as a
+   * move between accounts: a saver, a Round Up, a top-up of 2Up.
+   */
+  transferAccountId: string | null
 }
 
 export function upConfigured(): boolean {
@@ -85,6 +93,7 @@ function toTransaction(r: Raw): UpTransaction {
     parentCategory: rel.parentCategory?.data?.id ?? null,
     performedBy: a.performingCustomer?.displayName ?? null,
     accountId: rel.account?.data?.id ?? null,
+    transferAccountId: rel.transferAccount?.data?.id ?? null,
   }
 }
 
@@ -114,7 +123,7 @@ export async function listTransactions(opts: {
   status?: 'HELD' | 'SETTLED'
   limit?: number
 }): Promise<UpTransaction[]> {
-  const limit = Math.min(opts.limit ?? 50, 300)
+  const limit = Math.min(opts.limit ?? 50, MAX_TRANSACTIONS)
   const params: Record<string, string> = { 'page[size]': String(Math.min(limit, 100)) }
   if (opts.since) params['filter[since]'] = opts.since.toISOString()
   if (opts.until) params['filter[until]'] = opts.until.toISOString()

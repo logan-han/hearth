@@ -272,6 +272,47 @@ describe('spending_summary via PocketSmith', () => {
     expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/me'))).toHaveLength(1)
   })
 
+  describe('a range longer than one page', () => {
+    const row = (id: number) => ({ id, date: '2026-08-15', payee: 'Coles', amount: -1, category: expense('Supermarket'), is_transfer: false })
+    const pages: number[] = []
+    const serveRows = (total: number) => {
+      pages.length = 0
+      fetchMock.mockImplementation(async (url: URL) => {
+        const u = new URL(String(url))
+        if (u.pathname.endsWith('/me')) return json({ id: 42 })
+        const page = Number(u.searchParams.get('page'))
+        const perPage = Number(u.searchParams.get('per_page'))
+        pages.push(page)
+        const first = (page - 1) * perPage
+        return json(Array.from({ length: Math.max(0, Math.min(perPage, total - first)) }, (_, i) => row(first + i)))
+      })
+    }
+
+    it('reads every page, not just the first thousand', async () => {
+      serveRows(1400)
+      const r = await call('spending_summary', { from: '2026-07-01', to: '2026-09-23', source: 'pocketsmith' })
+      expect(pages).toEqual([1, 2])
+      expect(r.transactions).toBe(1400)
+      expect(r.spent).toBe('$1,400.00')
+      expect(r.incomplete).toBeUndefined()
+    })
+
+    it('asks once more when the last page is exactly full, to see there is nothing after it', async () => {
+      serveRows(1000)
+      const r = await call('spending_summary', { source: 'pocketsmith' })
+      expect(pages).toEqual([1, 2])
+      expect(r.transactions).toBe(1000)
+    })
+
+    it('stops at the most one summary reads, and says the figures may fall short', async () => {
+      serveRows(8000)
+      const r = await call('spending_summary', { from: '2025-07-01', to: '2026-06-30', source: 'pocketsmith' })
+      expect(pages).toEqual([1, 2, 3, 4, 5])
+      expect(r.transactions).toBe(ps.MAX_TRANSACTIONS)
+      expect(String(r.incomplete)).toContain(`${ps.MAX_TRANSACTIONS} transactions`)
+    })
+  })
+
   it('treats an uncategorised credit as income, not spend, and labels it Uncategorised among the largest credits', async () => {
     serve([{ id: 20, date: '2026-08-11', payee: 'Refund misc', amount: 30, category: null, is_transfer: false }])
     const r = await call('spending_summary', { source: 'pocketsmith' })
@@ -283,14 +324,62 @@ describe('spending_summary via PocketSmith', () => {
 })
 
 describe('spending_summary via Up', () => {
-  it('sums the raw feed, which has no transfer flag', async () => {
+  /** A move Up counts as between the household's own accounts, naming the other one. */
+  const transfer = (id: string, amount: string, createdAt: string, desc: string, from: string, to: string) => ({
+    ...upTxn(id, amount, createdAt, desc),
+    relationships: { account: { data: { id: from } }, transferAccount: { data: { id: to } } },
+  })
+
+  it('sums the feed, leaving out moves between the household\'s own accounts', async () => {
     fetchMock.mockImplementation(async () =>
-      json({ data: [upTxn('a', '-100.00', '2026-08-02T10:00:00+10:00'), upTxn('b', '250.00', '2026-08-03T10:00:00+10:00')], links: {} }),
+      json({
+        data: [
+          upTxn('a', '-100.00', '2026-08-02T10:00:00+10:00'),
+          upTxn('b', '250.00', '2026-08-03T10:00:00+10:00'),
+          transfer('c', '-500.00', '2026-08-04T10:00:00+10:00', 'Transfer to 2Up Spending', 'ind', 'joint'),
+          transfer('d', '500.00', '2026-08-04T10:00:00+10:00', 'Transfer from Spending', 'joint', 'ind'),
+        ],
+        links: {},
+      }),
     )
     const r = await call('spending_summary', { source: 'up' })
+    expect(r.transactions).toBe(2)
     expect(r.spent).toBe('$100.00')
     expect(r.received).toBe('$250.00')
     expect(r.net).toBe('$150.00')
+    expect((r.largest as { description: string }[]).map((t) => t.description)).toEqual(['Coles', 'Coles'])
+    expect(r.incomplete).toBeUndefined()
+  })
+
+  /** Pages of a hundred debits of a dollar each, with a next link until `pages` have been served. */
+  const servePages = (pages: number) => {
+    let served = 0
+    fetchMock.mockImplementation(async () => {
+      served += 1
+      const n = served
+      return json({
+        data: Array.from({ length: 100 }, (_, i) => upTxn(`p${n}-${i}`, '-1.00', '2026-08-02T10:00:00+10:00')),
+        links: { next: n < pages ? `https://api.up.com.au/api/v1/transactions?page=${n + 1}` : null },
+      })
+    })
+    return () => served
+  }
+
+  it('follows the feed to the start of a busy month rather than stopping at the newest few hundred', async () => {
+    const served = servePages(5)
+    const r = await call('spending_summary', { source: 'up' })
+    expect(served()).toBe(5)
+    expect(r.transactions).toBe(500)
+    expect(r.spent).toBe('$500.00')
+    expect(r.incomplete).toBeUndefined()
+  })
+
+  it('stops at the most one summary reads, and says the figures may fall short', async () => {
+    const served = servePages(30)
+    const r = await call('spending_summary', { source: 'up' })
+    expect(served()).toBe(up.MAX_TRANSACTIONS / 100)
+    expect(r.transactions).toBe(up.MAX_TRANSACTIONS)
+    expect(String(r.incomplete)).toContain(`${up.MAX_TRANSACTIONS} transactions`)
   })
 
   it('surfaces a provider error instead of throwing', async () => {
@@ -439,6 +528,23 @@ describe('new_transactions', () => {
   it('refuses an account it cannot find', async () => {
     wire([])
     expect(String((await call('new_transactions', { account: 'swiss', limit: 10 })).error)).toContain('No Up account')
+  })
+
+  it('reads the whole history for its flags, so a payee last seen hundreds of transactions ago is not new', async () => {
+    const grocer = upTxn('c1', '-60.00', '2026-08-27T11:00:00+10:00', 'Grocer 0812 Hillside')
+    fetchMock.mockImplementation(async (url: URL) => {
+      const u = new URL(String(url))
+      if (!u.pathname.includes('/transactions')) return json(upAccounts)
+      // The look for what is new asks from a day back; the history, from ninety.
+      if (u.searchParams.get('filter[since]')?.startsWith('2026-08-26')) return json(feed(grocer))
+      const page = Number(u.searchParams.get('page') ?? 1)
+      const coffees = Array.from({ length: 100 }, (_, i) => upTxn(`h${page}-${i}`, '-4.50', '2026-08-20T08:00:00+10:00', 'Corner Cafe'))
+      // Newest first: the last time at the grocer is on the fifth page.
+      if (page === 5) coffees[99] = upTxn('old', '-60.00', '2026-06-01T10:00:00+10:00', 'Grocer 0812 Hillside')
+      return json({ data: coffees, links: { next: page < 5 ? `https://api.up.com.au/api/v1/accounts/joint/transactions?page=${page + 1}` : null } })
+    })
+    const r = await call('new_transactions', { account: '2up', limit: 10 })
+    expect((r.transactions as { flags: string[] }[])[0].flags).not.toContain('new_payee')
   })
 
   it('surfaces a provider error instead of throwing', async () => {
@@ -715,7 +821,7 @@ describe('toTransaction mapping', () => {
     )
     const [t] = await up.listTransactions({})
     expect(t).toMatchObject({
-      settledAt: null, performedBy: null, accountId: null, category: null, parentCategory: null,
+      settledAt: null, performedBy: null, accountId: null, transferAccountId: null, category: null, parentCategory: null,
     })
   })
 })

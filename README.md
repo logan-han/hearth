@@ -573,8 +573,12 @@ per member, since one token covers the household's accounts:
 
 Spending summaries default to PocketSmith because it has categories, and they
 **exclude transfers**: money moved between your own accounts is not spending,
-and counting it would roughly double every total. The Up feed has no transfer
-flag, so an Up-sourced summary is the raw number and will read higher.
+and counting it would roughly double every total. Up names the account on the
+other side of such a move (a saver, a Round Up, a top-up of 2Up), so an
+Up-sourced summary leaves those out too. A summary follows every page of the
+range, up to 5,000 transactions from PocketSmith and 2,000 from Up; a range
+holding more is summed short and says so, rather than passing part of it off
+as the whole.
 
 The third example is a scheduled announcement, and `new_transactions` is built
 for it. Each chat keeps its own marker of what it has already seen, so however

@@ -18,10 +18,24 @@ const LARGE_RATIO = 3
 const LARGE_FLOOR = 50
 const DUPLICATE_WINDOW_MS = 48 * 3600_000
 
+/** Words that open a move of money rather than name who is on the other side of it. */
+const LEAD_WORDS = new Set(['transfer', 'payment', 'direct', 'cover', 'quick', 'auto', 'round', 'forward'])
+/** Words that may sit between a lead word and its from or to, as in "Quick save transfer to". */
+const LEAD_FILLER = new Set(['save', 'debit', 'credit'])
+
 /**
  * Merchant strings carry store numbers and suburbs ("<STORE> 3061
  * <SUBURB>"); the payee is the leading word, or two when the first is a
- * short processor prefix like "SQ" or "PP".
+ * short processor prefix like "SQ" or "PP". A transfer opens with words
+ * every transfer shares ("Transfer from Sam"), so its payee is whoever
+ * follows the from or to: keyed on the lead, two partners' payday top-ups
+ * would look like one charge twice, and a transfer to a stranger would
+ * never be new. Only a description whose words before the from or to are
+ * all lead words or fillers like "save" counts as a transfer. A merchant
+ * that happens to open with a lead word ("Direct Chemist Outlet 3122
+ * Hawthorn", "Quick Coffee To Go") keeps the merchant rule, so the same
+ * chain at another branch is still known and two shops whose names end in
+ * "To Go" do not share a payee.
  */
 export function payeeKey(description: string): string {
   const words = description
@@ -30,6 +44,13 @@ export function payeeKey(description: string): string {
     .split(/\s+/)
     .filter(Boolean)
   if (words.length === 0) return description.trim().toLowerCase()
+  const at = words.findIndex((w) => w === 'from' || w === 'to')
+  const transfer =
+    at > 0 &&
+    at < words.length - 1 &&
+    LEAD_WORDS.has(words[0]) &&
+    words.slice(1, at).every((w) => LEAD_WORDS.has(w) || LEAD_FILLER.has(w))
+  if (transfer) return words.slice(at + 1).join(' ')
   return words[0].length <= 3 && words.length > 1 ? `${words[0]} ${words[1]}` : words[0]
 }
 
