@@ -10,7 +10,7 @@ import {
 import { z } from 'zod'
 import { withModelFallback, structuredChain, modelChain, EndOnFailure, type ModelSlot } from './model'
 import { jevConfigured, wantsAssistant, claimsChange, checkClaims, decidePost, POST_REASONS } from './jev'
-import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, WRITE_TOOLS, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
+import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, PENDING_WRITES, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
 import type { ToolContext } from './tools/context'
 import type { StagedCursor } from './tools/cursor'
 import { recentMessages, listMemories, openQuestions, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals, chatSummary } from './db/queries'
@@ -24,6 +24,18 @@ import { describeError } from './errors'
 
 const MAX_STEPS = 8
 const STEP_TIMEOUT_MS = 60_000
+/**
+ * How long a turn may take, every model it tries and the claim retry
+ * included. The function is killed at 300 s, and the gate and any
+ * attachments come before the turn, the reply (or the apology), its record,
+ * the summary and the traces after it.
+ */
+const TURN_BUDGET_MS = 150_000
+/** A claim retry is a second whole turn; with less than this left it would only be cut off. */
+const RETRY_RESERVE_MS = 30_000
+
+/** What is left before `deadline`, never nothing: a timeout of zero or less is not one the SDK takes. */
+const timeLeft = (deadline: number) => Math.max(1, deadline - Date.now())
 
 /**
  * The three jobs the model does, each with its own prompt, tools and
@@ -51,6 +63,8 @@ export type AgentInput = {
   tools?: ToolName[]
   /** A larger output budget than the mode's, for a run known to write at length (the morning brief). */
   maxOutputTokens?: number
+  /** When the turn must be over, in epoch ms. Defaults to TURN_BUDGET_MS from the start; a caller with its own clock running can pass a nearer one. */
+  deadline?: number
 }
 
 export type AgentResult = {
@@ -411,11 +425,14 @@ export function cleanReply(raw: string, opts: { working?: boolean } = {}): { tex
 
 /* ------------------------------------------------------- claimed actions */
 
-type StepLike = { toolCalls?: ReadonlyArray<{ toolName: string }> }
-
-/** Whether any step called a tool that changes something. */
-export function wroteSomething(steps: ReadonlyArray<StepLike>): boolean {
-  return steps.some((s) => (s.toolCalls ?? []).some((c) => WRITE_TOOLS.has(c.toolName as ToolName)))
+/**
+ * Whether a write went through this turn that makes its change by itself. A
+ * call that answered with an error or threw changed nothing, and a draft or a
+ * proposal is still waiting on a yes: "sent" or "added to the calendar" after
+ * one of those is the report the check is for.
+ */
+function madeChange(ctx: ToolContext): boolean {
+  return (ctx.changed ?? []).some((t) => !PENDING_WRITES.has(t as ToolName))
 }
 
 const CLAIM_CHOICES = ['claims_change', 'no_change_claimed', 'unsure'] as const
@@ -425,6 +442,7 @@ const CLAIM_RULES = [
   'You read one reply from a household assistant and say whether it reports a change as already made.',
   'Choose claims_change when the reply states that the assistant has added, changed, moved, cancelled, removed, sent, saved, scheduled or otherwise done something to a calendar, a list, an email, a reminder, its memory or a task board. The language does not matter.',
   'Choose no_change_claimed for answers, offers, questions, and descriptions of what already exists or of what a lookup showed.',
+  'A reply that shows a draft or a proposal and asks for a yes before sending or adding it is no_change_claimed; one that says it was sent or added is claims_change.',
   'Choose unsure when you cannot tell.',
 ].join(' ')
 
@@ -432,54 +450,58 @@ const CLAIM_RULES = [
  * A typed judgement, like the ambient gate, rather than a list of verbs: the
  * household may have the bot speak any language, and a small model finds new
  * ways to say "done" faster than a pattern could be extended. Jev answers it
- * when a key is set; otherwise the slot that wrote the reply is asked.
+ * when a key is set; otherwise the chain does, as a structured call like the
+ * others: recorded, so a slot that answers the choice with prose (the SDK
+ * throws on that, and on an allowance thought away with nothing written)
+ * falls behind the ones that answer it.
  */
-async function reportsChange(slot: ModelSlot, reply: string, chatId: string): Promise<boolean> {
+async function reportsChange(reply: string, chatId: string, deadline: number): Promise<boolean> {
   if (jevConfigured()) return claimsChange({ reply, chatId })
-  const out = await traced(
-    { traceName: 'hearth.claim', sessionId: chatId, tags: ['claim'], metadata: { model: slot.name } },
-    () =>
-      generateText({
-        model: slot.model,
-        system: CLAIM_RULES,
-        prompt: `REPLY:\n${reply.slice(0, 2000)}\n\nDoes the reply report a change as already made?`,
-        output: Output.choice({ options: [...CLAIM_CHOICES], name: 'claim' }),
-        maxOutputTokens: 64,
-        temperature: 0,
-        timeout: { stepMs: 10_000 },
-        telemetry: callTelemetry('hearth.claim'),
-      }),
-  )
-  const picked: ClaimChoice = out.output ?? (/\bclaims_change\b/i.test(out.text ?? '') ? 'claims_change' : 'unsure')
-  return picked === 'claims_change'
+  return withModelFallback(async (slot) => {
+    const out = await traced(
+      { traceName: 'hearth.claim', sessionId: chatId, tags: ['claim'], metadata: { model: slot.name } },
+      () =>
+        generateText({
+          model: slot.model,
+          system: CLAIM_RULES,
+          prompt: `REPLY:\n${reply.slice(0, 2000)}\n\nDoes the reply report a change as already made?`,
+          output: Output.choice({ options: [...CLAIM_CHOICES], name: 'claim' }),
+          // The allowance counts a thinking model's reasoning, and the answer is one word after it.
+          maxOutputTokens: 256,
+          temperature: 0,
+          timeout: { totalMs: timeLeft(deadline), stepMs: 10_000 },
+          telemetry: callTelemetry('hearth.claim'),
+        }),
+    )
+    const picked: ClaimChoice = out.output
+    return picked === 'claims_change'
+  }, await structuredChain(), 'hearth.claim', deadline)
 }
 
 /**
  * A small model sometimes narrates a change it never made: it answers "done,
- * replaced" with no tool called, and the calendar keeps the old entry. A
- * tool's notice or a write call this turn means the report is real and
- * nothing is asked; otherwise the reply is judged, and one that reports a
- * change gets a second turn to make it or take it back. The judgement fails
- * open: an unsure or failed check changes nothing.
+ * replaced" with no tool called, or after a call that failed, and the
+ * calendar keeps the old entry. A tool's notice or a write that went through
+ * this turn means the report is real and nothing is asked; otherwise the
+ * reply is judged, and one that reports a change gets a second turn to make
+ * it or take it back. The judgement fails open: an unsure or failed check
+ * changes nothing.
  */
-async function claimsUnmadeAction(
-  slot: ModelSlot,
-  text: string,
-  steps: ReadonlyArray<StepLike>,
-  ctx: ToolContext,
-): Promise<boolean> {
-  if (!text || ctx.notices.length > 0 || wroteSomething(steps)) return false
+async function claimsUnmadeAction(slot: ModelSlot, text: string, ctx: ToolContext, deadline: number): Promise<boolean> {
+  if (!text || ctx.notices.length > 0 || madeChange(ctx)) return false
   try {
-    return await reportsChange(slot, text, ctx.chatId)
+    return await reportsChange(text, ctx.chatId, deadline)
   } catch (err) {
-    console.warn(`[agent] ${slot.name} could not judge the reply for an unmade change:`, describeError(err))
+    console.warn(`[agent] could not judge ${slot.name}'s reply for an unmade change:`, describeError(err))
     return false
   }
 }
 
 const unmadeActionNote = (who: string) =>
-  `[Hearth] Nothing has changed: that reply says something was done, but no tool was called this turn. ` +
-  `If ${who} asked for it, do it now with the right tool (list first if an id is needed) and report what the tool returned. ` +
+  `[Hearth] Nothing has changed: that reply says something was done, but no tool did it this turn. ` +
+  `A tool that answered with an error changed nothing, and a draft or a proposal only waits for a yes. ` +
+  `If ${who} asked for it, do it now with the right tool (list first if an id is needed) and report what the tool returned; ` +
+  `for a draft or a proposal, show it and ask for the yes. ` +
   `If ${who} was only telling you something, reply without saying you did it.`
 
 const NOTHING_CHANGED = 'I did not change anything this turn. If that is not what you expected, tell me exactly what to change.'
@@ -495,28 +517,43 @@ async function historyMessages(chatId: string, excludeId?: number): Promise<Mode
   )
 }
 
-const EVIDENCE_ITEM_CHARS = 2_000
-const EVIDENCE_TOTAL_CHARS = 12_000
+/**
+ * About ten thousand tokens. A run's longest reads (a few emails at 6,000
+ * characters, a page at 9,000) fit whole, and the chain's claim check sends
+ * the evidence once for every statement it checks.
+ */
+const EVIDENCE_TOTAL_CHARS = 40_000
+const CUT_MARK = ' …[cut short]'
 
 /**
- * What the tools actually said, compactly, so the post decision can check a
- * draft against its sources rather than against the model's memory of them.
+ * What the tools actually said, so the post decision can check a draft
+ * against its sources rather than against the model's memory of them. The
+ * writer saw every result whole, and a result the checks cannot see makes a
+ * true statement look invented; so every result is kept, and only when they
+ * run over the total are the longest cut, all to the same length, which
+ * leaves the short ones (what a proposal or a list write returned) whole.
  */
 type ToolResultLike = { toolName: string; input: unknown; output: unknown }
 
 export function collectEvidence(steps: ReadonlyArray<{ toolResults?: ReadonlyArray<ToolResultLike> }>): string {
-  const parts: string[] = []
-  let total = 0
-  for (const step of steps) {
-    for (const r of step.toolResults ?? []) {
-      const line = `${r.toolName}(${JSON.stringify(r.input)}) -> ${JSON.stringify(r.output)}`
-      const clipped = line.length > EVIDENCE_ITEM_CHARS ? `${line.slice(0, EVIDENCE_ITEM_CHARS)}…` : line
-      if (total + clipped.length > EVIDENCE_TOTAL_CHARS) return parts.join('\n')
-      parts.push(clipped)
-      total += clipped.length
-    }
+  const lines = steps.flatMap((step) =>
+    (step.toolResults ?? []).map((r) => `${r.toolName}(${JSON.stringify(r.input)}) -> ${JSON.stringify(r.output)}`),
+  )
+  const budget = EVIDENCE_TOTAL_CHARS - Math.max(0, lines.length - 1)
+  if (lines.reduce((n, l) => n + l.length, 0) <= budget) return lines.join('\n')
+  // The longest length every result can be held to: the short ones take what
+  // they need, and what is left is shared evenly among the rest.
+  const lengths = lines.map((l) => l.length).sort((a, b) => a - b)
+  let rest = budget
+  let cap = 0
+  for (const [i, n] of lengths.entries()) {
+    cap = Math.floor(rest / (lengths.length - i))
+    if (n > cap) break
+    rest -= n
   }
-  return parts.join('\n')
+  return lines
+    .map((l) => (l.length > cap ? `${l.slice(0, Math.max(0, cap - CUT_MARK.length))}${CUT_MARK}` : l))
+    .join('\n')
 }
 
 /**
@@ -553,6 +590,7 @@ function doneLine(ctx: ToolContext): string {
 export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const mode = input.mode ?? 'chat'
   const now = new Date()
+  const deadline = input.deadline ?? now.getTime() + TURN_BUDGET_MS
   const ctx: ToolContext = {
     chatId: input.chatId,
     member: input.member,
@@ -589,6 +627,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
 
   const messages: ModelMessage[] = [...history, { role: 'user', content }]
   const context = ambient.text
+  // Everything the turn was handed, where a link it may open later can already be.
+  ctx.seen = [{ text: [context, ...history.map((m) => String(m.content)), input.text, ...texts].join('\n'), typed: 0 }]
   const activeTools = input.tools ?? defaultTools(mode)
   // A chat turn routes: the core set plus the groups its wording calls for,
   // widened by any more_tools call the model makes along the way. The import
@@ -628,7 +668,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
                 }
               : {}),
             stopWhen: isStepCount(MAX_STEPS),
-            timeout: { stepMs: STEP_TIMEOUT_MS },
+            timeout: { totalMs: timeLeft(deadline), stepMs: STEP_TIMEOUT_MS },
             maxOutputTokens: input.maxOutputTokens ?? settings.maxOutputTokens,
             ...(settings.temperature !== undefined ? { temperature: settings.temperature } : {}),
             ...(reasoning ? { reasoning } : {}),
@@ -677,7 +717,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
             cutShort = !truncated
           }
 
-          if (mode === 'chat' && (await claimsUnmadeAction(slot, cleaned.text, r.steps ?? [], ctx))) {
+          if (mode === 'chat' && (await claimsUnmadeAction(slot, cleaned.text, ctx, deadline))) {
             console.warn(`[agent] ${slot.name} reported an action it never took; asking it to act or retract`)
             await recordModelEvent({ slot: slot.name, purpose: `hearth.${mode}`, outcome: 'claim_retry' })
             const changedBefore = ctx.changed?.length ?? 0
@@ -687,6 +727,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
             const firstLooks = ctx.pendingCursors?.splice(stagedBefore) ?? []
             let replaced = false
             try {
+              // Near the deadline the retry would be cut off anyway; this says the same, sooner.
+              if (deadline - Date.now() < RETRY_RESERVE_MS) throw new Error('too little of the turn was left to ask again')
               const again = await call([
                 ...messages,
                 { role: 'assistant', content: cleaned.text },
@@ -697,7 +739,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
                 cleaned = retried
                 replaced = true
               }
-              if (await claimsUnmadeAction(slot, cleaned.text, again.steps ?? [], ctx)) {
+              if (await claimsUnmadeAction(slot, cleaned.text, ctx, deadline)) {
                 console.warn(`[agent] ${slot.name} still reported an untaken action; saying so`)
                 cleaned = { text: `${cleaned.text}\n\n${NOTHING_CHANGED}`, stripped: true }
               }
@@ -753,6 +795,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     ),
   chain,
   `hearth.${mode}`,
+  deadline,
   ).catch((err: unknown) => {
     if (!shortPost) throw err
     // Every later model failed outright; the one that ran long had its say.
@@ -1039,11 +1082,6 @@ export function isStructuredOutputError(err: unknown): boolean {
 const GATE_CHOICES = ['reply', 'stay_silent', 'unsure'] as const
 type GateChoice = (typeof GATE_CHOICES)[number]
 
-/** For providers that answer in prose anyway: only an unmistakable yes counts. */
-function readGateChoice(text: string): GateChoice {
-  return /\b(?:reply|yes)\b/i.test(text) ? 'reply' : 'stay_silent'
-}
-
 const GATE_RULES = [
   'You decide whether a family assistant bot should reply to a group chat message.',
   'Choose reply only if the message asks a question the assistant can answer, requests an action (reminder, calendar, email, lookup), or clearly addresses the assistant.',
@@ -1072,13 +1110,14 @@ async function askGate(
       output: Output.choice({ options: [...GATE_CHOICES], name: 'gate' }),
       // Thinking tokens can count against the output budget on some
       // providers, so leave room for them; the answer itself is one word.
-      maxOutputTokens: 64,
+      // An answer in prose, or none, throws here and the gate stays quiet.
+      maxOutputTokens: 256,
       temperature: 0.2,
       timeout: { stepMs: 10_000 },
       telemetry: callTelemetry('hearth.gate'),
     }),
   )
-  const picked: GateChoice = out.output ?? readGateChoice(out.text)
+  const picked: GateChoice = out.output
   console.info(`[gate] ${slot.name} asked:${polarity} -> ${picked} chat=${input.chatId}`)
   return picked
 }

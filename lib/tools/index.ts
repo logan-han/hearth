@@ -52,10 +52,66 @@ const UNREPEATABLE: ReadonlySet<string> = new Set([
   'jira_create_issue', 'jira_comment', 'jira_attach_email_file', 'notion_append_to_page',
 ])
 
+/** A link as it would be written anywhere: no scheme, no closing slash. */
+const linkKey = (url: string) => url.trim().replace(/^https?:\/\//i, '').replace(/\/$/, '')
+
 /**
- * Wrap the tools that leave a mark on the turn: an outside-content tool marks
- * it as having read something untrusted when called, and an unrepeatable write
- * records itself once it has succeeded (a result with an `error` changed nothing).
+ * What no written link holds: whitespace and control characters, which
+ * `new URL` encodes or drops, and the quotes, angle brackets and backslash
+ * that end a link in text or escape a line break in a tool's JSON. An
+ * address with one in it runs on from a link into the words beside it.
+ */
+const NOT_IN_A_LINK = /[\s\x00-\x1f\x7f"<>\\]/
+
+/**
+ * Whether `key` stands in `text` as a whole link: starting where a host
+ * starts (after a scheme or an @, or after something no link holds, such as
+ * an escaped line break in a tool's JSON), not partway into a longer host or
+ * path, and not as the start of a longer one.
+ */
+function standsIn(text: string, key: string): boolean {
+  for (let at = text.indexOf(key); at >= 0; at = text.indexOf(key, at + 1)) {
+    const before = text.slice(Math.max(0, at - 2), at)
+    const starts = before.endsWith('//') || /\\[nrt]$/.test(before) || !/[\w\-.~%/?#=&+:]$/.test(before)
+    const next = text.slice(at + key.length).replace(/^\//, '')
+    if (starts && !/^[\w\-~%/?#=&+@]/.test(next)) return true
+  }
+  return false
+}
+
+/**
+ * Whether a link was in something the turn was given or read, before the
+ * model had written it into a call of its own: a result that only echoes
+ * the model's own words back (a search answer, a note it just saved) vouches
+ * for nothing. Scheme, host case and a closing slash may differ.
+ */
+function linkSeen(ctx: ToolContext, url: string): boolean {
+  if (NOT_IN_A_LINK.test(url.trim())) return false
+  let href = url
+  try {
+    href = new URL(url).href
+  } catch {
+    // Judged as written; read_url turns it away itself.
+  }
+  const keys = [...new Set([linkKey(url), linkKey(href)])].filter(Boolean)
+  const typed = ctx.typed ?? []
+  return (ctx.seen ?? []).some((s) =>
+    keys.some((k) => standsIn(s.text, k) && !typed.slice(0, s.typed).some((t) => t.includes(k))),
+  )
+}
+
+const UNSEEN_LINK =
+  'Not opened: this turn has read mail, a page or a file from outside the household, and this address does not ' +
+  'appear in anything it was given or read. Open a link only exactly as it appears there; if it was in a photo or ' +
+  'a scan, ask for it to be sent as text.'
+
+/**
+ * Wrap every tool so the turn keeps its record: what the model wrote into
+ * each call and what came back (see ToolContext.seen). An outside-content
+ * tool also marks the turn as having read something untrusted, and a write
+ * records itself once it has succeeded (a result with an `error` changed
+ * nothing). Once something untrusted has been read, read_url opens only a
+ * link that was there to be read.
  */
 function instrument<T extends Record<string, { execute?: (...args: never[]) => unknown }>>(ctx: ToolContext, tools: T): T {
   const out: Record<string, unknown> = { ...tools }
@@ -63,13 +119,23 @@ function instrument<T extends Record<string, { execute?: (...args: never[]) => u
     const untrusted = UNTRUSTED_SOURCES.has(name)
     const writes = WRITE_TOOLS.has(name as ToolName)
     const unrepeatable = UNREPEATABLE.has(name)
-    if (!t.execute || (!untrusted && !writes)) continue
+    if (!t.execute) continue
     const execute = t.execute
     out[name] = {
       ...t,
       execute: async (...args: never[]) => {
+        const input: unknown = args[0]
+        const typed = (ctx.typed ??= [])
+        typed.push(JSON.stringify(input) ?? '')
+        if (name === 'read_url') {
+          const url = String((input as { url?: unknown } | undefined)?.url ?? '')
+          if (ctx.readUntrusted && !linkSeen(ctx, url)) return { error: UNSEEN_LINK }
+          // Opened before anything untrusted was read, it came from the family's words alone, and may be read again.
+          if (!ctx.readUntrusted) (ctx.seen ??= []).push({ text: url, typed: 0 })
+        }
         if (untrusted) ctx.readUntrusted = true
         const result = await execute(...args)
+        ;(ctx.seen ??= []).push({ text: JSON.stringify(result) ?? '', typed: typed.length })
         const failed = typeof result === 'object' && result !== null && 'error' in result
         if (writes && !failed) (ctx.changed ??= []).push(name)
         if (unrepeatable && !failed) (ctx.wrote ??= []).push(name)
@@ -130,4 +196,11 @@ export const WRITE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   'notion_append_to_page', 'jira_create_issue', 'jira_update_issue', 'jira_move_issue', 'jira_comment', 'jira_attach_email_file',
   'create_automation', 'delete_automation', 'pause_automation',
 ])
+
+/**
+ * Writes that only put something to a person: a draft waits on its owner's
+ * yes, a proposal on anyone's. Until then the email is unsent and the
+ * calendar unchanged, so neither backs a reply that says it was done.
+ */
+export const PENDING_WRITES: ReadonlySet<ToolName> = new Set<ToolName>(['draft_email', 'propose_family_event'])
 

@@ -18,11 +18,31 @@ vi.mock('@typesafe-ai/sdk', async (orig) => {
   return { ...actual, TypeSafeClient }
 })
 
-const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, isStructuredOutputError, wroteSomething } = await import('@/lib/agent')
+const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, isStructuredOutputError } = await import('@/lib/agent')
+const { generateText: sdkGenerateText } = await vi.importActual<typeof import('ai')>('ai')
+const { MockLanguageModelV4 } = await import('ai/test')
 
 let client: PGlite
 
 const reply = (text: string) => ({ text, steps: [], usage: {} })
+
+/**
+ * The SDK's own generateText, on a model that answers `text` and stops for
+ * `finish`: what a provider's answer really does to a typed call, where a
+ * stub can only say what the test assumes.
+ */
+const modelSays = (text: string, finish: 'stop' | 'length' = 'stop') => (opts: Parameters<typeof sdkGenerateText>[0]) =>
+  sdkGenerateText({
+    ...opts,
+    model: new MockLanguageModelV4({
+      doGenerate: async () => ({
+        content: text ? [{ type: 'text', text }] : [],
+        finishReason: { unified: finish, raw: finish },
+        usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } },
+        warnings: [],
+      }) as never,
+    }),
+  } as never)
 
 /** Five structured calls answered with prose: enough for the chain to stop asking that slot first. */
 async function keepsAnsweringInProse(slot: string) {
@@ -444,6 +464,39 @@ describe('runAgent', () => {
     expect(r.model).toContain('openrouter')
   })
 
+  it('gives every call only what is left of the turn, and tries no model once it is spent', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText.mockResolvedValueOnce(reply('Bins go out Monday.'))
+    await runAgent({ ...input, mode: 'watcher', history: false })
+    const { totalMs, stepMs } = generateText.mock.calls[0][0].timeout
+    expect(totalMs).toBeGreaterThan(140_000)
+    expect(totalMs).toBeLessThanOrEqual(150_000)
+    expect(stepMs).toBe(60_000)
+
+    // The first model runs out the clock; the second is never started, and the turn says why.
+    generateText.mockReset()
+    const deadline = Date.now() + 500
+    generateText.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, deadline - Date.now() + 10))
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    })
+    await expect(runAgent({ ...input, mode: 'watcher', history: false, deadline })).rejects.toThrow('aborted due to timeout')
+    expect(generateText).toHaveBeenCalledTimes(1)
+  })
+
+  it('still ends a turn the clock stopped after a write by saying what was done', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    const deadline = Date.now() + 500
+    generateText.mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
+      await opts.tools.add_to_list.execute({ items: ['milk'], list: 'shopping' }, {})
+      await new Promise((resolve) => setTimeout(resolve, deadline - Date.now() + 10))
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    })
+    const r = await runAgent({ ...input, deadline })
+    expect(generateText).toHaveBeenCalledTimes(1)
+    expect(r.text).toBe('Done so far: added to a list. My reply was cut off there, so ask again only for anything else you wanted.')
+  })
+
   it('ends the turn, saying what was done, when a model fails after changing something', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     process.env.OPENROUTER_MODEL = 'minimax/minimax-m3:free'
@@ -701,7 +754,15 @@ describe('runAgent', () => {
 describe('a reply that reports a change no tool made', () => {
   const input = { chatId: '-100', chatType: 'private', member: null, memberName: 'Rowan', text: 'replace the 30 Sep vacation care with Scouts Cuboree' }
   const judged = (choice: string) => ({ text: '', output: choice, steps: [], usage: {} })
-  const wrote = (text: string, toolName: string) => ({ text, steps: [{ toolCalls: [{ toolName, input: {} }] }], usage: {} })
+  type Tools = Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }>
+  /** A reply written after really calling a tool; the steps list the call whatever it returned, as the SDK's do. */
+  const wrote = (text: string, toolName: string, args: (id: number) => object) => async (opts: { tools: Tools }) => {
+    const e = await q.addFamilyEvent({ title: 'Vacation care', startsAt: new Date('2026-09-29T23:00:00Z'), endsAt: new Date('2026-09-30T07:00:00Z') })
+    const input = args(e.id)
+    const output = await opts.tools[toolName].execute(input, {})
+    return { text, steps: [{ toolCalls: [{ toolName, input }], toolResults: [{ toolName, input, output }] }], usage: {} }
+  }
+  const replaced = (id: number) => ({ id, title: 'Scouts Cuboree' })
 
   it('asks the model to act or take it back, in the same conversation', async () => {
     generateText
@@ -715,14 +776,14 @@ describe('a reply that reports a change no tool made', () => {
     expect(generateText.mock.calls[1][0].telemetry.functionId).toBe('hearth.claim')
     const retry = generateText.mock.calls[2][0].messages
     expect(retry.at(-2)).toEqual({ role: 'assistant', content: 'Done. Replaced it.' })
-    expect(String(retry.at(-1).content)).toContain('no tool was called this turn')
+    expect(String(retry.at(-1).content)).toContain('no tool did it this turn')
   })
 
   it('is satisfied by a write tool call on the second try', async () => {
     generateText
       .mockResolvedValueOnce(reply('Replaced it.'))
       .mockResolvedValueOnce(judged('claims_change'))
-      .mockResolvedValueOnce(wrote('Replaced: Scouts Cuboree now sits on 30 Sep.', 'update_family_event'))
+      .mockImplementationOnce(wrote('Replaced: Scouts Cuboree now sits on 30 Sep.', 'update_family_event', replaced))
     const r = await runAgent(input)
     expect(r.text).toBe('Replaced: Scouts Cuboree now sits on 30 Sep.')
     expect(generateText).toHaveBeenCalledTimes(3)
@@ -771,21 +832,79 @@ describe('a reply that reports a change no tool made', () => {
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('retry after an untaken action failed'), expect.stringContaining('429'))
   })
 
-  it('reads a verdict the judge wrote in prose, and fails open on a judge that says nothing', async () => {
-    // Neither the replies nor the verdicts carry steps or a typed output, as some providers answer.
-    generateText
-      .mockResolvedValueOnce({ text: 'Done. Replaced it.' })
-      .mockResolvedValueOnce({ text: 'That reply is claims_change.' })
-      .mockResolvedValueOnce({ text: 'Which one? That day has two events on the calendar.' })
-      .mockResolvedValueOnce({})
-    expect((await runAgent(input)).text).toBe('Which one? That day has two events on the calendar.')
+  it('records a judge that answers in prose or thinks its allowance away, and lets the reply stand', async () => {
+    const { structuredRecord } = await import('@/lib/model-events')
+    // The SDK throws on both, so neither is read as a verdict.
+    generateText.mockResolvedValueOnce(reply('Done. Replaced it.')).mockImplementationOnce(modelSays('That reply is claims_change.'))
+    expect((await runAgent(input)).text).toBe('Done. Replaced it.')
+    generateText.mockResolvedValueOnce(reply('Done. Replaced it.')).mockImplementationOnce(modelSays('', 'length'))
+    expect((await runAgent(input)).text).toBe('Done. Replaced it.')
     expect(generateText).toHaveBeenCalledTimes(4)
+    expect(generateText.mock.calls[1][0].maxOutputTokens).toBeGreaterThanOrEqual(256)
+    // Recorded as the no-object failures they are, which is what moves a slot down the order.
+    expect((await structuredRecord()).get('gemini:gemini-3.5-flash-lite')).toEqual({ attempts: 2, noObject: 2 })
   })
 
-  it('trusts a report backed by a write tool call, without asking', async () => {
-    generateText.mockResolvedValueOnce(wrote('Replaced it.', 'update_family_event'))
+  it('asks the next model when the first cannot give a verdict, and acts on its answer', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText
+      .mockResolvedValueOnce(reply('Done. Replaced it.'))
+      .mockImplementationOnce(modelSays('I think it claims a change.'))
+      .mockImplementationOnce(modelSays('{"result":"claims_change"}'))
+      .mockResolvedValueOnce(reply('Which one? That day has two events on the calendar.'))
+      .mockResolvedValueOnce(judged('no_change_claimed'))
+    expect((await runAgent(input)).text).toBe('Which one? That day has two events on the calendar.')
+    expect(generateText.mock.calls[2][0].telemetry.functionId).toBe('hearth.claim')
+  })
+
+  it('trusts a report backed by a write that went through, without asking', async () => {
+    generateText.mockImplementationOnce(wrote('Replaced it.', 'update_family_event', replaced))
     expect((await runAgent(input)).text).toBe('Replaced it.')
     expect(generateText).toHaveBeenCalledTimes(1)
+  })
+
+  it('still asks after a write that failed, or one that only waits on a yes', async () => {
+    const calls = [
+      wrote('Done, moved it to Friday.', 'update_family_event', (id) => ({ id: id + 1, title: 'Dentist' })),
+      wrote('Added the carnival to the family calendar.', 'propose_family_event', () => ({ title: 'Carnival', start: '2026-10-02T09:00', confirmed_distinct: true })),
+    ]
+    for (const first of calls) {
+      generateText.mockReset()
+      generateText
+        .mockImplementationOnce(first)
+        .mockResolvedValueOnce(judged('claims_change'))
+        .mockResolvedValueOnce(reply('Nothing is on the calendar yet: it waits for a yes.'))
+        .mockResolvedValueOnce(judged('no_change_claimed'))
+      expect((await runAgent(input)).text).toBe('Nothing is on the calendar yet: it waits for a yes.')
+      expect(generateText.mock.calls[1][0].telemetry.functionId).toBe('hearth.claim')
+      expect(String(generateText.mock.calls[2][0].messages.at(-1).content)).toContain('a draft or a proposal only waits for a yes')
+    }
+  })
+
+  it('tells the judge a reply that shows a draft and asks for the yes claims nothing, and sends it as written', async () => {
+    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+    await q.saveConnection({ memberId: member.id, provider: 'google', email: 'r@example.com', refreshToken: 'r', scopes: null })
+    const shown = 'I\'ve drafted your reply to Mrs Lee: "Juno will be away on Friday." Shall I send it?'
+    generateText
+      .mockImplementationOnce(async (opts: { tools: Tools }) => {
+        const input = { to: ['lee@school.example'], subject: 'Absence', body: 'Juno will be away on Friday.' }
+        const output = await opts.tools.draft_email.execute(input, {})
+        return { text: shown, steps: [{ toolCalls: [{ toolName: 'draft_email', input }], toolResults: [{ toolName: 'draft_email', input, output }] }], usage: {} }
+      })
+      .mockResolvedValueOnce(judged('no_change_claimed'))
+    expect((await runAgent({ ...input, member })).text).toBe(shown)
+    expect(generateText).toHaveBeenCalledTimes(2)
+    // The chain's judge is given the same line Jev's question draws: a draft shown for a yes is no change.
+    const judge = generateText.mock.calls[1][0]
+    expect(judge.telemetry.functionId).toBe('hearth.claim')
+    expect(judge.system).toContain('shows a draft or a proposal and asks for a yes before sending or adding it is no_change_claimed')
+  })
+
+  it('says nothing changed without asking again when too little of the turn is left for a retry', async () => {
+    generateText.mockResolvedValueOnce(reply('Replaced it.')).mockResolvedValueOnce(judged('claims_change'))
+    const r = await runAgent({ ...input, deadline: Date.now() + 20_000 })
+    expect(r.text).toMatch(/^Replaced it\.\n\nI did not change anything this turn\./)
+    expect(generateText).toHaveBeenCalledTimes(2)
   })
 
   it('leaves an ordinary answer alone once judged, and fails open when the judgement errors', async () => {
@@ -809,7 +928,7 @@ describe('shouldChimeIn', () => {
   const input = { chatId: '-100', text: 'anyone know the wifi password?', memberName: 'Ada' }
 
   it('says yes when the question answered from both sides agrees', async () => {
-    generateText.mockResolvedValue(reply('YES'))
+    generateText.mockResolvedValue({ ...reply(''), output: 'reply' })
     expect(await shouldChimeIn(input)).toBe(true)
     expect(generateText).toHaveBeenCalledTimes(2)
     expect(String(generateText.mock.calls[0][0].messages.at(-1).content)).toContain('Should the assistant reply?')
@@ -827,9 +946,11 @@ describe('shouldChimeIn', () => {
     expect(generateText).toHaveBeenCalledTimes(1)
   })
 
-  it('says no on NO', async () => {
-    generateText.mockResolvedValue(reply('NO'))
+  it('stays quiet on a yes in prose, which the SDK will not take for the choice, and records it', async () => {
+    const { structuredRecord } = await import('@/lib/model-events')
+    generateText.mockImplementation(modelSays('YES, reply to this one.'))
     expect(await shouldChimeIn(input)).toBe(false)
+    expect((await structuredRecord()).get('gemini:gemini-3.5-flash-lite')).toEqual({ attempts: 1, noObject: 1 })
   })
 
   it('fails closed when the gate model errors', async () => {
@@ -837,8 +958,10 @@ describe('shouldChimeIn', () => {
     expect(await shouldChimeIn(input)).toBe(false)
   })
 
-  it('fails closed on an answer it cannot read', async () => {
-    generateText.mockResolvedValue(reply('perhaps'))
+  it('fails closed on an answer it cannot read, or none', async () => {
+    generateText.mockImplementation(modelSays('perhaps'))
+    expect(await shouldChimeIn(input)).toBe(false)
+    generateText.mockImplementation(modelSays('', 'length'))
     expect(await shouldChimeIn(input)).toBe(false)
   })
 
@@ -850,9 +973,9 @@ describe('shouldChimeIn', () => {
   })
 
   it('keeps the gate cheap, with room for a model that thinks before it answers', async () => {
-    generateText.mockResolvedValue(reply('NO'))
+    generateText.mockResolvedValue({ ...reply(''), output: 'stay_silent' })
     await shouldChimeIn(input)
-    expect(generateText.mock.calls[0][0].maxOutputTokens).toBeLessThanOrEqual(64)
+    expect(generateText.mock.calls[0][0].maxOutputTokens).toBe(256)
     expect(generateText.mock.calls[0][0].tools).toBeUndefined()
   })
 
@@ -1097,24 +1220,37 @@ describe('leaked reasoning', () => {
 })
 
 describe('collectEvidence', () => {
-  it('clips long results and stops at the total budget', () => {
-    const big = 'x'.repeat(5_000)
-    const steps = Array.from({ length: 10 }, () => ({ toolResults: [{ toolName: 'read_url', input: {}, output: big }] }))
+  it('keeps what the tools returned whole while it fits, a full email and a full page included', () => {
+    const email = `Athletics carnival Friday 9am. ${'Details. '.repeat(650)}Bring a hat and a water bottle.`
+    const steps = [
+      { toolResults: [{ toolName: 'read_email', input: { id: 'm1' }, output: { body: email } }] },
+      { toolResults: [{ toolName: 'read_url', input: { url: 'https://x.test' }, output: { text: 'p'.repeat(9_000) } }] },
+    ]
     const out = collectEvidence(steps)
-    expect(out.length).toBeLessThanOrEqual(12_100)
-    expect(out.split('\n').length).toBeLessThan(10)
+    expect(out).toContain('Bring a hat and a water bottle.')
+    expect(out).not.toContain('[cut short]')
+  })
+
+  it('over the total, cuts the longest results evenly and keeps every one, the short writes whole', () => {
+    const big = 'x'.repeat(9_000)
+    const steps = [
+      ...Array.from({ length: 6 }, (_, i) => ({ toolResults: [{ toolName: 'read_email', input: { id: `m${i}` }, output: big }] })),
+      { toolResults: [{ toolName: 'propose_family_event', input: { title: 'Carnival' }, output: { proposal_id: 7 } }] },
+    ]
+    const out = collectEvidence(steps)
+    const lines = out.split('\n')
+    expect(out.length).toBeLessThanOrEqual(40_000)
+    expect(lines).toHaveLength(7)
+    expect(lines.at(-1)).toBe('propose_family_event({"title":"Carnival"}) -> {"proposal_id":7}')
+    const cut = lines.slice(0, 6).map((l) => l.length)
+    expect(new Set(cut).size).toBe(1)
+    expect(cut[0]).toBeGreaterThan(6_000)
+    expect(lines[0]).toMatch(/…\[cut short\]$/)
   })
 
   it('passes over a step that called no tools', () => {
     const steps = [{}, { toolResults: [{ toolName: 'list_email', input: { limit: 1 }, output: [] }] }]
     expect(collectEvidence(steps)).toBe('list_email({"limit":1}) -> []')
-  })
-})
-
-describe('wroteSomething', () => {
-  it('counts only a call to a tool that changes something, and a step with no calls as none', () => {
-    expect(wroteSomething([{}, { toolCalls: [{ toolName: 'list_family_events' }] }])).toBe(false)
-    expect(wroteSomething([{}, { toolCalls: [{ toolName: 'add_to_list' }] }])).toBe(true)
   })
 })
 

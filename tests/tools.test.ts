@@ -185,6 +185,110 @@ describe('mail tools', () => {
     expect((await call(mailTools(plain), 'send_email', { draft_id: d.draft_id, confirmed: true })).sent).toBe(true)
   })
 
+  describe('links once the turn has read outside text', () => {
+    // An address literal stands in for a public host, so no name is looked up.
+    const site = 'https://203.0.113.10'
+    const pageWith = (text: string) =>
+      new Response(`<p>${text} ${'Term dates and notices. '.repeat(40)}</p>`, { headers: { 'content-type': 'text/html' } })
+    const fetchMock = vi.fn()
+    beforeEach(() => {
+      vi.stubGlobal('fetch', fetchMock)
+      fetchMock.mockReset()
+    })
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      delete process.env.TAVILY_API_KEY
+    })
+
+    it('opens any link until then, and afterwards only one that was there to be read', async () => {
+      const { buildTools } = await import('@/lib/tools')
+      const turn = later()
+      const tools = buildTools(turn) as unknown as Parameters<typeof call>[0]
+      fetchMock.mockImplementation(async () => pageWith(`<a href="${site}/form?id=7">Consent form</a>`))
+      expect((await call(tools, 'read_url', { url: `${site}/news` })).kind).toBe('page')
+      expect(turn.readUntrusted).toBe(true)
+      // The link on the page, and the page itself again, come from what was read.
+      expect((await call(tools, 'read_url', { url: `${site}/form?id=7` })).kind).toBe('page')
+      expect((await call(tools, 'read_url', { url: `${site}/news`, render: true })).kind).toBe('page')
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      // An address made up after the page, or cut down from one on it, is not.
+      for (const url of [`${site}/c?d=Rowan`, `${site}/form`, 'not a link']) {
+        expect(String((await call(tools, 'read_url', { url })).error)).toContain('Not opened')
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+    })
+
+    it('takes a link from the conversation as it was written, but not one the model wrote first', async () => {
+      const { buildTools } = await import('@/lib/tools')
+      process.env.TAVILY_API_KEY = 'tv'
+      const turn = later({ readUntrusted: true, seen: [{ text: `Rowan: what does ${site}/term-dates say?`, typed: 0 }] })
+      const tools = buildTools(turn) as unknown as Parameters<typeof call>[0]
+      fetchMock.mockImplementation(async (url: string, init?: { body?: string }) =>
+        String(url).includes('tavily')
+          ? new Response(JSON.stringify({ answer: `Results for ${JSON.parse(init!.body!).query}`, results: [] }))
+          : pageWith('Term 4 starts 6 October.'),
+      )
+      // Scheme and a closing slash are form, not a different link.
+      expect((await call(tools, 'read_url', { url: 'HTTP://203.0.113.10/term-dates/' })).kind).toBe('page')
+      // A search answer that repeats the model's own query vouches for nothing.
+      await call(tools, 'web_search', { query: `${site}/c?d=Rowan`, depth: 'basic' })
+      expect(String((await call(tools, 'read_url', { url: `${site}/c?d=Rowan` })).error)).toContain('Not opened')
+    })
+
+    it('follows a relative link on a page it has read, written out whole against the page', async () => {
+      const { buildTools } = await import('@/lib/tools')
+      const turn = later()
+      const tools = buildTools(turn) as unknown as Parameters<typeof call>[0]
+      fetchMock.mockImplementation(async () =>
+        pageWith('<a href="/notices/carnival">Carnival notice</a> <a href="consent?id=7&amp;term=4">Consent form</a>'),
+      )
+      const page = await call(tools, 'read_url', { url: `${site}/news/week-9` })
+      expect(page.text).toContain(`Carnival notice [${site}/notices/carnival]`)
+      expect((await call(tools, 'read_url', { url: `${site}/notices/carnival` })).kind).toBe('page')
+      expect((await call(tools, 'read_url', { url: `${site}/news/consent?id=7&term=4` })).kind).toBe('page')
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+    })
+
+    it('takes only a whole link, not one run on into the words beside it or cut from inside a longer one', async () => {
+      const { buildTools } = await import('@/lib/tools')
+      const seen = [
+        `Ann: see ${site}/a\nRowan: the plan for Saturday`,
+        JSON.stringify({ link: `${site}/b`, pin: '4821', body: `see ${site}/c\nPIN 4821\n203.0.113.10/book` }),
+        'Mrs Lee <office@mail.school.example> wrote: see https://mail.school.example/term and https://203.0.113.99/r/203.0.113.10/d',
+      ].map((text) => ({ text, typed: 0 }))
+      const tools = buildTools(later({ readUntrusted: true, seen })) as unknown as Parameters<typeof call>[0]
+      fetchMock.mockImplementation(async () => pageWith('Term 4 starts 6 October.'))
+      for (const url of [
+        `${site}/a\nRowan: the plan for Saturday`,
+        `${site}/a Rowan:`,
+        `${site}/b","pin":"4821`,
+        `${site}/c\\nPIN`,
+        'https://l.school.example/term',
+        'https://school.example/term',
+        `${site}/d`,
+      ]) {
+        expect(String((await call(tools, 'read_url', { url })).error), url).toContain('Not opened')
+      }
+      expect(fetchMock).not.toHaveBeenCalled()
+      // The links themselves still open, a bare one after a line break in a tool's JSON included.
+      for (const url of [`${site}/a`, `${site}/b`, `${site}/c`, `${site}/book`]) {
+        expect((await call(tools, 'read_url', { url })).kind, url).toBe('page')
+      }
+    })
+
+    it('invites nobody to a calendar event on the strength of outside text', async () => {
+      createEvent.mockResolvedValue({ id: 'e', title: 'Night', start: '', end: '', allDay: false })
+      const event = { title: 'Parent night', start: '2026-09-01T18:00', all_day: false, attendees: ['x@evil.example'] }
+      const r = await call(calendarTools(later({ readUntrusted: true })), 'create_calendar_event', event)
+      expect(String(r.error)).toContain('Not created')
+      expect(createEvent).not.toHaveBeenCalled()
+      // Without the guests it goes on, and a clean turn may invite.
+      await call(calendarTools(later({ readUntrusted: true })), 'create_calendar_event', { ...event, attendees: undefined })
+      await call(calendarTools(later()), 'create_calendar_event', event)
+      expect(createEvent.mock.calls.map(([a]) => (a as { attendees?: string[] }).attendees)).toEqual([undefined, ['x@evil.example']])
+    })
+  })
+
   it('rejects an unknown draft id', async () => {
     expect(String((await call(mailTools(later()), 'send_email', { draft_id: 999, confirmed: true })).error)).toContain('No draft')
   })

@@ -44,7 +44,9 @@ Google/Outlook/Apple ──subscribe──> /api/calendar/{token}/family.ics
 
 Telegram retries any webhook it does not get an ack for within seconds, so
 `/api/telegram` validates, acks, and finishes the work in `waitUntil()` under
-Vercel Fluid compute (300 s ceiling).
+Vercel Fluid compute (300 s ceiling). A turn gives itself 150 s of that, every
+model it tries included, and starts no further model once they are spent, so
+the reply, or the apology, still goes out before the function is stopped.
 
 A chat turn does not see all 52 tools. About twenty are always in reach (search,
 weather, lists, the shared calendar and its proposals, memory); mail, personal
@@ -838,6 +840,15 @@ scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
   an attached file, so the yes has to come from a person's own message and never
   from an instruction planted in something the bot read. Over MCP each call
   stands alone, so there the client's own approval of each tool call is the gate.
+- Once a turn has read anything from outside the household, `read_url` opens
+  only a link that appears, as written, in something the turn was given or
+  read, and not one the model had put into a tool call first, so it requests
+  no address composed in that turn to carry the household's details out. That
+  holds for `read_url` in that turn only: Telegram still fetches a link in the
+  reply itself to preview it, and an automation saved in the turn opens any
+  link in a later run until that run reads outside text. The same turn creates
+  no calendar event with guests, since an invitation carries its details to
+  them; the member confirms who to invite in their next message.
 
 ## Development
 

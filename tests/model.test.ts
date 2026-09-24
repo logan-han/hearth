@@ -135,6 +135,17 @@ describe('withModelFallback', () => {
     expect(new EndOnFailure(null, new Error('429 quota')).message).toBe('429 quota')
   })
 
+  it('tries no further model once the deadline has passed, and says why it stopped', async () => {
+    const fn = vi.fn(async (s: ModelSlot) => {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      throw new Error(`${s.name} timed out`)
+    })
+    await expect(withModelFallback(fn, [slot('a'), slot('b')], 'model', Date.now() + 5)).rejects.toThrow('a timed out')
+    expect(fn).toHaveBeenCalledTimes(1)
+    await expect(withModelFallback(fn, [slot('a')], 'model', Date.now() - 1)).rejects.toThrow('Timed out before any model was asked')
+    expect(fn).toHaveBeenCalledTimes(1)
+  })
+
   it('names the env vars when nothing is configured', async () => {
     await expect(withModelFallback(async () => 'x', [])).rejects.toThrow(/GEMINI_API_KEY/)
   })

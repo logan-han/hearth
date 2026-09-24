@@ -172,12 +172,15 @@ export class EndOnFailure<T> extends Error {
  * failure mode collapses to the same behaviour: rate limit, timeout, provider
  * outage, or a model that cannot drive tools all just move to the next slot.
  * Each attempt is recorded, so the System page can say which slots fail, why,
- * and how often the chain fell through to a later one.
+ * and how often the chain fell through to a later one. Past `deadline` (epoch
+ * ms) no further slot is tried: one started then would be cut off before it
+ * could answer, and the failure recorded against it would not be its own.
  */
 export async function withModelFallback<T>(
   fn: (slot: ModelSlot) => Promise<T>,
   chain: ModelSlot[] = modelChain(),
   purpose = 'model',
+  deadline?: number,
 ): Promise<T> {
   if (chain.length === 0) {
     throw new Error(
@@ -186,6 +189,11 @@ export async function withModelFallback<T>(
   }
   let lastError: unknown
   for (const slot of chain) {
+    if (deadline !== undefined && Date.now() >= deadline) {
+      // The last failure stands for the rest, so the caller still sees why.
+      lastError ??= new Error('Timed out before any model was asked')
+      break
+    }
     const started = Date.now()
     try {
       const out = await fn(slot)

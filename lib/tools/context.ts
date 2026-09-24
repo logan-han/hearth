@@ -26,6 +26,16 @@ export type ToolContext = {
    */
   readUntrusted?: boolean
   /**
+   * The text this turn has been given or has read: the conversation, then
+   * every tool result as it came back, each with how many tool calls the
+   * model had written by then. Once readUntrusted is set, read_url opens only
+   * a link found in here that the model had not written into a call itself:
+   * one it composed could carry the household's details out in its address.
+   */
+  seen?: { text: string; typed: number }[]
+  /** What the model has written into each tool call this turn, in order. See `seen`. */
+  typed?: string[]
+  /**
    * Every write this turn that would double if done again, in order: a list
    * item, a reminder, an invitation, a ticket. Once there is one, a failing
    * model does not hand the turn to the next in the chain, which would start

@@ -72,11 +72,27 @@ async function fetchPublic(start: URL): Promise<{ res: Response; url: URL } | { 
   return { error: 'That address redirected too many times.' }
 }
 
-export function htmlToText(html: string): string {
+/** A link as the page means it, read against `base`; one that will not parse is left as written. */
+function resolved(href: string, base?: string): string {
+  if (!base) return href
+  try {
+    return new URL(href, base).href
+  } catch {
+    return href
+  }
+}
+
+/**
+ * `base` is the page's address after redirects, and relative links come out
+ * whole against it: the model opens a link as it reads it, and once a page
+ * has been read, read_url opens only a link that appears as written.
+ */
+export function htmlToText(html: string, base?: string): string {
   const laidOut = stripBlocks(html)
     // Keep hrefs beside their labels, so the next link can be followed too.
-    .replace(/<a\s[^>]*href="([^"#][^"]*)"[^>]*>([\s\S]*?)<\/a\s*>/gi, (_, href: string, label: string) => {
+    .replace(/<a\s[^>]*href="([^"#][^"]*)"[^>]*>([\s\S]*?)<\/a\s*>/gi, (_, raw: string, label: string) => {
       const text = stripTags(label).replace(/\s+/g, ' ').trim()
+      const href = resolved(raw, base)
       return text ? ` ${text} [${href}] ` : ` [${href}] `
     })
     .replace(/<(br|\/p|\/div|\/li|\/tr|\/h[1-6])[^>]*>/gi, '\n')
@@ -159,7 +175,7 @@ export function browseTools(_ctx: ToolContext) {
 
           const raw = new TextDecoder().decode(buf)
           if (type.includes('html') || /^\s*</.test(raw)) {
-            const text = htmlToText(raw)
+            const text = htmlToText(raw, at)
             if (render || looksLikeShell(raw, text)) {
               const rendered = await renderViaTavily(at)
               if (rendered && rendered.trim().length > text.length) {
