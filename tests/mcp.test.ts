@@ -9,6 +9,13 @@ vi.mock('@/lib/telegram', () => ({ send }))
 const unaccountedIn = vi.hoisted(() => vi.fn(async (_chatId: string): Promise<number | null> => 0))
 vi.mock('@/lib/headcount', () => ({ unaccountedIn }))
 
+/** Linked mailboxes, none unless a test adds one. */
+const mailboxes = vi.hoisted(() => ({ list: [] as { provider: string; listMail: () => Promise<unknown[]> }[] }))
+vi.mock('@/lib/providers', async (orig) => ({
+  ...(await orig<typeof import('@/lib/providers')>()),
+  clientsFor: async () => mailboxes.list,
+}))
+
 const hydrateSecrets = vi.fn(async () => {})
 vi.mock('@/lib/settings', async (orig) => {
   const actual = await orig<typeof import('@/lib/settings')>()
@@ -32,6 +39,7 @@ beforeEach(async () => {
   client = fresh.client
   realDb = fresh.db
   member = await q.upsertMember('111', 'Rowan', { allowed: true })
+  mailboxes.list = []
 })
 afterEach(async () => closeDb(client))
 
@@ -136,6 +144,15 @@ describe('calling a tool', () => {
     )
     expect(text(result)).toContain('nobody there has been told')
     expect(result.isError).toBeUndefined()
+  })
+
+  it('spends what it reported as new once the call returns, so the next call does not repeat it', async () => {
+    const date = new Date(Date.now() - 3600_000).toISOString()
+    mailboxes.list = [{ provider: 'google', listMail: async () => [{ id: 'm1', from: 'school', to: 'me', subject: 'S', snippet: '…', date, unread: true }] }]
+    const first = JSON.parse(text(await callTool('new_mail', { limit: 10 }, member)))
+    expect(first.accounts[0].messages).toHaveLength(1)
+    const again = JSON.parse(text(await callTool('new_mail', { limit: 10 }, member)))
+    expect(again.accounts[0].messages).toEqual([])
   })
 
   it('stays quiet in the chat when the tool only read something', async () => {

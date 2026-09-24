@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import { getSetting } from '@/lib/db/queries'
+import { commitCursors } from '@/lib/tools/cursor'
 import type { ToolContext } from '@/lib/tools/context'
 
 const { moneyTools, budgetPosition, budgetNote } = await import('@/lib/tools/money')
@@ -344,20 +345,44 @@ describe('new_transactions', () => {
       String(url).includes('/transactions') ? json(feed(...txns)) : json(upAccounts),
     )
 
-  it('looks back only a day on the first check, and remembers it looked', async () => {
+  it('looks back only a day on the first check, and remembers it looked once the result is delivered', async () => {
     wire([])
     const r = await call('new_transactions', { account: '2up', limit: 10 })
     expect(r.first_check).toBe(true)
     expect(r.count).toBe(0)
+    expect(await getSetting('up_cursor:-100:joint')).toBeNull()
+    await commitCursors(ctx.pendingCursors)
     expect(await getSetting('up_cursor:-100:joint')).toContain('at')
   })
 
-  it('returns what is new and advances the marker', async () => {
+  it('returns what is new and stages the marker, which moves only when committed', async () => {
     wire([upTxn('t1', '-10.00', '2026-08-27T11:00:00+10:00')])
     const first = await call('new_transactions', { account: '2up', limit: 10 })
     expect(first.count).toBe(1)
+    expect(await getSetting('up_cursor:-100:joint')).toBeNull()
+    await commitCursors(ctx.pendingCursors)
     const cursor = JSON.parse((await getSetting('up_cursor:-100:joint'))!)
     expect(cursor.ids).toContain('t1')
+  })
+
+  it('reports it again to a later run when the earlier one was never delivered', async () => {
+    wire([upTxn('t1', '-10.00', '2026-08-27T11:00:00+10:00')])
+    expect((await call('new_transactions', { account: '2up', limit: 10 })).count).toBe(1)
+    // That run died before posting: nothing was committed, and the next run starts afresh.
+    ctx = { ...ctx, pendingCursors: undefined }
+    expect((await call('new_transactions', { account: '2up', limit: 10 })).count).toBe(1)
+  })
+
+  it('counts what does not fit rather than dropping it, and moves past it', async () => {
+    const txns = Array.from({ length: 5 }, (_, i) => upTxn(`t${i}`, '-1.00', `2026-08-27T1${i}:00:00+10:00`))
+    wire(txns.reverse())
+    const r = await call('new_transactions', { account: '2up', limit: 3 })
+    expect(r.count).toBe(3)
+    expect(r.more_not_shown).toBe(2)
+    expect(r.more_not_shown_is_at_least).toBeUndefined()
+    await commitCursors(ctx.pendingCursors)
+    const cursor = JSON.parse((await getSetting('up_cursor:-100:joint'))!)
+    expect(new Date(cursor.at).toISOString()).toBe(new Date('2026-08-27T14:00:00+10:00').toISOString())
   })
 
   it('never posts the same transaction twice', async () => {
@@ -417,6 +442,7 @@ describe('new_transactions', () => {
   it('finds the newest transaction by timestamp even when it is not last in the feed', async () => {
     wire([upTxn('newer', '-15.00', '2026-08-27T14:00:00+10:00'), upTxn('older', '-5.00', '2026-08-27T13:00:00+10:00')])
     await call('new_transactions', { account: '2up', limit: 10 })
+    await commitCursors(ctx.pendingCursors)
     const cursor = JSON.parse((await getSetting('up_cursor:-100:joint'))!)
     expect(new Date(cursor.at).toISOString()).toBe(new Date('2026-08-27T14:00:00+10:00').toISOString())
   })

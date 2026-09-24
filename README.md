@@ -414,8 +414,11 @@ worth saying**:
   family calendar; anything overdue on the board; and the weather. In the
   group it sweeps every member's linked mailbox, each on its own cursor via
   `new_mail`, and says whose each item was by name (Sam's Outlook), never by
-  provider. A day with nothing on, no new mail and nothing due gets no brief;
-  weather alone is not news.
+  provider. It reads exactly what arrived since the last brief, up to 30 a
+  mailbox, and says how many more there were rather than dropping them without
+  a word. "Today" means anything on during the day, so the third day of a
+  camp is on it too. A day with nothing on, no new mail and nothing due gets
+  no brief; weather alone is not news.
 - **Money snapshot**, Sunday at 6pm: the week's spending and the month so far,
   with the budget's pacing and the categories over it where PocketSmith is
   connected, or the totals from the raw Up feed where it is not. Spend is
@@ -449,7 +452,8 @@ parents' group for one question does not start a morning brief there.
 - `/watch morning` — the brief, in a DM as well, where it reads your own mailbox.
 - `/watch snapshot` — the money snapshot.
 - `/watch money` — new 2Up transactions, checked hourly 9am–10pm. Cursor-disciplined,
-  so a transaction is never posted twice.
+  so a transaction is never posted twice, and one that never reached the chat
+  is not counted as seen.
 - `/watch list` — what this chat is already watching.
 
 Watchers are grounded before they are clever. Each ready-made watcher fetches
@@ -539,8 +543,12 @@ flag, so an Up-sourced summary is the raw number and will read higher.
 
 The third example is a scheduled announcement, and `new_transactions` is built
 for it. Each chat keeps its own marker of what it has already seen, so however
-often the automation runs nothing is posted twice. The first run looks back only
-24 hours, so switching it on does not dump months of history into the chat.
+often the automation runs nothing is posted twice. The marker moves only once
+what was found has reached someone: a scheduled post that fails, a reply
+Telegram refuses or a model that gives out leaves it where it was, so the next
+run reports the same transactions (and the same mail) rather than skipping them
+unseen. The first run looks back only 24 hours, so switching it on does not
+dump months of history into the chat.
 
 Ask for it once and it keeps happening:
 

@@ -83,7 +83,32 @@ describe('google mail', () => {
     await googleClient(1).listMail({ limit: 100 })
     const url = new URL(lastCall()[0])
     expect(url.searchParams.get('q')).toBe('in:inbox newer_than:14d')
-    expect(url.searchParams.get('maxResults')).toBe('25')
+    expect(url.searchParams.get('maxResults')).toBe('50')
+  })
+
+  it('asks for exactly what arrived since a time, when given one', async () => {
+    fetchMock.mockResolvedValueOnce(reply({ messages: [] }))
+    await googleClient(1).listMail({ limit: 30, since: new Date('2026-09-23T21:00:00Z') })
+    const url = new URL(lastCall()[0])
+    expect(url.searchParams.get('q')).toBe(`in:inbox after:${Date.parse('2026-09-23T21:00:00Z') / 1000}`)
+    expect(url.searchParams.get('maxResults')).toBe('30')
+  })
+
+  it('reads a long list ten messages at a time, under the per-second quota', async () => {
+    const ids = Array.from({ length: 23 }, (_, i) => ({ id: `m${i}` }))
+    let inFlight = 0
+    let most = 0
+    fetchMock.mockImplementation(async (url: string) => {
+      if (!String(url).includes('/messages/')) return reply({ messages: ids })
+      inFlight++
+      most = Math.max(most, inFlight)
+      await new Promise((r) => setTimeout(r, 1))
+      inFlight--
+      return reply({ id: String(url).split('/messages/')[1].split('?')[0], payload: { headers: [] }, internalDate: '0' })
+    })
+    const got = await googleClient(1).listMail({ limit: 50 })
+    expect(got).toHaveLength(23)
+    expect(most).toBeLessThanOrEqual(10)
   })
 
   it('keeps a search inside the inbox by default', async () => {
@@ -326,6 +351,15 @@ describe('microsoft graph', () => {
     expect(new URL(lastCall()[0]).searchParams.get('$orderby')).toBe('receivedDateTime desc')
     expect(out[0]).toMatchObject({ subject: 'Athletics carnival', unread: true })
     expect(out[0].from).toBe('School <office@school.edu>')
+  })
+
+  it('filters to what arrived since a time, when given one, keeping the newest first', async () => {
+    fetchMock.mockResolvedValueOnce(reply({ value: [] }))
+    await microsoftClient(1).listMail({ limit: 30, since: new Date('2026-09-23T21:00:00Z') })
+    const url = new URL(String(lastCall()[0]))
+    expect(url.searchParams.get('$filter')).toBe('receivedDateTime ge 2026-09-23T21:00:00.000Z')
+    expect(url.searchParams.get('$orderby')).toBe('receivedDateTime desc')
+    expect(url.searchParams.get('$top')).toBe('30')
   })
 
   it('switches to $search and drops the ordering, which Graph forbids together', async () => {

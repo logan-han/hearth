@@ -145,26 +145,37 @@ export function googleClient(memberId: number): AccountClient {
   return {
     provider: 'google',
 
-    async listMail({ query, limit = 10, scope = 'inbox' }) {
+    async listMail({ query, limit = 10, scope = 'inbox', since }) {
       const t = await token()
+      const cap = Math.min(limit, 50)
       const url = new URL(`${GMAIL}/messages`)
-      url.searchParams.set('maxResults', String(Math.min(limit, 25)))
+      url.searchParams.set('maxResults', String(cap))
+      // A sweep asks for what arrived since it last looked (after: takes epoch
+      // seconds); anything else looks back a fortnight.
+      const window = since
+        ? [`after:${Math.floor(since.getTime() / 1000)}`, query].filter(Boolean).join(' ')
+        : query || 'newer_than:14d'
       // Archived mail has no folder in Gmail, only a missing INBOX label, so
       // "everything" is the absence of in:inbox (sent mail excluded on top).
-      const q = scope === 'all'
-        ? (query || 'newer_than:14d') + ' -in:sent -in:chats'
-        : `in:inbox ${query || 'newer_than:14d'}`
+      const q = scope === 'all' ? `${window} -in:sent -in:chats` : `in:inbox ${window}`
       url.searchParams.set('q', q)
       const list = await api<{ messages?: { id: string }[] }>(t, url.toString())
-      const ids = (list.messages ?? []).slice(0, limit).map((m) => m.id)
-      const full = await Promise.all(
-        ids.map((id) =>
-          api<GmailMessage>(
-            t,
-            `${GMAIL}/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`,
-          ),
-        ),
-      )
+      const ids = (list.messages ?? []).slice(0, cap).map((m) => m.id)
+      // Ten at a time: each read costs quota, and fifty at once would trip
+      // Gmail's per-second limit for one user.
+      const full: GmailMessage[] = []
+      for (let i = 0; i < ids.length; i += 10) {
+        full.push(
+          ...(await Promise.all(
+            ids.slice(i, i + 10).map((id) =>
+              api<GmailMessage>(
+                t,
+                `${GMAIL}/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`,
+              ),
+            ),
+          )),
+        )
+      }
       return full.map(toSummary)
     },
 

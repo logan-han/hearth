@@ -3,7 +3,7 @@ import { z } from 'zod'
 import {
   addProposal, pendingProposals, settleProposal, proposalForSource, addFamilyEvent, listFamilyEvents,
 } from '../db/queries'
-import { localToUtc, formatLocal, formatLocalDate, localDateKey, resolveSpan } from '../cron'
+import { localToUtc, formatLocal, formatLocalDate, localDateKey, resolveSpan, nextLocalMidnight } from '../cron'
 import { timezone } from '../env'
 import { announce, type ToolContext } from './context'
 import { FEED_LAG } from './familycal'
@@ -20,7 +20,8 @@ const LOCAL_DATETIME = z
  * anything that still wants to go ahead.
  */
 async function sameDay(chatId: string, dayStart: Date) {
-  const dayEnd = new Date(dayStart.getTime() + 86_400_000)
+  // By the calendar, and anything on at any point that day, a camp that began earlier included.
+  const dayEnd = nextLocalMidnight(dayStart)
   const events = (await listFamilyEvents(dayStart, dayEnd)).filter((e) => !e.cancelled)
   const proposals = (await pendingProposals(chatId)).filter((p) => p.startsAt >= dayStart && p.startsAt < dayEnd)
   return { events, proposals }

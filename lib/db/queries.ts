@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, lte, ne, sql, isNull, gt, exists, notExists } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, lte, lt, ne, or, sql, isNull, gt, exists, notExists } from 'drizzle-orm'
 import { db } from './index'
 import {
   members, chats, connections, messages, familyEvents, memories, memoryQuestions, automations, settings, emailDrafts,
@@ -337,11 +337,23 @@ export async function getFamilyEvent(id: number) {
   return row
 }
 
+/**
+ * Every event on the family calendar that is on during [from, to): started
+ * before `to` and not yet over by `from`. A camp that began on Friday is on
+ * on Sunday, and yesterday's all-day event, which ends at this midnight, is
+ * not on today. One starting at `from` counts whatever its length, so a
+ * zero-length entry is not lost to the arithmetic.
+ */
 export async function listFamilyEvents(from: Date, to: Date) {
   return db()
     .select()
     .from(familyEvents)
-    .where(and(gte(familyEvents.startsAt, from), lte(familyEvents.startsAt, to)))
+    .where(
+      and(
+        or(lt(familyEvents.startsAt, to), eq(familyEvents.startsAt, from)),
+        or(gt(familyEvents.endsAt, from), eq(familyEvents.startsAt, from)),
+      ),
+    )
     .orderBy(asc(familyEvents.startsAt))
 }
 

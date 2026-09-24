@@ -221,6 +221,22 @@ describe('family events and the ICS feed', () => {
     expect(await q.listFamilyEvents(at('2026-01-01T00:00:00Z'), at('2026-12-31T00:00:00Z'))).toHaveLength(0)
   })
 
+  it('lists what is on during a range, not only what starts in it', async () => {
+    // Melbourne, September (UTC+10). Camp Fri to Mon all day; a weekend away Fri 6pm to Sun 10am.
+    await q.addFamilyEvent({ title: 'Camp', allDay: true, startsAt: at('2026-09-24T14:00:00Z'), endsAt: at('2026-09-28T14:00:00Z') })
+    await q.addFamilyEvent({ title: 'Weekend away', startsAt: at('2026-09-25T08:00:00Z'), endsAt: at('2026-09-27T00:00:00Z') })
+    // Thursday all day, which ends exactly at Friday's midnight.
+    await q.addFamilyEvent({ title: 'Thursday', allDay: true, startsAt: at('2026-09-23T14:00:00Z'), endsAt: at('2026-09-24T14:00:00Z') })
+    // Monday at midnight, exactly where a Sunday range ends.
+    await q.addFamilyEvent({ title: 'Monday', startsAt: at('2026-09-27T14:00:00Z'), endsAt: at('2026-09-27T15:00:00Z') })
+    // A zero-length entry at Sunday's midnight.
+    await q.addFamilyEvent({ title: 'Marker', startsAt: at('2026-09-26T14:00:00Z'), endsAt: at('2026-09-26T14:00:00Z') })
+
+    // Sunday 27 September, midnight to midnight.
+    const sunday = await q.listFamilyEvents(at('2026-09-26T14:00:00Z'), at('2026-09-27T14:00:00Z'))
+    expect(sunday.map((e) => e.title)).toEqual(['Camp', 'Weekend away', 'Marker'])
+  })
+
   it('drops cancelled events from the feed, since subscribers mirror what they see', async () => {
     // Outlook renders a STATUS:CANCELLED event rather than hiding it; clients
     // reliably remove an event only when it stops appearing in the feed.

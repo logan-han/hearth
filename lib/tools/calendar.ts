@@ -2,7 +2,7 @@ import { tool } from 'ai'
 import { z } from 'zod'
 import { clientFor, clientsFor } from '../providers'
 import { NotConnectedError, ReconnectNeededError } from '../providers/token'
-import { localToUtc, formatLocal, formatLocalDate, resolveSpan } from '../cron'
+import { localToUtc, formatLocal, formatLocalDate, resolveSpan, rangeEnd } from '../cron'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
 import { requireMember } from './context'
@@ -31,7 +31,8 @@ export function calendarTools(ctx: ToolContext) {
         if (clients.length === 0) return { error: 'No calendar linked. Send /connect to link one.' }
 
         const start = localToUtc(from)
-        const end = localToUtc(to)
+        // A date alone as `to` is the whole of that day, not its first minute.
+        const end = rangeEnd(to)
         const accounts = await Promise.all(
           clients.map(async (c) => {
             try {

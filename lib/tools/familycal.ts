@@ -3,7 +3,7 @@ import { z } from 'zod'
 import {
   addFamilyEvent, listFamilyEvents, cancelFamilyEvent, updateFamilyEvent, getFamilyEvent, calendarToken,
 } from '../db/queries'
-import { localToUtc, localDateKey, formatLocal, formatLocalDate, dayAfter, nextLocalMidnight, resolveSpan } from '../cron'
+import { localToUtc, localDateKey, formatLocal, formatLocalDate, dayAfter, nextLocalMidnight, resolveSpan, rangeEnd } from '../cron'
 import { timezone, appUrl } from '../env'
 import { announce, type ToolContext } from './context'
 
@@ -239,7 +239,8 @@ export function familyCalendarTools(ctx: ToolContext) {
 
     list_family_events: tool({
       description:
-        'List events on the shared family calendar within a date range. ' +
+        'List events on the shared family calendar that are on at any point in a date range, including ones that began earlier. ' +
+        'A date alone as `to` means the whole of that day. ' +
         'Set include_cancelled when someone reports seeing an event that should be gone: subscribed calendar apps can keep showing a cancelled event until they next refresh the feed, which can take hours.',
       inputSchema: z.object({
         from: LOCAL_DATETIME,
@@ -247,7 +248,7 @@ export function familyCalendarTools(ctx: ToolContext) {
         include_cancelled: z.boolean().default(false),
       }),
       execute: async ({ from, to, include_cancelled }) => {
-        const events = await listFamilyEvents(localToUtc(from), localToUtc(to))
+        const events = await listFamilyEvents(localToUtc(from), rangeEnd(to))
         return {
           timezone: timezone(),
           events: events

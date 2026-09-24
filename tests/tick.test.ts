@@ -741,6 +741,58 @@ describe('ready-made watchers', () => {
   const brief = (over: Partial<Automation> = {}) => automation({ kind: 'morning', label: 'Morning brief', ...over })
   const snapshot = (over: Partial<Automation> = {}) => automation({ kind: 'snapshot', label: 'Money snapshot', ...over })
 
+  /** A brief whose mail fetch stages a cursor move on the run's context, as the real tool does. */
+  const stagingMail = () =>
+    buildTools.mockImplementationOnce(((ctx: { pendingCursors?: unknown[] }) => ({
+      new_transactions: { execute: newTransactions },
+      new_mail: {
+        execute: async (...a: unknown[]) => {
+          ctx.pendingCursors = [{ key: 'mail_cursor:-100999:1:google', at: '2026-09-24T01:00:00.000Z', ids: ['m1'], prev: null }]
+          return newMail(...a)
+        },
+      },
+      list_family_events: { execute: listEvents },
+      jira_board_summary: { execute: boardSummary },
+      weather: { execute: weatherTool },
+      spending_summary: { execute: spendingSummary },
+      budget_summary: { execute: budgetSummary },
+    })) as never)
+  const mailWaiting = { accounts: [{ member: 'Rowan', mailbox: "Rowan's Gmail", provider: 'google', messages: [{ id: 'm1', from: 'School', subject: 'Excursion', snippet: 'Permission slip due Friday', date: '2026-09-24T00:30:00Z' }] }] }
+
+  it('spends the mail it read only once the brief has gone out', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    stagingMail()
+    newMail.mockResolvedValue(mailWaiting)
+    runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.', notices: [], model: 'primary:test' })
+    await authed()
+    expect(send).toHaveBeenCalledWith('-100999', expect.stringContaining('permission slip'))
+    expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.stringContaining('m1'))
+    expect(send.mock.invocationCallOrder[0]).toBeLessThan(
+      setSetting.mock.invocationCallOrder[setSetting.mock.calls.findIndex(([k]) => k === 'mail_cursor:-100999:1:google')],
+    )
+  })
+
+  it('leaves the mail for tomorrow when the model fails, rather than spending it unseen', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    stagingMail()
+    newMail.mockResolvedValue(mailWaiting)
+    runAgent.mockRejectedValueOnce(new Error('429 quota'))
+    await authed()
+    expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+  })
+
+  it('leaves it too when the post itself cannot be sent', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    stagingMail()
+    newMail.mockResolvedValue(mailWaiting)
+    runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.', notices: [], model: 'primary:test' })
+    // The brief's post is the first thing said, and Telegram refuses it.
+    send.mockRejectedValueOnce(new Error('Telegram is down'))
+    await authed()
+    expect(send.mock.calls[0][0]).toBe('-100999')
+    expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+  })
+
   it('sweeps every mailbox into the brief from a group and only the owner\'s from a DM', async () => {
     dueAutomations.mockResolvedValue([brief({ id: 1, chatId: '-100999' }), brief({ id: 2, chatId: '111' })])
     await authed()

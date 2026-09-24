@@ -21,6 +21,7 @@ import { timezone } from './env'
 import { describeError } from './errors'
 import { send } from './telegram'
 import { unaccountedIn } from './headcount'
+import { commitCursors } from './tools/cursor'
 import { isGroupChat } from './watchers'
 import type { Member } from './db/schema'
 
@@ -118,6 +119,8 @@ export async function callTool(name: string, input: unknown, member: Member): Pr
     if (!entry?.execute) return answer(`Hearth has no tool called ${name}.`, true)
 
     const result = await entry.execute(input as never, { toolCallId: `mcp-${name}`, messages: [] } as never)
+    // The client has the result in hand, so what it reported as new is seen.
+    await commitCursors(ctx.pendingCursors)
     const trouble = await speak(ctx)
     return answer([render(result), trouble].filter(Boolean).join('\n\n'))
   } catch (err) {

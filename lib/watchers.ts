@@ -39,6 +39,7 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
       '**To do**: mail asking the household for something still open: a payment, a signature, a reply, a form, a booking to make, an appointment or a deadline still ahead, whoever sent it and however many people it went to.',
       '**Heads up**: mail that only tells the household something worth knowing: an order or a connection confirmed, a delivery on its way, a change to an account or a service.',
       'One bullet per email, in your own words: who sent it and what it says or asks, with every date, time, amount and place exactly as given. Never paste the subject line or put it in quotes. Open an email with read_email when its snippet is not enough. Propose any calendar-worthy date still ahead with propose_family_event.',
+      'A mailbox with more_not_shown had more new mail than fits: end its mail with one line saying how many more arrived in it (with "at least" when more_not_shown_is_at_least is set), so nobody thinks they have seen it all.',
       '**Overdue**: anything overdue on the board, as given.',
       'If DATA lists questions, end with "Not sure about:" and each question on its own line, worded as given, and say that anyone can answer here or on Home. Nothing under DATA answers them, so do not guess.',
     ].join(' '),
@@ -65,6 +66,7 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
     builtin: false,
     instruction: [
       'New 2Up transactions are listed under DATA. Post one line per transaction: payee as shown, amount, date.',
+      'If DATA has more_not_shown, end with one line saying how many more transactions came in than are listed (with "at least" when more_not_shown_is_at_least is set).',
       'Add a purpose only if a Known household fact, a family calendar event or an email you fetch names that payee, and say which in brackets.',
       'If nothing names it, write "purpose not recorded".',
       'Each transaction carries flags worked out from the feed: new_payee, unusually_large, possible_duplicate, money_in. Mention a flag in plain words only when it is there; an empty list means nothing stood out.',

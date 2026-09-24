@@ -32,6 +32,7 @@ import { maybeSummarise } from './summary'
 import type { Member } from './db/schema'
 import { describeError } from './errors'
 import { unsaid } from './notices'
+import { commitCursors } from './tools/cursor'
 
 /**
  * Authorisation is per person, never per room. `ALLOWED_TELEGRAM_IDS` seeds the
@@ -655,10 +656,10 @@ export async function processUpdate(update: Update): Promise<void> {
       .join('\n\n')
       .trim()
 
-    if (reply) {
-      await send(c.chatId, reply, c.chatType === 'private' ? undefined : c.messageId)
-      await recordMessage({ chatId: c.chatId, role: 'assistant', content: reply, model: result.model })
-    }
+    if (reply) await send(c.chatId, reply, c.chatType === 'private' ? undefined : c.messageId)
+    // What the reply reported as new is now seen; a send that failed leaves it new.
+    await commitCursors(result.cursors)
+    if (reply) await recordMessage({ chatId: c.chatId, role: 'assistant', content: reply, model: result.model })
   } catch (err) {
     console.error('[agent] run failed:', err)
     await send(c.chatId, `Sorry, that went wrong: ${describeError(err)}`)

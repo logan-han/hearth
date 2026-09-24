@@ -1,6 +1,8 @@
 import { Cron } from 'croner'
 import { timezone } from './env'
 
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
+
 export { timezone }
 
 /**
@@ -46,12 +48,20 @@ export function dayAfter(date: string): string {
   return new Date(Date.parse(`${date}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10)
 }
 
+/**
+ * The end of a range someone gave as local time. A date alone means the whole
+ * of that day, so it ends at the next local midnight: 'to 27 September'
+ * includes Sunday's soccer. A time is taken as given.
+ */
+export function rangeEnd(to: string, tz: string = timezone()): Date {
+  const t = to.trim()
+  return DATE_ONLY.test(t) ? localToUtc(dayAfter(t), tz) : localToUtc(t, tz)
+}
+
 /** The local midnight after `d`'s local day: the exclusive end of an all-day event that starts then. */
 export function nextLocalMidnight(d: Date, tz: string = timezone()): Date {
   return localToUtc(dayAfter(localDateKey(d, tz)), tz)
 }
-
-const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
 
 /**
  * Read a start and optional end the way the model gives them, for every tool

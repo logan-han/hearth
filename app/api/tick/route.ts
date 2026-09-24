@@ -15,6 +15,7 @@ import type { ToolContext } from '@/lib/tools/context'
 import { WATCHERS, isWatcherKind, isGroupChat, watcherInstruction, type WatcherKind } from '@/lib/watchers'
 import { installBuiltins } from '@/lib/builtins'
 import { unaccountedIn } from '@/lib/headcount'
+import { commitCursors } from '@/lib/tools/cursor'
 import { send } from '@/lib/telegram'
 import { hydrateSecrets } from '@/lib/settings'
 import { flushTelemetry } from '@/lib/telemetry'
@@ -178,8 +179,10 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
       // The nightly pass asks rather than guesses; the brief is where its
       // questions reach the family, once each. Home carries them after that.
       const [events, mail, board, weather, questions] = await Promise.all([
-        runTool(tools, 'list_family_events', { from: `${day}T00:00`, to: `${day}T23:59`, include_cancelled: false }),
-        runTool(tools, 'new_mail', { limit: 10, everyone: isGroupChat(a.chatId) }),
+        // The whole day, and anything on during it: day three of a camp is news too.
+        runTool(tools, 'list_family_events', { from: day, to: day, include_cancelled: false }),
+        // A day's mail, not an hour's: the brief runs once a morning.
+        runTool(tools, 'new_mail', { limit: 30, everyone: isGroupChat(a.chatId) }),
         runTool(tools, 'jira_board_summary', {}),
         runTool(tools, 'weather', {}),
         isGroupChat(a.chatId) ? unaskedQuestions().catch(() => []) : Promise.resolve([]),
@@ -260,6 +263,8 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
   }
   if (fetched.empty) {
     console.info(`[tick] ${a.label}: nothing new, no model call`)
+    // Nothing new is still a look taken, and a first one sets the marker.
+    await commitCursors(ctx.pendingCursors)
     return
   }
 
@@ -277,6 +282,9 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
     text: `Scheduled check "${a.label}".\n\n${instruction}\n\nDATA (fetched just now):\n${data}`,
   })
   await deliver(a, member, result, `INSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`)
+  // Only now is the mail this run read spent: posted, or deliberately held
+  // back. A failed model or send throws before here and leaves it for the next run.
+  await commitCursors([...(ctx.pendingCursors ?? []), ...(result.cursors ?? [])])
   // Asked once: whatever became of the post, Home keeps the question until it is answered.
   if (fetched.asked?.length) await markQuestionsAsked(fetched.asked)
 }
@@ -297,6 +305,7 @@ async function runCustom(a: Automation, member: Member | undefined): Promise<voi
       'Reply with the post alone: no preamble, no planning notes, no handover line such as "now the post:", no commentary about what the tools returned.',
   })
   await deliver(a, member, result, `INSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`)
+  await commitCursors(result.cursors)
 }
 
 /**

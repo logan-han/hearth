@@ -3,7 +3,7 @@ import { z } from 'zod'
 import * as up from '../providers/up'
 import * as ps from '../providers/pocketsmith'
 import type { PsCategoryBudget, PsTransaction } from '../providers/pocketsmith'
-import { readCursor, writeCursor } from './cursor'
+import { currentCursor, stageCursor } from './cursor'
 import { flagTransactions, HISTORY_DAYS, type TransactionFlag } from '../money-flags'
 import { localToUtc, formatLocal, localDateKey } from '../cron'
 import { timezone } from '../env'
@@ -46,6 +46,9 @@ function currentMonth(now: Date): { start: string; end: string } {
   const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate()
   return { start: `${key.slice(0, 7)}-01`, end: `${key.slice(0, 7)}-${String(lastDay).padStart(2, '0')}` }
 }
+
+/** How far past the limit one look reads, so what does not fit can at least be counted. */
+const TRANSACTION_SLACK = 50
 
 export function moneyTools(ctx: ToolContext) {
   return {
@@ -249,18 +252,20 @@ export function moneyTools(ctx: ToolContext) {
           if (!acct) return { error: `No Up account matching "${account}".` }
 
           const key = `up_cursor:${ctx.chatId}:${acct.id}`
-          const cursor = await readCursor(key)
+          const cursor = await currentCursor(ctx, key)
           // First run has no marker. Look back only a little, so switching this
           // on does not dump months of history into the chat.
           const since = cursor ? new Date(cursor.at) : new Date(ctx.now.getTime() - 24 * 3600_000)
 
-          const found = await up.listTransactions({ accountId: acct.id, since, limit: limit + 10 })
+          const found = await up.listTransactions({ accountId: acct.id, since, limit: limit + TRANSACTION_SLACK })
           // `since` is inclusive, so a transaction at exactly the marker comes
           // back again; the remembered ids are what actually stop a repost.
           const seen = new Set(cursor?.ids ?? [])
-          const fresh = found
-            .filter((t) => !seen.has(t.id) && new Date(t.createdAt) >= since)
-            .slice(0, limit)
+          const all = found.filter((t) => !seen.has(t.id) && new Date(t.createdAt) >= since)
+          // Newest first. After a pause there can be more than a post should
+          // list; those are counted rather than dropped without a word.
+          const fresh = all.slice(0, limit)
+          const unshown = all.length - fresh.length
 
           // What counts as new or unusual comes from the feed itself, so the
           // model has a flag to repeat rather than a hunch to voice. A failed
@@ -282,19 +287,23 @@ export function moneyTools(ctx: ToolContext) {
             }
           }
 
-          if (fresh.length > 0) {
-            const newest = fresh.reduce((a, b) => (new Date(a.createdAt) > new Date(b.createdAt) ? a : b))
-            await writeCursor(key, newest.createdAt, fresh.map((t) => t.id), cursor)
+          // Staged, not written: the move is made once this result reaches someone.
+          if (all.length > 0) {
+            const newest = all.reduce((a, b) => (new Date(a.createdAt) > new Date(b.createdAt) ? a : b))
+            stageCursor(ctx, key, newest.createdAt, all.map((t) => t.id), cursor)
           } else if (!cursor) {
             // Nothing to report, but remember we looked, so the next run is
             // incremental rather than another 24-hour sweep.
-            await writeCursor(key, ctx.now.toISOString(), [], null)
+            stageCursor(ctx, key, ctx.now.toISOString(), [], null)
           }
 
           return {
             account: acct.name,
             first_check: !cursor,
             count: fresh.length,
+            ...(unshown > 0
+              ? { more_not_shown: unshown, ...(found.length >= limit + TRANSACTION_SLACK ? { more_not_shown_is_at_least: true } : {}) }
+              : {}),
             ...(typicalDebit !== null ? { typical_debit: money(typicalDebit, acct.currency), history_days: HISTORY_DAYS } : {}),
             transactions: fresh.map((t) => ({
               description: t.description,

@@ -3,6 +3,7 @@ import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
 import type { ToolContext } from '@/lib/tools/context'
+import { commitCursors } from '@/lib/tools/cursor'
 
 const listMail = vi.fn()
 const readMail = vi.fn()
@@ -413,10 +414,51 @@ describe('new_mail', () => {
     expect(String(r.error)).toContain('unrecognised')
   })
 
-  it('defaults the per mailbox limit when the caller omits it', async () => {
+  it('shows ten a mailbox when the caller does not say, and counts the rest', async () => {
+    listMail.mockResolvedValue(Array.from({ length: 12 }, (_, i) => mail(`m${i}`, 1 + i / 10)))
+    const r = await call(mailTools(ctx), 'new_mail', {})
+    const acct = (r.accounts as { messages: unknown[]; more_not_shown?: number }[])[0]
+    expect(acct.messages).toHaveLength(10)
+    expect(acct.more_not_shown).toBe(2)
+  })
+
+  it('asks the mailbox for what arrived since the last look, not the newest few of a fortnight', async () => {
     listMail.mockResolvedValue([mail('a', 2)])
-    await call(mailTools(ctx), 'new_mail', {})
-    expect(listMail.mock.calls[0][0]).toMatchObject({ limit: 20 })
+    await call(mailTools(ctx), 'new_mail', { limit: 10 })
+    await commitCursors(ctx.pendingCursors)
+    listMail.mockClear()
+    await call(mailTools(later({ pendingCursors: undefined })), 'new_mail', { limit: 10 })
+    const asked = listMail.mock.calls[0][0] as { since: Date; limit: number; scope: string }
+    expect(asked).toMatchObject({ limit: 50, scope: 'inbox' })
+    expect(asked.since.toISOString()).toBe(mail('a', 2).date)
+  })
+
+  it('stages the move, so a run that never delivers leaves the mail new for the next one', async () => {
+    listMail.mockResolvedValue([mail('bill', 3), mail('notice', 2)])
+    const first = await call(mailTools(ctx), 'new_mail', { limit: 10 })
+    expect((first.accounts as { messages: unknown[] }[])[0].messages).toHaveLength(2)
+    expect(await q.getSetting(`mail_cursor:-100:${ctx.member!.id}:google`)).toBeNull()
+    // The run died before posting. A fresh turn sees the same two again.
+    const retry = await call(mailTools(later({ pendingCursors: undefined })), 'new_mail', { limit: 10 })
+    expect((retry.accounts as { messages: unknown[] }[])[0].messages).toHaveLength(2)
+    // Delivered this time: now they are spent.
+    await commitCursors(ctx.pendingCursors)
+    const after = await call(mailTools(later({ pendingCursors: undefined })), 'new_mail', { limit: 10 })
+    expect((after.accounts as { messages: unknown[] }[])[0].messages).toEqual([])
+  })
+
+  it('moves past what does not fit, so a busy inbox never leaves the brief reading yesterday', async () => {
+    listMail.mockResolvedValue(Array.from({ length: 50 }, (_, i) => mail(`m${i}`, 1 + i / 100)))
+    const r = await call(mailTools(ctx), 'new_mail', { limit: 30 })
+    const acct = (r.accounts as { messages: { id: string }[]; more_not_shown?: number; more_not_shown_is_at_least?: boolean }[])[0]
+    expect(acct.messages).toHaveLength(30)
+    expect(acct.messages[0].id).toBe('m0')
+    expect(acct.more_not_shown).toBe(20)
+    // A full window may have left more behind it, so the count is a floor.
+    expect(acct.more_not_shown_is_at_least).toBe(true)
+    await commitCursors(ctx.pendingCursors)
+    const cursor = JSON.parse((await q.getSetting(`mail_cursor:-100:${ctx.member!.id}:google`))!)
+    expect(cursor.at).toBe(mail('m0', 1).date)
   })
 
   it('marks the cursor on an empty first look, so the count is not replayed forever', async () => {
@@ -456,6 +498,14 @@ describe('calendar tools', () => {
     await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27T00:00', to: '2026-08-28T00:00' })
     // 27 Aug is AEST, so local midnight is 14:00 UTC the day before.
     expect((listEvents.mock.calls[0][0] as Date).toISOString()).toBe('2026-08-26T14:00:00.000Z')
+  })
+
+  it('reads a date alone as the end of a window as the whole of that day', async () => {
+    listEvents.mockResolvedValue([])
+    await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27', to: '2026-08-27' })
+    const [from, to] = listEvents.mock.calls[0] as [Date, Date]
+    expect(from.toISOString()).toBe('2026-08-26T14:00:00.000Z')
+    expect(to.toISOString()).toBe('2026-08-27T14:00:00.000Z')
   })
 
   it('renders each event with a local time alongside the raw one', async () => {
@@ -646,6 +696,16 @@ describe('family calendar tools', () => {
     await call(familyCalendarTools(ctx), 'cancel_family_event', { id: a.id })
     const r = await call(familyCalendarTools(ctx), 'list_family_events', { from: '2026-08-01', to: '2026-09-30' })
     expect((r.events as { title: string }[]).map((e) => e.title)).toEqual(['Stays'])
+  })
+
+  it('reads a date alone as the whole day, and lists what is on during it, a camp begun earlier included', async () => {
+    await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Soccer', start: '2026-09-27T09:00', all_day: false })
+    await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Camp', start: '2026-09-25', end: '2026-09-29', all_day: true })
+    await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Monday', start: '2026-09-28T09:00', all_day: false })
+    const sunday = await call(familyCalendarTools(ctx), 'list_family_events', { from: '2026-09-27', to: '2026-09-27' })
+    expect((sunday.events as { title: string }[]).map((e) => e.title)).toEqual(['Camp', 'Soccer'])
+    const weekend = await call(familyCalendarTools(ctx), 'list_family_events', { from: '2026-09-26', to: '2026-09-27' })
+    expect((weekend.events as { title: string }[]).map((e) => e.title)).toEqual(['Camp', 'Soccer'])
   })
 
   it('refuses to cancel something that is not there', async () => {

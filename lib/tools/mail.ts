@@ -5,7 +5,7 @@ import { NotConnectedError, ReconnectNeededError } from '../providers/token'
 import type { Member } from '../db/schema'
 import { parseIcs, describeIcs } from '../ics-parse'
 import { createDraft, getDraft, markDraft, connectionsFor, allowedMembers, strangersIn, pendingDrafts } from '../db/queries'
-import { readCursor, writeCursor } from './cursor'
+import { currentCursor, stageCursor } from './cursor'
 import type { ToolContext } from './context'
 import { requireMember } from './context'
 import { providerConfig, type Provider } from '../oauth/providers'
@@ -102,30 +102,36 @@ export function mailTools(ctx: ToolContext) {
           for (const c of clients) {
             try {
               const key = `mail_cursor:${ctx.chatId}:${member.id}:${c.provider}`
-              const cursor = await readCursor(key)
+              const cursor = await currentCursor(ctx, key)
               // The first look reaches back only a few hours, so switching a
               // sweep on does not replay the whole inbox into the chat.
               const since = cursor ? new Date(cursor.at) : new Date(ctx.now.getTime() - 6 * 3600_000)
 
-              // Sweeps announce arrivals, so only the inbox counts here.
-              const found = await c.listMail({ limit: max + 10, scope: 'inbox' })
+              // Sweeps announce arrivals, so only the inbox counts here, and
+              // only what arrived since the last look: the newest few of a
+              // fortnight would cut a busy day's older mail out unseen.
+              const found = await c.listMail({ limit: MAIL_WINDOW, scope: 'inbox', since })
               const seen = new Set(cursor?.ids ?? [])
               // A message with an unparseable date is kept: the remembered ids
               // still stop it repeating, and dropping it would lose real mail.
-              const fresh = found
-                .filter((m) => {
-                  if (seen.has(m.id)) return false
-                  const at = new Date(m.date)
-                  return Number.isNaN(at.getTime()) || at >= since
-                })
-                .slice(0, max)
+              const fresh = found.filter((m) => {
+                if (seen.has(m.id)) return false
+                const at = new Date(m.date)
+                return Number.isNaN(at.getTime()) || at >= since
+              })
+              // Newest first. What does not fit is said as a count rather than
+              // dropped without a word; the cursor still moves past it, so a
+              // busy inbox never leaves tomorrow's brief reading yesterday's mail.
+              const shown = fresh.slice(0, max)
+              const unshown = fresh.length - shown.length
 
+              // Staged, not written: the move is made once this result reaches someone.
               if (fresh.length > 0) {
                 const stamps = fresh.map((m) => new Date(m.date).getTime()).filter((t) => !Number.isNaN(t))
                 const newest = stamps.length ? new Date(Math.max(...stamps)).toISOString() : ctx.now.toISOString()
-                await writeCursor(key, newest, fresh.map((m) => m.id), cursor)
+                stageCursor(ctx, key, newest, fresh.map((m) => m.id), cursor)
               } else if (!cursor) {
-                await writeCursor(key, ctx.now.toISOString(), [], null)
+                stageCursor(ctx, key, ctx.now.toISOString(), [], null)
               }
 
               accounts.push({
@@ -133,7 +139,10 @@ export function mailTools(ctx: ToolContext) {
                 mailbox: mailboxName(member.name, c.provider),
                 provider: c.provider,
                 first_check: !cursor,
-                messages: fresh.map(({ id, from, subject, snippet, date }) => ({ id, from, subject, snippet, date })),
+                messages: shown.map(({ id, from, subject, snippet, date }) => ({ id, from, subject, snippet, date })),
+                ...(unshown > 0
+                  ? { more_not_shown: unshown, ...(found.length >= MAIL_WINDOW ? { more_not_shown_is_at_least: true } : {}) }
+                  : {}),
               })
             } catch (e) {
               accounts.push({ member: member.name, mailbox: mailboxName(member.name, c.provider), provider: c.provider, error: describe(e) })
@@ -323,6 +332,9 @@ function describe(e: unknown): string {
 }
 
 export const describeMailError = describe
+
+/** How much new mail one look reads per mailbox; the most a provider hands back in one page. */
+const MAIL_WINDOW = 50
 
 /** Telegram's own cap on what the bot can fetch is 20 MB; an email attachment gets half that. */
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024

@@ -1,5 +1,6 @@
 import type { Member } from '../db/schema'
 import type { ParsedIcs } from '../ics-parse'
+import type { StagedCursor } from './cursor'
 
 /** Ambient facts every tool needs: who is asking, and where. */
 export type ToolContext = {
@@ -40,6 +41,8 @@ export type ToolContext = {
    * failure, never what the turn claims was done.
    */
   changed?: string[]
+  /** Cursor moves waiting on this turn's result reaching someone; see StagedCursor. */
+  pendingCursors?: StagedCursor[]
 }
 
 export function requireMember(ctx: ToolContext): Member {

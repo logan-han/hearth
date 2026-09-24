@@ -117,16 +117,19 @@ export function microsoftClient(memberId: number): AccountClient {
   return {
     provider: 'microsoft',
 
-    async listMail({ query, limit = 10, scope = 'inbox' }) {
+    async listMail({ query, limit = 10, scope = 'inbox', since }) {
       const t = await token()
       // /messages spans every folder including Archive; the inbox is its own.
       const url = new URL(scope === 'all' ? `${GRAPH}/messages` : `${GRAPH}/mailFolders/inbox/messages`)
-      url.searchParams.set('$top', String(Math.min(limit, 25)))
+      url.searchParams.set('$top', String(Math.min(limit, 50)))
       url.searchParams.set('$select', 'id,subject,bodyPreview,isRead,receivedDateTime,from,toRecipients')
       if (query) {
-        // $search cannot be combined with $orderby in Graph.
+        // $search cannot be combined with $orderby (or $filter) in Graph.
         url.searchParams.set('$search', `"${query.replace(/"/g, '')}"`)
       } else {
+        // A sweep asks for what arrived since it last looked. Graph wants a
+        // property it orders by to lead the filter, which this one does.
+        if (since) url.searchParams.set('$filter', `receivedDateTime ge ${since.toISOString()}`)
         url.searchParams.set('$orderby', 'receivedDateTime desc')
       }
       const res = await api<{ value?: GraphMessage[] }>(t, url.toString(), {

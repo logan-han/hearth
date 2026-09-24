@@ -28,3 +28,33 @@ export async function writeCursor(key: string, at: string, freshIds: string[], p
     JSON.stringify({ at, ids: [...freshIds, ...(prev?.ids ?? [])].slice(0, CURSOR_MEMORY) } satisfies Cursor),
   )
 }
+
+/**
+ * A cursor move waiting on its result reaching someone. A tool that reports
+ * what is new stages the move rather than making it, and whoever delivers
+ * the result commits it: the tick once the post has gone (or been
+ * deliberately held back), a chat once its reply is sent, MCP once the call
+ * returns. A run that dies in between leaves the mail for the next one,
+ * instead of consuming it unseen.
+ */
+export type StagedCursor = { key: string; at: string; ids: string[]; prev: Cursor | null }
+
+type Staging = { pendingCursors?: StagedCursor[] }
+
+export function stageCursor(ctx: Staging, key: string, at: string, freshIds: string[], prev: Cursor | null): void {
+  ;(ctx.pendingCursors ??= []).push({ key, at, ids: freshIds, prev })
+}
+
+/** The cursor as this turn sees it: its own staged move if it made one, else the stored one. */
+export async function currentCursor(ctx: Staging, key: string): Promise<Cursor | null> {
+  const staged = ctx.pendingCursors?.findLast((s) => s.key === key)
+  if (staged) return { at: staged.at, ids: [...staged.ids, ...(staged.prev?.ids ?? [])].slice(0, CURSOR_MEMORY) }
+  return readCursor(key)
+}
+
+/** Make the staged moves, the last per key: a later look this turn already includes an earlier one. */
+export async function commitCursors(staged: readonly StagedCursor[] | undefined): Promise<void> {
+  const last = new Map<string, StagedCursor>()
+  for (const s of staged ?? []) last.set(s.key, s)
+  for (const s of last.values()) await writeCursor(s.key, s.at, s.ids, s.prev)
+}

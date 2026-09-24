@@ -12,6 +12,7 @@ import { withModelFallback, structuredChain, type ModelSlot } from './model'
 import { jevConfigured, wantsAssistant, claimsChange, checkClaims, decidePost, POST_REASONS } from './jev'
 import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, WRITE_TOOLS, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
 import type { ToolContext } from './tools/context'
+import type { StagedCursor } from './tools/cursor'
 import { recentMessages, listMemories, openQuestions, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals, chatSummary } from './db/queries'
 import type { Member } from './db/schema'
 import { timezone, language, units, reasoningLevel } from './env'
@@ -58,6 +59,8 @@ export type AgentResult = {
   evidence?: string
   /** Watcher runs: the Known household facts the model wrote with, so the post checks judge against the same sources. */
   facts?: string
+  /** Cursor moves the turn's tools staged, for the caller to commit once the result has reached someone. */
+  cursors?: StagedCursor[]
 }
 
 /** Memories are cheap to store and expensive to read; the chat sees the newest few dozen. */
@@ -617,6 +620,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         // the turn over on the next slot would do it all again: the same list
         // items twice, a second reminder, invitations sent twice. So once
         // anything is written, a failure ends the turn here, saying what was done.
+        // A slot that fails has shown its looks at new mail to nobody.
+        const stagedBefore = ctx.pendingCursors?.length ?? 0
         try {
           const r = await call(messages)
           let cleaned = cleanReply(r.text, { working: mode === 'watcher' })
@@ -669,6 +674,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
             evidence: mode === 'watcher' ? collectEvidence(r.steps ?? []) : undefined,
           }
         } catch (err) {
+          ctx.pendingCursors?.splice(stagedBefore)
           if (!ctx.wrote?.length) throw err
           console.error(`[agent] ${slot.name} failed after changing something, so no other slot gets the turn:`, describeError(err))
           if (mode === 'chat') return { text: doneLine(ctx), model: slot.name, evidence: undefined }
@@ -692,6 +698,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     notices: ctx.notices,
     model: result.model,
     ...(result.evidence !== undefined ? { evidence: result.evidence } : {}),
+    ...(ctx.pendingCursors?.length ? { cursors: ctx.pendingCursors } : {}),
     ...(mode === 'watcher' ? { facts: context } : {}),
   }
 }

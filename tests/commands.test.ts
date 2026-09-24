@@ -481,6 +481,24 @@ describe('unknown commands', () => {
   })
 })
 
+describe('what a reply reports as new', () => {
+  const staged = [{ key: 'mail_cursor:111:1:google', at: '2026-09-24T01:00:00.000Z', ids: ['a'], prev: null }]
+
+  it('is spent once the reply is sent', async () => {
+    runAgent.mockResolvedValueOnce({ text: 'One email from the school.', notices: [], model: 'g', cursors: staged } as never)
+    await processUpdate(dm('any new mail?'))
+    expect(JSON.parse((await q.getSetting('mail_cursor:111:1:google'))!).ids).toEqual(['a'])
+  })
+
+  it('stays new when the reply never reached the chat', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    runAgent.mockResolvedValueOnce({ text: 'One email from the school.', notices: [], model: 'g', cursors: staged } as never)
+    send.mockRejectedValueOnce(new Error('Telegram is down'))
+    await processUpdate(dm('any new mail?'))
+    expect(await q.getSetting('mail_cursor:111:1:google')).toBeNull()
+  })
+})
+
 describe('agent failures', () => {
   it('are reported to the chat instead of vanishing', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
