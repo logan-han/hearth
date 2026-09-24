@@ -230,6 +230,7 @@ export function mailTools(ctx: ToolContext) {
           subject,
           body,
         })
+        ;(ctx.draftedThisTurn ??= new Set()).add(draft.id)
         return {
           draft_id: draft.id,
           from,
@@ -263,6 +264,13 @@ export function mailTools(ctx: ToolContext) {
           return { error: 'Only the member who drafted this email can send it.' }
         }
         if (draft.status !== 'pending') return { error: `Draft ${draft_id} is already ${draft.status}.` }
+        if (ctx.draftedThisTurn?.has(draft_id)) {
+          return {
+            error:
+              'Not sent: this draft was written just now, so nobody has said yes to it. ' +
+              'Show it and send it only when the sender confirms in their next message.',
+          }
+        }
 
         // Claim first: if two confirmations race, only one wins the send.
         if (!(await markDraft(draft_id, 'sent'))) {

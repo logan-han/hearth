@@ -47,6 +47,7 @@ beforeEach(async () => {
   vi.spyOn(console, 'warn').mockImplementation(() => {})
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
   process.env.APP_URL = 'https://hearth.example'
+  process.env.ADMIN_EMAILS = 'rowan@hearth.example'
   delete process.env.TELEGRAM_BOT_TOKEN
   delete process.env.TELEGRAM_WEBHOOK_SECRET
   const { resetKeyCache } = await import('@/lib/crypto')

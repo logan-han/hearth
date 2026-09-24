@@ -11,6 +11,12 @@ export type ToolContext = {
   notices: string[]
   /** Calendar files (.ics) attached to the message being answered, already parsed. */
   calendarFiles?: { filename: string; parsed: ParsedIcs }[]
+  /**
+   * Drafts written during this turn. send_email refuses them: the yes has to
+   * come from a person in a later message, and nothing in one model turn,
+   * least of all an instruction inside an email it just read, is that.
+   */
+  draftedThisTurn?: Set<number>
 }
 
 export function requireMember(ctx: ToolContext): Member {

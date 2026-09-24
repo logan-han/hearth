@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest'
+import type { PGlite } from '@electric-sql/pglite'
+import { freshDb, closeDb } from './helpers/db'
 
 const jar = vi.hoisted(() => {
   const store = new Map<string, string>()
@@ -22,6 +24,12 @@ const { POST: TEST } = await import('@/app/api/admin/models/test/route')
 const { createSession } = await import('@/lib/auth/session')
 
 const fetchMock = vi.fn()
+
+// A session is checked against the members table on every request; one
+// database for the file is enough, since nothing here writes to it.
+let client: PGlite
+beforeAll(async () => { client = (await freshDb()).client })
+afterAll(async () => closeDb(client))
 const json = (body: unknown, ok = true, status = 200) => ({ ok, status, json: async () => body })
 
 const list = (provider: string) => GET(new Request(`https://h/api/admin/models?provider=${provider}`))
@@ -38,6 +46,7 @@ beforeEach(() => {
   jar.store.clear()
   vi.spyOn(console, 'error').mockImplementation(() => {})
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
+  process.env.ADMIN_EMAILS = 'a@b.com'
   process.env.GEMINI_API_KEY = 'gk'
   process.env.OPENROUTER_API_KEY = 'ok'
   delete process.env.LLM_BASE_URL

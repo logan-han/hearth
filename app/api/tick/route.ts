@@ -3,10 +3,10 @@ import { Receiver } from '@upstash/qstash'
 import {
   dueAutomations, claimAutomation, allowedMembers, recordMessage, strangersIn,
   messagesSince, getSetting, setSetting, retireStaleProposals, recordTick,
-  unaskedQuestions, markQuestionsAsked,
+  unaskedQuestions, markQuestionsAsked, memberByTelegramId,
 } from '@/lib/db/queries'
 import { localDateKey, tzOffsetMs, nextRun } from '@/lib/cron'
-import { timezone } from '@/lib/env'
+import { timezone, idSet } from '@/lib/env'
 import { db, schema } from '@/lib/db'
 import { eq } from 'drizzle-orm'
 import { runAgent, decideWatcherPost, reviewDraft, type AgentResult } from '@/lib/agent'
@@ -14,6 +14,7 @@ import { buildTools, type ToolName } from '@/lib/tools'
 import type { ToolContext } from '@/lib/tools/context'
 import { WATCHERS, isWatcherKind, isGroupChat, watcherInstruction, type WatcherKind } from '@/lib/watchers'
 import { installBuiltins } from '@/lib/builtins'
+import { unaccountedIn } from '@/lib/headcount'
 import { send } from '@/lib/telegram'
 import { hydrateSecrets } from '@/lib/settings'
 import { flushTelemetry } from '@/lib/telemetry'
@@ -433,6 +434,42 @@ async function deliver(a: Automation, member: Member | undefined, result: AgentR
   })
 }
 
+/** Allowed by the env seed or by an admin's grant, as the webhook judges it. */
+async function allowedPerson(telegramUserId: string): Promise<boolean> {
+  if (idSet('ALLOWED_TELEGRAM_IDS').has(telegramUserId)) return true
+  return (await memberByTelegramId(telegramUserId))?.allowed === true
+}
+
+/**
+ * True when a group holds people the household cannot account for, so nothing
+ * goes in unasked. An admin hears once per change in the count rather than
+ * every hour the room stays that way.
+ */
+async function heldForHeadcount(a: Automation): Promise<boolean> {
+  const unaccounted = await unaccountedIn(a.chatId)
+  const key = `unaccounted:${a.chatId}`
+  const said = await getSetting(key)
+  if (unaccounted === 0) {
+    if (said && said !== '0') await setSetting(key, '0')
+    return false
+  }
+  const count = unaccounted === null ? 'unknown' : String(unaccounted)
+  console.info(`[tick] ${a.label}: ${count} unrecognised people in chat ${a.chatId}, not posting`)
+  if (said !== count) {
+    await setSetting(key, count)
+    await tellAdminQuietly(
+      undefined,
+      unaccounted === null
+        ? `**${a.label}** was not posted in chat ${a.chatId}: Telegram would not say who is there. ` +
+            'I may have been removed, or the group hides its members; making me an admin there lets me see them.'
+        : `**${a.label}** was not posted in chat ${a.chatId}: Telegram counts ${unaccounted} ${unaccounted === 1 ? 'person' : 'people'} ` +
+            'there I do not recognise. Allow them (`/allow <id>`, or reply to one of their messages with `/allow`) ' +
+            'or remove them, and it posts again.',
+    )
+  }
+  return true
+}
+
 async function runDue(): Promise<{ ran: number; skipped: number }> {
   const now = new Date()
   const due = await dueAutomations(now)
@@ -458,9 +495,26 @@ async function runDue(): Promise<{ ran: number; skipped: number }> {
     }
 
     try {
-      const member = a.memberId
+      // A private chat is one person's. Revoked or removed, they hear nothing
+      // more from the household, whoever set the automation up.
+      if (!isGroupChat(a.chatId) && !(await allowedPerson(a.chatId))) {
+        console.info(`[tick] ${a.label}: chat ${a.chatId} belongs to someone no longer allowed, not posting`)
+        skipped++
+        continue
+      }
+      // And the same test holds for whoever the room cannot see: a group whose
+      // head count is more than the bot and the allowed members in it.
+      if (isGroupChat(a.chatId) && (await heldForHeadcount(a))) {
+        skipped++
+        continue
+      }
+
+      const creator = a.memberId
         ? (await db().select().from(schema.members).where(eq(schema.members.id, a.memberId)).limit(1))[0]
         : undefined
+      // Nothing runs as someone who has been revoked: not their mailbox, and
+      // not the first DM when a draft is held back. The room keeps its watcher.
+      const member = creator?.allowed ? creator : undefined
 
       if (isWatcherKind(a.kind)) await runReadyMade(a.kind, a, member)
       else await runCustom(a, member)

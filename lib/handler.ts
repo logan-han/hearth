@@ -17,6 +17,7 @@ import {
   connectionsFor,
   deleteConnection,
   calendarToken,
+  rotateCalendarToken,
   addAutomation,
   listAutomations,
   setAutomationEnabled,
@@ -269,6 +270,7 @@ const HELP = [
   '**Admin only**',
   '/allow <id> — let someone use me (or reply to their message)',
   '/deny <id> — revoke someone',
+  '/calendar new — replace the calendar URL, if it has got out',
   '',
   '**Things I can do**',
   '· answer questions, with a web search when it matters',
@@ -282,8 +284,16 @@ const HELP = [
   '· remember household facts, and run reminders on a schedule',
 ].join('\n')
 
+/** The command word, without any @botname: `/Calendar@hearth_bot new` is `/calendar`. */
+function commandOf(text: string): string {
+  return text.split(/[\s@]/)[0].toLowerCase()
+}
+
+/** Commands that reveal nothing of the household, so they still run in a room with a stranger in it. */
+const SAFE_WITH_STRANGERS = new Set(['/start', '/help', '/whoami', '/connect', '/mcp', '/unlink', '/allow', '/deny'])
+
 async function handleCommand(c: TelegramContext, member: Member): Promise<boolean> {
-  const cmd = c.text.split(/[\s@]/)[0].toLowerCase()
+  const cmd = commandOf(c.text)
 
   switch (cmd) {
     case '/start':
@@ -387,10 +397,20 @@ async function handleCommand(c: TelegramContext, member: Member): Promise<boolea
     }
 
     case '/calendar': {
-      const url = `${appUrl()}/api/calendar/${await calendarToken()}/family.ics`
+      const rotating = c.text.split(/\s+/)[1]?.toLowerCase() === 'new'
+      if (rotating && !member.isAdmin) {
+        await send(c.chatId, 'Only an admin can do that.')
+        return true
+      }
+      const token = rotating ? await rotateCalendarToken() : await calendarToken()
+      const url = `${appUrl()}/api/calendar/${token}/family.ics`
       await send(
         c.chatId,
-        `Subscribe to the family calendar with this URL:\n\`${url}\`\n\nGoogle Calendar → Other calendars → From URL. Apple/Outlook → Add calendar → Subscribe from web.`,
+        (rotating
+          ? 'The old calendar URL has stopped working (a cached copy can answer for up to half an hour). ' +
+            'Everyone subscribed needs to subscribe again with this one:\n'
+          : 'Subscribe to the family calendar with this URL:\n') +
+          `\`${url}\`\n\nGoogle Calendar → Other calendars → From URL. Apple/Outlook → Add calendar → Subscribe from web.`,
       )
       return true
     }
@@ -485,16 +505,22 @@ async function handleMembershipChange(update: Update): Promise<boolean> {
   if (!joined?.length) return false
 
   const self = await me()
-  const flagged: string[] = []
+  const unknown: typeof joined = []
   for (const person of joined) {
     if (person.is_bot && person.id === self.id) continue
+    if (person.is_bot || !(await isAllowedId(String(person.id)))) unknown.push(person)
+  }
+  if (!unknown.length) return true
+
+  // The flag lives on the chat's row, which a room nobody has spoken in yet
+  // (the bot added alongside an outsider, say) does not have.
+  await rememberChat(chatId, msg.chat.type, 'title' in msg.chat ? (msg.chat.title ?? null) : null)
+  const flagged: string[] = []
+  for (const person of unknown) {
     const name = displayName(person)
-    if (person.is_bot || !(await isAllowedId(String(person.id)))) {
-      if (await noteStranger(chatId, { id: String(person.id), name })) flagged.push(`${name} (${person.id})`)
-    }
+    if (await noteStranger(chatId, { id: String(person.id), name })) flagged.push(`${name} (${person.id})`)
   }
   if (flagged.length) {
-    await rememberChat(chatId, msg.chat.type, 'title' in msg.chat ? (msg.chat.title ?? null) : null)
     await send(
       chatId,
       `I don't recognise ${flagged.join(', ')}, so I'll stay quiet here.\n\n` +
@@ -520,7 +546,7 @@ async function handleUnknownSender(c: TelegramContext): Promise<void> {
   console.warn(`[telegram] unauthorised user=${c.userId} chat=${c.chatId}`)
 
   if (c.chatType === 'private') {
-    const cmd = c.text.split(/[\s@]/)[0].toLowerCase()
+    const cmd = commandOf(c.text)
     if (['/start', '/whoami', '/id', '/help'].includes(cmd)) {
       await send(
         c.chatId,
@@ -586,7 +612,16 @@ export async function processUpdate(update: Update): Promise<void> {
     content: forHistory,
   })
 
-  if (c.isCommand && (await handleCommand(c, member))) return
+  if (c.isCommand) {
+    // A room holding someone unrecognised hears only the commands that give
+    // nothing away: /calendar would hand them the feed, /accounts and /members
+    // the family's addresses and ids. /allow stays, being how a room unmutes.
+    if (c.chatType !== 'private' && !SAFE_WITH_STRANGERS.has(commandOf(c.text)) && (await refuseForStrangers(c))) {
+      await housekeeping(c.chatId)
+      return
+    }
+    if (await handleCommand(c, member)) return
+  }
   if (!(await shouldRespond(c, storedId))) {
     await housekeeping(c.chatId)
     return

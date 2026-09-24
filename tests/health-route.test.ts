@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest'
+import type { PGlite } from '@electric-sql/pglite'
+import { freshDb, closeDb } from './helpers/db'
 
 const jar = vi.hoisted(() => {
   const store = new Map<string, string>()
@@ -31,10 +33,17 @@ const { createSession } = await import('@/lib/auth/session')
 
 const fetchMock = vi.fn()
 
+// A session is checked against the members table on every request; one
+// database for the file is enough, since nothing here writes to it.
+let client: PGlite
+beforeAll(async () => { client = (await freshDb()).client })
+afterAll(async () => closeDb(client))
+
 beforeEach(async () => {
   vi.clearAllMocks()
   jar.store.clear()
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
+  process.env.ADMIN_EMAILS = 'a@b.com'
   for (const k of ['UP_API_TOKEN', 'POCKETSMITH_DEVELOPER_KEY', 'NOTION_TOKEN', 'JIRA_BASE_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN', 'OPENWEATHER_API_KEY', 'TYPESAFE_API_KEY']) {
     delete process.env[k]
   }

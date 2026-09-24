@@ -24,13 +24,20 @@ export async function signState(payload: StatePayload, ttl = '10m'): Promise<str
     .sign(secret())
 }
 
-export async function verifyState(token: string): Promise<StatePayload> {
+/**
+ * Verify a state, and when `expect` is given, that it was minted for that
+ * purpose. A sign-in state is handed to anyone who asks, so a consumer that
+ * acts for a Telegram member must say so here: otherwise that anonymous state
+ * passes as a link bound to nobody.
+ */
+export async function verifyState(token: string, expect?: 'link' | 'signin'): Promise<StatePayload> {
   const { payload } = await jwtVerify(token, secret(), { algorithms: [ALG] })
   const { tg, name, chat, purpose } = payload as Record<string, unknown>
   const kind = purpose === 'signin' ? 'signin' : 'link'
+  if (expect && kind !== expect) throw new Error(`state is for ${kind}, not ${expect}`)
   // Signing in is not bound to a Telegram account, so only the linking flow
-  // requires one.
-  if (kind === 'link' && typeof tg !== 'string') throw new Error('state missing telegram id')
+  // requires one, and an empty id binds nothing.
+  if (kind === 'link' && (typeof tg !== 'string' || !tg.trim())) throw new Error('state missing telegram id')
   return {
     tg: typeof tg === 'string' ? tg : '',
     name: typeof name === 'string' ? name : 'Family member',

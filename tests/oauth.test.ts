@@ -82,6 +82,17 @@ describe('oauth state', () => {
     expect(await verifyState(token)).toEqual({ tg: '111', name: 'Family member', chat: '', purpose: 'link' })
   })
 
+  it('refuses a state minted for the other purpose when the caller says which it wants', async () => {
+    const signin = await signState({ tg: '', name: '', chat: '', purpose: 'signin' })
+    await expect(verifyState(signin, 'link')).rejects.toThrow(/signin, not link/)
+    await expect(verifyState(await signState(payload), 'signin')).rejects.toThrow(/link, not signin/)
+    expect(await verifyState(await signState(payload), 'link')).toEqual({ ...payload, purpose: 'link' })
+  })
+
+  it('refuses a link whose telegram id is empty, which binds it to nobody', async () => {
+    await expect(verifyState(await signState({ tg: '  ', name: 'x', chat: '' }))).rejects.toThrow(/telegram id/)
+  })
+
   it('builds a connect link carrying the state', async () => {
     const link = await connectLink('https://hearth.example', payload)
     const token = new URL(link).searchParams.get('t')!

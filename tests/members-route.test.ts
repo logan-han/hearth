@@ -36,6 +36,7 @@ beforeEach(async () => {
   jar.store.clear()
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
   process.env.ALLOWED_TELEGRAM_IDS = '8734670748'
+  process.env.ADMIN_EMAILS = 'rowan@hearth.example'
   const { resetKeyCache } = await import('@/lib/crypto')
   resetKeyCache()
   client = (await freshDb()).client

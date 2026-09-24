@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { authorizeUrl, exchangeCode, emailFromIdToken, type Provider } from './providers'
 import { signState, verifyState } from './state'
-import { upsertMember, saveConnection, connectionFor, recordMessage } from '../db/queries'
+import { upsertMember, saveConnection, connectionFor, recordMessage, memberByTelegramId } from '../db/queries'
 import { appUrl } from '../env'
 import { send } from '../telegram'
 import { createSession, resolveRole } from '../auth/session'
@@ -25,9 +25,13 @@ export async function startAuth(req: Request, provider: Provider): Promise<Respo
 
   let payload
   try {
-    payload = await verifyState(token)
+    payload = await verifyState(token, 'link')
   } catch {
     return fail('That link has expired. Send /connect to the bot again.')
+  }
+  // The link was DMed to an allowed member; one revoked since has lost it.
+  if (!(await memberByTelegramId(payload.tg))?.allowed) {
+    return fail('That link is no longer valid. Send /connect to the bot again.')
   }
 
   // Re-sign with a short TTL: the round-trip through the provider is quick.

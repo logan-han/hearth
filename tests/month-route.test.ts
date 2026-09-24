@@ -27,6 +27,7 @@ beforeEach(async () => {
   jar.store.clear()
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
   process.env.TIMEZONE = 'Australia/Melbourne'
+  process.env.ADMIN_EMAILS = 'a@b.com'
   const { resetKeyCache } = await import('@/lib/crypto')
   resetKeyCache()
   client = (await freshDb()).client
@@ -39,6 +40,7 @@ describe('the month API', () => {
   })
 
   it('serves a month to any recognised member, not just admins', async () => {
+    await q.saveMember({ telegramUserId: '222', name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
     await createSession({ email: 'ada@hearth.example', name: 'Ada', provider: 'google', role: 'member' })
     const res = await get('2026-09')
     expect(res.status).toBe(200)

@@ -52,10 +52,30 @@ const req = (url: string) => new Request(url)
 
 describe('startAuth', () => {
   it('bounces a valid link to the provider', async () => {
+    await q.upsertMember('111', 'Rowan', { allowed: true })
     const t = await signState({ tg: '111', name: 'Rowan', chat: '-100' })
     const res = await startAuth(req(`https://hearth.example/api/oauth/google?t=${encodeURIComponent(t)}`), 'google')
     expect(res.status).toBe(307)
     expect(res.headers.get('location')).toContain('accounts.google.com')
+  })
+
+  it('will not take the anonymous sign-in state as a member link', async () => {
+    const signin = await startAuth(req('https://hearth.example/api/oauth/google?signin=1'), 'google')
+    const state = new URL(signin.headers.get('location')!).searchParams.get('state')!
+    const res = await startAuth(req(`https://hearth.example/api/oauth/google?t=${encodeURIComponent(state)}`), 'google')
+    expect(res.status).toBe(400)
+  })
+
+  it('refuses a link bound to nobody, or to someone revoked since it was sent', async () => {
+    const empty = await signState({ tg: '', name: '', chat: '' })
+    expect((await startAuth(req(`https://hearth.example/api/oauth/google?t=${encodeURIComponent(empty)}`), 'google')).status).toBe(400)
+
+    await q.upsertMember('222', 'Sam', { allowed: true })
+    await q.setMemberAllowed('222', false)
+    const revoked = await signState({ tg: '222', name: 'Sam', chat: '' })
+    const res = await startAuth(req(`https://hearth.example/api/oauth/google?t=${encodeURIComponent(revoked)}`), 'google')
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('no longer valid')
   })
 
   it('explains a missing token instead of redirecting', async () => {

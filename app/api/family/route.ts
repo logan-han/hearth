@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { readSession, resolveRole } from '@/lib/auth/session'
+import { requireMember } from '@/lib/auth/session'
 import {
   cancelFamilyEvent,
   getAutomation,
@@ -27,7 +27,7 @@ export const dynamic = 'force-dynamic'
  * asking the bot in the chat, so the web is just a second pair of hands.
  */
 export async function POST(req: Request) {
-  const session = await readSession()
+  const session = await requireMember()
   if (!session) return NextResponse.json({ error: 'Not signed in' }, { status: 401 })
 
   let body: { action?: string; id?: number; enabled?: boolean; done?: boolean; list?: string; content?: string; fact?: string }
@@ -57,7 +57,6 @@ export async function POST(req: Request) {
           e.title.trim().toLowerCase() === row.title.trim().toLowerCase(),
       )
       if (clash) return NextResponse.json({ ok: true, added: false, already: clash.title })
-      const who = await resolveRole(session.email).catch(() => null)
       const event = await addFamilyEvent({
         title: row.title,
         description: row.description,
@@ -65,7 +64,7 @@ export async function POST(req: Request) {
         startsAt: row.startsAt,
         endsAt: row.endsAt,
         allDay: row.allDay,
-        createdBy: who?.member?.id ?? null,
+        createdBy: session.memberId,
       })
       return NextResponse.json({ ok: true, added: true, id: event.id })
     }
@@ -107,8 +106,7 @@ export async function POST(req: Request) {
     case 'answer_question': {
       // A yes keeps the fact as written in the box, a correction included; a no keeps nothing.
       const fact = String(body.fact ?? '').trim()
-      const who = await resolveRole(session.email).catch(() => null)
-      const settled = await answerQuestion(id, fact || null, who?.member?.id ?? null)
+      const settled = await answerQuestion(id, fact || null, session.memberId)
       if (!settled) return NextResponse.json({ error: `Question ${id} is no longer open.` }, { status: 404 })
       return NextResponse.json({ ok: true, ...(settled.memory ? { kept: settled.memory.content } : { dismissed: true }) })
     }

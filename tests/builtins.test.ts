@@ -1,15 +1,22 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
 import { installBuiltins } from '@/lib/builtins'
 import { WATCHERS, BUILTIN_WATCHERS, type Watcher } from '@/lib/watchers'
 
+/** How many people Telegram counts in a room that the household cannot account for. */
+const unaccountedIn = vi.hoisted(() => vi.fn(async (_chatId: string): Promise<number | null> => 0))
+vi.mock('@/lib/headcount', () => ({ unaccountedIn }))
+
 let client: PGlite
 /** Tuesday 15 September 2026, 10:30am in Melbourne. */
 const now = new Date('2026-09-15T00:30:00Z')
 
 beforeEach(async () => {
+  unaccountedIn.mockReset()
+  unaccountedIn.mockResolvedValue(0)
+  vi.spyOn(console, 'info').mockImplementation(() => {})
   client = (await freshDb()).client
 })
 afterEach(async () => closeDb(client))
@@ -34,6 +41,30 @@ describe('the built-in watchers', () => {
     const again = await installBuiltins(now)
     expect(again).toEqual({ installed: [], converted: 0, retired: 0, synced: 0 })
     expect(await q.listAutomations()).toHaveLength(2)
+  })
+
+  it('installs nothing where Telegram counts people the household cannot account for', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    await q.rememberChat('-400', 'group', 'School parents')
+    await q.rememberChat('-500', 'group', 'Gone')
+    unaccountedIn.mockImplementation(async (chatId) => (chatId === '-100' ? 0 : chatId === '-400' ? 23 : null))
+
+    const report = await installBuiltins(now)
+    expect(report.installed).toEqual(['Morning brief in Family', 'Money snapshot in Family'])
+    expect(await q.listAutomations('-400')).toHaveLength(0)
+    expect(await q.listAutomations('-500')).toHaveLength(0)
+    // Asked once per room, not once per watcher.
+    expect(unaccountedIn.mock.calls.filter(([id]) => id === '-400')).toHaveLength(1)
+    expect(console.info).toHaveBeenCalledWith(expect.stringContaining('23 people there are not recognised'))
+    expect(console.info).toHaveBeenCalledWith(expect.stringContaining('an unknown number of people'))
+  })
+
+  it('does not ask Telegram about a room that already has its watchers', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    await installBuiltins(now)
+    unaccountedIn.mockClear()
+    await installBuiltins(now)
+    expect(unaccountedIn).not.toHaveBeenCalled()
   })
 
   it('falls back to the chat id when a group has no title', async () => {

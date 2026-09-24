@@ -20,7 +20,7 @@ const {
   MANAGED_KEYS, isManaged, isSecretShaped, setSecret, clearSecret, listSettings,
   hydrateSecrets, resetHydration,
 } = await import('@/lib/settings')
-const { createSession, readSession, destroySession, resolveRole, requireAdmin } = await import('@/lib/auth/session')
+const { createSession, readSession, destroySession, resolveRole, requireAdmin, requireMember } = await import('@/lib/auth/session')
 
 let client: PGlite
 
@@ -357,5 +357,29 @@ describe('requireAdmin', () => {
     jar.store.set('hearth_session', token)
     expect((await readSession())?.role).toBe('member')
     expect(await requireAdmin()).toBeNull()
+  })
+
+  it('takes the role from the members table on every request, not from the cookie', async () => {
+    const q = await import('@/lib/db/queries')
+    await q.saveMember({ telegramUserId: '222', name: 'Mal', email: 'mal@hearth.example', allowed: true, isAdmin: true })
+    await createSession({ email: 'mal@hearth.example', name: 'Mal', provider: 'google', role: 'admin' })
+    expect(await requireAdmin()).not.toBeNull()
+
+    // Demoted: the cookie still says admin, the table no longer does.
+    await q.saveMember({ telegramUserId: '222', name: 'Mal', email: 'mal@hearth.example', allowed: true, isAdmin: false })
+    expect((await readSession())?.role).toBe('admin')
+    expect(await requireAdmin()).toBeNull()
+    expect((await requireMember())?.role).toBe('member')
+
+    // Revoked: nothing at all, for the rest of the cookie's twelve hours.
+    await q.setMemberAllowed('222', false)
+    expect(await requireMember()).toBeNull()
+    expect(await requireAdmin()).toBeNull()
+  })
+
+  it('hands back the member behind the session, and nobody when signed out', async () => {
+    expect(await requireMember()).toBeNull()
+    await createSession({ email: 'rowan@hearth.example', name: 'Rowan', provider: 'google', role: 'admin' })
+    expect(await requireMember()).toMatchObject({ email: 'rowan@hearth.example', role: 'admin', memberId: null })
   })
 })

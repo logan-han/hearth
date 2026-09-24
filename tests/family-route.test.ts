@@ -26,7 +26,10 @@ const post = (body: unknown) =>
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   }))
 
-const asMember = () => createSession({ email: 'ada@hearth.example', name: 'Ada', provider: 'google', role: 'member' })
+const asMember = async () => {
+  await q.saveMember({ telegramUserId: '222', name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
+  await createSession({ email: 'ada@hearth.example', name: 'Ada', provider: 'google', role: 'member' })
+}
 
 beforeEach(async () => {
   vi.clearAllMocks()
@@ -215,27 +218,24 @@ describe('the family API', () => {
     expect((await res.json()).error).toBe('A list and an item are needed.')
   })
 
-  it('keeps working when the accepter\'s own role cannot be resolved', async () => {
+  it('puts an accepted proposal down to whoever is signed in', async () => {
     await asMember()
+    const ada = await q.memberByTelegramId('222')
     const p = await q.addProposal({
       chatId: '-100', title: 'Trivia night', location: 'Corner Cafe',
       startsAt: new Date('2030-09-03T03:30:00Z'), endsAt: new Date('2030-09-03T05:00:00Z'), allDay: false,
     })
-    const authSession = await import('@/lib/auth/session')
-    vi.spyOn(authSession, 'resolveRole').mockRejectedValueOnce(new Error('members table locked'))
-    const res = await post({ action: 'accept_proposal', id: p.id })
-    expect(res.status).toBe(200)
+    expect((await post({ action: 'accept_proposal', id: p.id })).status).toBe(200)
     const [event] = await q.listFamilyEvents(new Date('2030-09-01'), new Date('2030-09-30'))
-    expect(event).toMatchObject({ title: 'Trivia night', createdBy: null })
+    expect(event).toMatchObject({ title: 'Trivia night', createdBy: ada!.id })
   })
 
-  it('keeps working when the answerer\'s own role cannot be resolved', async () => {
+  it('turns away a cookie whose member has since been revoked, or was never recognised', async () => {
     await asMember()
-    const { row } = await q.askQuestion({ question: 'Who attends Riverbend College?', candidate: 'Juno attends Riverbend College' })
-    const authSession = await import('@/lib/auth/session')
-    vi.spyOn(authSession, 'resolveRole').mockRejectedValueOnce(new Error('members table locked'))
-    const res = await post({ action: 'answer_question', id: row.id, fact: 'Juno attends Riverbend College' })
-    expect(res.status).toBe(200)
-    expect((await res.json()).kept).toBe('Juno attends Riverbend College')
+    await q.setMemberAllowed('222', false)
+    expect((await post({ action: 'add_item', list: 'shopping', content: 'milk' })).status).toBe(401)
+
+    await createSession({ email: 'stranger@else.example', name: 'S', provider: 'google', role: 'admin' })
+    expect((await post({ action: 'add_item', list: 'shopping', content: 'milk' })).status).toBe(401)
   })
 })

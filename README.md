@@ -105,6 +105,7 @@ the cap holds something back.
 | `scripts/probe-model.ts` | `npm run probe`: a real tool call against a candidate model before it joins the chain |
 | `lib/summary.ts` | The rolling summary each chat keeps of what fell out of the raw history window |
 | `lib/rate-cap.ts` | The ceiling on scheduled posts per chat per hour |
+| `lib/headcount.ts` | How many people in a group the household cannot account for, from Telegram's own count |
 | `lib/providers/` | Gmail and Microsoft Graph behind one interface |
 | `lib/db/` | Drizzle schema and queries |
 | `lib/crypto.ts` | AES-256-GCM for refresh tokens at rest |
@@ -322,7 +323,7 @@ SSO redirect.
 | `/connect` | DMs a personal link to link Google or Microsoft |
 | `/accounts` | List linked accounts |
 | `/unlink google` | Remove an account |
-| `/calendar` | The family calendar subscription URL |
+| `/calendar` | The family calendar subscription URL; `/calendar new` (admin) replaces it if it has got out |
 | `/mcp` | DMs a personal key for the MCP endpoint; `/mcp new` replaces it, `/mcp off` revokes it |
 | `/whoami` | Your Telegram id |
 | `/members` | Who the bot answers to |
@@ -424,6 +425,12 @@ Home lists both under Reminders with a pause; neither can be deleted, since
 the next tick would only put it back. The tick also keeps them in step with
 their definitions in `lib/watchers.ts`, and leaves a room alone while someone
 unrecognised is in it — nothing is posted there, by any watcher, until they go.
+That includes someone who has never said a word: a bot cannot list a group, so
+before installing anything, and before every unasked post, the tick asks
+Telegram how many people are in the room and which allowed members are among
+them. A head count the household cannot account for holds the post, and an
+admin is told once, with how to vouch for them. Adding the bot to the school
+parents' group for one question does not start a morning brief there.
 
 **/watch** adds the rest, or switches a paused one back on:
 
@@ -615,7 +622,10 @@ link at a different account.
 An address is recognised if it is in `ADMIN_EMAILS`, or an admin recorded it
 against a member, or that member linked a mailbox with it. Admin members get the
 admin view. Everyone else is signed in by the provider and then turned away,
-because the check happens on the way back rather than the way out.
+because the check happens on the way back rather than the way out. It happens on
+every request after that too: the session cookie only says who signed in, so a
+revoke or a demotion takes effect on the next click, not when the cookie runs
+out twelve hours later.
 
 Admins manage the family from the same page: add someone by Telegram id and
 name, optionally with an email so they can sign in before linking anything,
@@ -743,16 +753,30 @@ scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
 - A group holding someone unrecognised is a group the bot stays quiet in. It
   notices them either when they join or when they first speak, says so once, and
   resumes when they are vouched for or leave. Without this, member-based auth
-  would still read a private inbox aloud in front of an outsider.
-- OAuth `state` is a 10-minute signed JWT bound to one Telegram user.
+  would still read a private inbox aloud in front of an outsider. Commands obey
+  it as well, bar the few that give nothing away (`/help`, `/whoami`, and
+  `/allow`, which is how a room unmutes): `/calendar` in front of a stranger
+  would hand them the feed. Someone who never speaks is caught by Telegram's
+  head count before anything is posted unasked.
+- Whoever a private chat belongs to must still be allowed for any automation to
+  post there. Revoking someone stops their DM watchers; a group watcher they set
+  up keeps running for the room, but never as them.
+- OAuth `state` is a 10-minute signed JWT bound to one Telegram user, and each
+  consumer says which purpose it takes: the sign-in state anyone can ask for
+  never passes as a member's `/connect` link, and a link shows nothing to a
+  member revoked since it was sent.
 - Refresh tokens are AES-256-GCM encrypted with `TOKEN_ENC_KEY`.
 - The ICS feed sits behind a long random token, compared without early exit.
+  `/calendar new` replaces the token if the URL gets out; everyone subscribed
+  then subscribes again.
 - `/api/mcp` accepts only a bearer key it can match to an allowed member, and
   keys are stored as SHA-256 digests, so the store cannot hand one back out.
 - `/api/tick` verifies the QStash signature.
 - Email is never sent without a human "yes": `draft_email` and `send_email` are
   separate tools, the draft is persisted, and the send claims it atomically so a
-  repeated confirmation cannot send twice.
+  repeated confirmation cannot send twice. `send_email` refuses a draft written
+  in the same turn, so the yes has to come from a person in a later message,
+  never from the model, and never from an instruction inside an email it read.
 
 ## Development
 

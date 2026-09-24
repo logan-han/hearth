@@ -34,6 +34,13 @@ const buildTools = vi.fn(
     }) as Record<string, { execute?: (...args: unknown[]) => unknown }>,
 )
 
+const { unaccountedIn, memberByTelegramId, creatorRows } = vi.hoisted(() => ({
+  unaccountedIn: vi.fn<(chatId: string) => Promise<number | null>>(async () => 0),
+  memberByTelegramId: vi.fn<(id: string) => Promise<{ allowed: boolean } | undefined>>(async () => ({ allowed: true })),
+  creatorRows: vi.fn(async () => [] as unknown[]),
+}))
+vi.mock('@/lib/headcount', () => ({ unaccountedIn }))
+
 const { recordMessage, messagesSince, getSetting, setSetting, recordTick, retireStaleProposals } = vi.hoisted(() => ({
   recordMessage: vi.fn(async () => 1),
   messagesSince: vi.fn(async () => [] as unknown[]),
@@ -55,6 +62,7 @@ vi.mock('@/lib/db/queries', () => ({
   unaskedQuestions,
   markQuestionsAsked,
   allowedMembers,
+  memberByTelegramId,
 }))
 vi.mock('@/lib/builtins', () => ({ installBuiltins }))
 vi.mock('@/lib/agent', () => ({ runAgent, decideWatcherPost, reviewDraft }))
@@ -63,7 +71,7 @@ vi.mock('@/lib/telegram', () => ({ send }))
 vi.mock('@upstash/qstash', () => ({ Receiver: class { verify = verify } }))
 vi.mock('@/lib/db', () => ({
   db: () => ({
-    select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
+    select: () => ({ from: () => ({ where: () => ({ limit: creatorRows }) }) }),
     insert: () => ({ values: insertValues }),
   }),
   schema: { members: { id: 'id' }, messages: {} },
@@ -87,6 +95,9 @@ function automation(over: Partial<Automation> = {}): Automation {
     ...over,
   } as Automation
 }
+
+/** The household's date, which the nightly memory pass records as done. */
+const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Melbourne' }).format(new Date())
 
 function tick(headers: Record<string, string> = {}) {
   return POST(new Request('https://hearth.test/api/tick', { method: 'POST', headers, body: '' }))
@@ -114,6 +125,10 @@ beforeEach(() => {
   spendingSummary.mockResolvedValue({ error: 'PocketSmith is not configured.' })
   budgetSummary.mockResolvedValue({ error: 'PocketSmith is not configured.' })
   strangersIn.mockResolvedValue([])
+  unaccountedIn.mockResolvedValue(0)
+  memberByTelegramId.mockResolvedValue({ allowed: true })
+  creatorRows.mockResolvedValue([])
+  delete process.env.ALLOWED_TELEGRAM_IDS
   unaskedQuestions.mockResolvedValue([])
   markQuestionsAsked.mockResolvedValue(undefined)
   allowedMembers.mockResolvedValue([{ id: 9, telegramUserId: '900', name: 'Boss', isAdmin: true, allowed: true }])
@@ -245,6 +260,71 @@ describe('running due automations', () => {
     expect(claimAutomation).toHaveBeenCalledTimes(2)
     expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
     expect(send).toHaveBeenCalledWith('111', 'Bins out tonight.')
+  })
+
+  it('posts nothing into the DM of someone who is no longer allowed', async () => {
+    dueAutomations.mockResolvedValue([automation({ chatId: '222', kind: 'money', label: '2Up transactions' })])
+    memberByTelegramId.mockResolvedValue({ allowed: false })
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 0, skipped: 1 })
+    expect(claimAutomation).toHaveBeenCalledTimes(1)
+    expect(newTransactions).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+
+    // Deleted outright is the same: nobody left to post to.
+    memberByTelegramId.mockResolvedValue(undefined)
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 0, skipped: 1 })
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('still posts into a founder\'s DM, which the env seed allows', async () => {
+    process.env.ALLOWED_TELEGRAM_IDS = '111'
+    memberByTelegramId.mockResolvedValue(undefined)
+    dueAutomations.mockResolvedValue([automation({ chatId: '111' })])
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
+    expect(send).toHaveBeenCalledWith('111', 'Bins out tonight.')
+  })
+
+  it('runs a revoked creator\'s group automation as the family, never as them', async () => {
+    creatorRows.mockResolvedValue([{ id: 9, telegramUserId: '222', name: 'Nanny', allowed: false, isAdmin: false }])
+    dueAutomations.mockResolvedValue([automation({ memberId: 9 })])
+    runAgent.mockRejectedValueOnce(new Error('model exploded'))
+    await authed()
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ member: null, memberName: 'the family' }))
+    // The failure goes to an admin, not to the revoked creator first.
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('model exploded'))
+    expect(send).not.toHaveBeenCalledWith('222', expect.anything())
+  })
+
+  it('holds a group post while Telegram counts people nobody has vouched for, telling an admin once', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    unaccountedIn.mockResolvedValue(2)
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 0, skipped: 1 })
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('Telegram counts 2 people there I do not recognise'))
+    expect(setSetting).toHaveBeenCalledWith('unaccounted:-100999', '2')
+
+    // The next hour, the same count: logged, not said again.
+    send.mockClear()
+    getSetting.mockImplementation(async (key: string) => (key === 'unaccounted:-100999' ? '2' : key === 'memory_sweep_day' ? today() : null))
+    await authed()
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('holds a group post when Telegram will not say who is there', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    unaccountedIn.mockResolvedValue(null)
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 0, skipped: 1 })
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('would not say who is there'))
+    expect(setSetting).toHaveBeenCalledWith('unaccounted:-100999', 'unknown')
+  })
+
+  it('posts again once the room is accounted for, and forgets the count it warned about', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    getSetting.mockImplementation(async (key: string) => (key === 'unaccounted:-100999' ? '2' : key === 'memory_sweep_day' ? today() : null))
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
+    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
+    expect(setSetting).toHaveBeenCalledWith('unaccounted:-100999', '0')
   })
 
   it('reports a failing automation to an admin DM, never the chat, and keeps going', async () => {

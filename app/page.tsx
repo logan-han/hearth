@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { readSession } from '@/lib/auth/session'
+import { requireMember } from '@/lib/auth/session'
 import { hydrateSecrets } from '@/lib/settings'
 import { gatherFamilyStats } from '@/lib/stats'
 import { Shell } from './shell'
@@ -14,7 +14,7 @@ export default async function HomePage({
 }: {
   searchParams: Promise<{ month?: string }>
 }) {
-  const session = await readSession()
+  const session = await requireMember()
   if (!session) return <SignIn />
 
   await hydrateSecrets()

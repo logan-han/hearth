@@ -273,6 +273,88 @@ describe('/calendar', () => {
     expect(lastSent()).toMatch(/https:\/\/hearth\.example\/api\/calendar\/.+\/family\.ics/)
     expect(lastSent()).toContain('Google Calendar')
   })
+
+  it('replaces the feed token on /calendar new, so the old url stops working', async () => {
+    const before = await q.calendarToken()
+    await processUpdate(dm('/calendar new'))
+    const after = await q.calendarToken()
+    expect(after).not.toBe(before)
+    expect(lastSent()).toContain(`/api/calendar/${after}/family.ics`)
+    expect(lastSent()).toContain('stopped working')
+  })
+
+  it('lets only an admin replace it', async () => {
+    await processUpdate(dm('/allow 999'))
+    const before = await q.calendarToken()
+    send.mockClear()
+    await processUpdate(dm('/calendar new', '999'))
+    expect(lastSent()).toContain('Only an admin')
+    expect(await q.calendarToken()).toBe(before)
+  })
+})
+
+describe('commands in a room with someone unrecognised in it', () => {
+  beforeEach(async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    await q.noteStranger('-100', { id: '777', name: 'User777' })
+  })
+
+  it('will not hand the feed url, linked addresses or the family list to the room', async () => {
+    for (const cmd of ['/calendar', '/accounts', '/members', '/watch list']) {
+      send.mockClear()
+      await processUpdate(group(cmd))
+      expect(send).toHaveBeenCalledTimes(1)
+      expect(lastSent()).toContain('Not while User777 is here')
+      expect(lastSent()).not.toContain('/api/calendar/')
+    }
+  })
+
+  it('still takes /allow, which is how the room is unmuted, and /help', async () => {
+    await processUpdate(groupReply('/allow', 777))
+    expect(await q.strangersIn('-100')).toEqual([])
+    await q.noteStranger('-100', { id: '778', name: 'User778' })
+    send.mockClear()
+    await processUpdate(group('/help'))
+    expect(lastSent()).toContain('Hearth')
+  })
+})
+
+describe('someone unrecognised joining', () => {
+  const joined = (...people: { id: number; is_bot?: boolean }[]) => ({
+    update_id: 9,
+    message: {
+      message_id: 9, date: 1787000000,
+      from: { id: 111, is_bot: false, first_name: 'Rowan' },
+      chat: { id: -300, type: 'group', title: 'New room' },
+      new_chat_members: people.map((p) => ({ id: p.id, is_bot: p.is_bot ?? false, first_name: `User${p.id}` })),
+    },
+  }) as never
+
+  it('is recorded even in a room nobody has spoken in yet, so the bot does stay quiet', async () => {
+    await processUpdate(joined({ id: 1, is_bot: true }, { id: 999 }))
+    expect(await q.strangersIn('-300')).toEqual([{ id: '999', name: 'User999' }])
+    expect(lastSent()).toContain("I don't recognise User999")
+
+    send.mockClear()
+    runAgent.mockClear()
+    await processUpdate({
+      update_id: 10,
+      message: {
+        message_id: 10, date: 1787000000,
+        from: { id: 111, is_bot: false, first_name: 'Rowan' },
+        chat: { id: -300, type: 'group', title: 'New room' },
+        text: '@heart_family_bot read my inbox',
+        entities: [{ type: 'mention', offset: 0, length: 17 }],
+      },
+    } as never)
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(lastSent()).toContain('Not while User999 is here')
+  })
+
+  it('creates no row for the bot arriving on its own', async () => {
+    await processUpdate(joined({ id: 1, is_bot: true }))
+    expect(await q.groupChats()).toEqual([])
+  })
 })
 
 describe('/watch', () => {

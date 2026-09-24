@@ -78,6 +78,11 @@ describe('chats and strangers', () => {
     expect(await q.strangersIn('-999')).toEqual([])
   })
 
+  it('does not claim to have flagged a stranger in a room it has no row for', async () => {
+    expect(await q.noteStranger('-999', { id: '9', name: 'Guest' })).toBe(false)
+    expect(await q.strangersIn('-999')).toEqual([])
+  })
+
   it('updates the title without losing strangers', async () => {
     await q.noteStranger('-100', { id: '9', name: 'A' })
     await q.rememberChat('-100', 'group', 'Renamed')
@@ -621,6 +626,14 @@ describe('settings and the calendar token', () => {
     const first = await q.calendarToken()
     expect(first).toHaveLength(32)
     expect(await q.calendarToken()).toBe(first)
+  })
+
+  it('replaces the calendar token when rotated, and keeps the new one', async () => {
+    const first = await q.calendarToken()
+    const second = await q.rotateCalendarToken()
+    expect(second).toHaveLength(32)
+    expect(second).not.toBe(first)
+    expect(await q.calendarToken()).toBe(second)
   })
 
   it('keeps the previous tick beside the latest, so the cadence can be read off the pair', async () => {

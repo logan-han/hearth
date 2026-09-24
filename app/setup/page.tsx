@@ -1,4 +1,4 @@
-import { readSession } from '@/lib/auth/session'
+import { requireMember } from '@/lib/auth/session'
 import { hydrateSecrets, SETTING_META } from '@/lib/settings'
 import { telegramStatus } from '@/lib/telegram-admin'
 import { allowedMembers } from '@/lib/db/queries'
@@ -16,7 +16,7 @@ export const dynamic = 'force-dynamic'
  * afterwards for reconnecting the webhook or adding people.
  */
 export default async function SetupPage() {
-  const session = await readSession()
+  const session = await requireMember()
   if (!session) return <SignIn />
   if (session.role !== 'admin') return <Denied />
 

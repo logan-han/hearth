@@ -25,7 +25,8 @@ export default async function Connect({ searchParams }: { searchParams: Promise<
 
   let payload
   try {
-    payload = await verifyState(t)
+    // Only a link minted for a member: the sign-in state is handed to anyone.
+    payload = await verifyState(t, 'link')
   } catch {
     return (
       <main>
@@ -37,7 +38,18 @@ export default async function Connect({ searchParams }: { searchParams: Promise<
   }
 
   const member = await memberByTelegramId(payload.tg)
-  const existing = member ? await connectionsFor(member.id) : []
+  // The feed URL below is the household's calendar; a link outlives a revoke by
+  // up to half an hour, and nobody else holds one.
+  if (!member?.allowed) {
+    return (
+      <main>
+        <div className="mark">🔥</div>
+        <h1>That link is no longer valid</h1>
+        <p className="lede">Send /connect to the bot again for a fresh one.</p>
+      </main>
+    )
+  }
+  const existing = await connectionsFor(member.id)
   const linkedSet = new Set(existing.map((c) => c.provider))
   const icsUrl = `${appUrl()}/api/calendar/${await calendarToken()}/family.ics`
 

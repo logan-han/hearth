@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { readSession } from '@/lib/auth/session'
+import { requireMember } from '@/lib/auth/session'
 import { gatherCalendar } from '@/lib/stats'
 
 export const runtime = 'nodejs'
@@ -11,7 +11,7 @@ export const dynamic = 'force-dynamic'
  * one is for a signed-in person flicking between months.
  */
 export async function GET(req: Request) {
-  if (!(await readSession())) return NextResponse.json({ error: 'Not signed in' }, { status: 401 })
+  if (!(await requireMember())) return NextResponse.json({ error: 'Not signed in' }, { status: 401 })
 
   const month = new URL(req.url).searchParams.get('month') ?? undefined
   const { calendar } = await gatherCalendar(month)

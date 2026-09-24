@@ -162,8 +162,14 @@ export async function noteStranger(chatId: string, stranger: Stranger): Promise<
   const current = await strangersIn(chatId)
   if (current.some((s) => s.id === stranger.id)) return false
   const next = [...current, stranger]
-  await db().update(chats).set({ strangers: JSON.stringify(next) }).where(eq(chats.chatId, chatId))
-  return true
+  // True only if a row took it: a stranger reported as flagged but written
+  // nowhere is a room the bot goes on talking in.
+  const written = await db()
+    .update(chats)
+    .set({ strangers: JSON.stringify(next) })
+    .where(eq(chats.chatId, chatId))
+    .returning({ id: chats.id })
+  return written.length > 0
 }
 
 export async function clearStranger(chatId: string, userId: string): Promise<void> {
@@ -597,6 +603,17 @@ export async function recordTick(now: Date): Promise<void> {
 export async function calendarToken(): Promise<string> {
   const existing = await getSetting('calendar_token')
   if (existing) return existing
+  const token = randomToken(24)
+  await setSetting('calendar_token', token)
+  return token
+}
+
+/**
+ * A fresh feed token, for when the URL has got out. The old one stops matching
+ * at once, though the edge may keep serving a cached copy for up to its
+ * s-maxage, and every subscriber has to subscribe again.
+ */
+export async function rotateCalendarToken(): Promise<string> {
   const token = randomToken(24)
   await setSetting('calendar_token', token)
   return token

@@ -83,8 +83,23 @@ export async function readSession(): Promise<Session | null> {
   }
 }
 
-export async function requireAdmin(): Promise<Session | null> {
+/**
+ * The signed-in person as the members table has them now, or null. The cookie
+ * only proves who signed in and when; whether they are still recognised, and
+ * as what, is looked up on every request, so a revoke or a demotion takes
+ * effect on the next click rather than when the cookie runs out.
+ */
+export async function requireMember(): Promise<(Session & { memberId: number | null }) | null> {
   const session = await readSession()
+  if (!session) return null
+  const resolved = await resolveRole(session.email)
+  if (!resolved) return null
+  // The id, not the row: a session travels to the page, and the row carries the MCP key's digest.
+  return { ...session, role: resolved.role, memberId: resolved.member?.id ?? null }
+}
+
+export async function requireAdmin(): Promise<(Session & { memberId: number | null }) | null> {
+  const session = await requireMember()
   return session?.role === 'admin' ? session : null
 }
 

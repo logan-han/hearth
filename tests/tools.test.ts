@@ -45,6 +45,8 @@ const { requireMember } = await import('@/lib/tools/context')
 
 let client: PGlite
 let ctx: ToolContext
+/** The same member in their next message: nothing drafted in this turn yet. */
+const later = (over: Partial<ToolContext> = {}): ToolContext => ({ ...ctx, draftedThisTurn: undefined, ...over })
 
 const call = (tools: Record<string, unknown>, name: string, args: unknown) =>
   ((tools[name] as { execute: unknown }).execute as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)(args, {})
@@ -114,7 +116,7 @@ describe('mail tools', () => {
 
   it('refuses to send when the confirmation flag is false', async () => {
     const d = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com'], subject: 's', body: 'b' })
-    const r = await call(mailTools(ctx), 'send_email', { draft_id: d.draft_id, confirmed: false })
+    const r = await call(mailTools(later()), 'send_email', { draft_id: d.draft_id, confirmed: false })
     expect(String(r.error)).toContain('Not sent')
     expect(sendMail).not.toHaveBeenCalled()
   })
@@ -122,10 +124,10 @@ describe('mail tools', () => {
   it('sends a confirmed draft exactly once', async () => {
     sendMail.mockResolvedValue({ ok: true })
     const d = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com', 'c@d.com'], subject: 's', body: 'b' })
-    const first = await call(mailTools(ctx), 'send_email', { draft_id: d.draft_id, confirmed: true })
+    const first = await call(mailTools(later()), 'send_email', { draft_id: d.draft_id, confirmed: true })
     expect(first.sent).toBe(true)
     expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: ['a@b.com', 'c@d.com'] }))
-    const second = await call(mailTools(ctx), 'send_email', { draft_id: d.draft_id, confirmed: true })
+    const second = await call(mailTools(later()), 'send_email', { draft_id: d.draft_id, confirmed: true })
     expect(second.error).toBeDefined()
     expect(sendMail).toHaveBeenCalledTimes(1)
   })
@@ -133,7 +135,7 @@ describe('mail tools', () => {
   it('hands a draft back to pending when the send fails', async () => {
     sendMail.mockRejectedValue(new Error('smtp exploded'))
     const d = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com'], subject: 's', body: 'b' })
-    const r = await call(mailTools(ctx), 'send_email', { draft_id: d.draft_id, confirmed: true })
+    const r = await call(mailTools(later()), 'send_email', { draft_id: d.draft_id, confirmed: true })
     expect(String(r.error)).toContain('smtp exploded')
     expect((await q.getDraft(Number(d.draft_id)))!.status).toBe('pending')
   })
@@ -141,12 +143,23 @@ describe('mail tools', () => {
   it('will not let one member send another member\'s draft', async () => {
     const d = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com'], subject: 's', body: 'b' })
     const other = await q.upsertMember('222', 'Someone', { allowed: true })
-    const r = await call(mailTools({ ...ctx, member: other }), 'send_email', { draft_id: d.draft_id, confirmed: true })
+    const r = await call(mailTools(later({ member: other })), 'send_email', { draft_id: d.draft_id, confirmed: true })
     expect(String(r.error)).toContain('drafted')
   })
 
+  it('will not send a draft written in the same turn, whatever the model was told', async () => {
+    sendMail.mockResolvedValue({ ok: true })
+    const d = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com'], subject: 's', body: 'b' })
+    const r = await call(mailTools(ctx), 'send_email', { draft_id: d.draft_id, confirmed: true })
+    expect(String(r.error)).toContain('written just now')
+    expect(sendMail).not.toHaveBeenCalled()
+    expect((await q.getDraft(Number(d.draft_id)))!.status).toBe('pending')
+    // The yes in the next message is what sends it.
+    expect((await call(mailTools(later()), 'send_email', { draft_id: d.draft_id, confirmed: true })).sent).toBe(true)
+  })
+
   it('rejects an unknown draft id', async () => {
-    expect(String((await call(mailTools(ctx), 'send_email', { draft_id: 999, confirmed: true })).error)).toContain('No draft')
+    expect(String((await call(mailTools(later()), 'send_email', { draft_id: 999, confirmed: true })).error)).toContain('No draft')
   })
 
   it('cancels a pending draft once', async () => {
@@ -158,7 +171,7 @@ describe('mail tools', () => {
   it('sends the cc list along with the recipients', async () => {
     sendMail.mockResolvedValue({ ok: true })
     const d = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com'], cc: ['x@y.com', 'z@y.com'], subject: 's', body: 'b' })
-    await call(mailTools(ctx), 'send_email', { draft_id: d.draft_id, confirmed: true })
+    await call(mailTools(later()), 'send_email', { draft_id: d.draft_id, confirmed: true })
     expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({ cc: ['x@y.com', 'z@y.com'] }))
   })
 
@@ -166,8 +179,8 @@ describe('mail tools', () => {
     sendMail.mockResolvedValue({ ok: true })
     const d = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com'], subject: 's', body: 'b' })
     const [first, second] = await Promise.all([
-      call(mailTools(ctx), 'send_email', { draft_id: d.draft_id, confirmed: true }),
-      call(mailTools(ctx), 'send_email', { draft_id: d.draft_id, confirmed: true }),
+      call(mailTools(later()), 'send_email', { draft_id: d.draft_id, confirmed: true }),
+      call(mailTools(later()), 'send_email', { draft_id: d.draft_id, confirmed: true }),
     ])
     const results = [first, second]
     expect(results.filter((r) => r.sent === true)).toHaveLength(1)
