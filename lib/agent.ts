@@ -570,9 +570,9 @@ const DONE: Partial<Record<ToolName, string>> = {
   notion_append_to_page: 'added to a Notion page',
 }
 
-/** What the turn did before its model failed, for a reply that cannot say it any other way. */
-function doneSoFar(ctx: ToolContext): string {
-  return [...new Set((ctx.wrote ?? []).map((t) => DONE[t as ToolName]).filter(Boolean))].join(', ')
+/** What the turn's unrepeatable writes did, for a reply that cannot say it any other way. */
+function doneSoFar(wrote: readonly string[] | undefined): string {
+  return [...new Set((wrote ?? []).map((t) => DONE[t as ToolName]).filter(Boolean))].join(', ')
 }
 
 /**
@@ -581,10 +581,26 @@ function doneSoFar(ctx: ToolContext): string {
  * request for three things may have got through one.
  */
 function doneLine(ctx: ToolContext): string {
-  const done = doneSoFar(ctx)
+  const done = doneSoFar(ctx.wrote)
   return done
     ? `Done so far: ${done}. My reply was cut off there, so ask again only for anything else you wanted.`
     : 'My reply was cut off after I had started on that, so check what changed before asking again.'
+}
+
+/**
+ * What the chat hears when a finished turn's reply did not go through. The
+ * turn worked, and a member told it went wrong asks again, which makes a list
+ * item or a reminder twice; the reply may even be in the chat, if only
+ * Telegram's answer to it was lost. So it says what was done, as doneLine
+ * does.
+ */
+export function unconfirmedLine(wrote: readonly string[] | undefined): string {
+  const lead = 'Telegram did not confirm my reply, so some or all of it may be missing.'
+  if (!wrote?.length) return `${lead} Ask again if you did not see it.`
+  const done = doneSoFar(wrote)
+  return done
+    ? `${lead} What I did stands: ${done}, so ask again only for anything else you wanted.`
+    : `${lead} What I did stands, so check what changed before asking again.`
 }
 
 export async function runAgent(input: AgentInput): Promise<AgentResult> {
@@ -783,7 +799,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           if (mode === 'chat') throw new EndOnFailure({ text: doneLine(ctx), model: slot.name, evidence: undefined, cutShort: false }, err)
           // Unattended, the run posts nothing and an admin hears why, the way a
           // watcher's own PROBLEM line reaches them.
-          const done = doneSoFar(ctx) || 'changed something'
+          const done = doneSoFar(ctx.wrote) || 'changed something'
           throw new EndOnFailure({
             text: `PROBLEM: ${slot.name} failed (${describeError(err)}) after it had ${done}, so this run posted nothing.\nSKIP`,
             model: slot.name,

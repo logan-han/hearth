@@ -1121,6 +1121,15 @@ describe('automation tools', () => {
     expect((await call(automationTools(ctx), 'delete_automation', { id: a.id })).deleted).toBe(a.id)
   })
 
+  it("leaves another chat's automation alone, as if it were not there", async () => {
+    const theirs = await call(automationTools({ ...ctx, chatId: '555' }), 'create_automation', { label: 'my brief', cron: '0 7 * * *', instruction: 'i' })
+    const paused = await call(automationTools(ctx), 'pause_automation', { id: theirs.id, enabled: false })
+    expect(paused.error).toBe(`No automation ${theirs.id} in this chat.`)
+    const deleted = await call(automationTools(ctx), 'delete_automation', { id: theirs.id })
+    expect(deleted.error).toBe(`No automation ${theirs.id} in this chat.`)
+    expect(await q.getAutomation(Number(theirs.id))).toMatchObject({ chatId: '555', enabled: true })
+  })
+
   it('creates with no member on the context', async () => {
     const r = await call(automationTools({ ...ctx, member: null }), 'create_automation', { label: 'bins', cron: '0 19 * * 1', instruction: 'i' })
     expect(r.id).toBeDefined()

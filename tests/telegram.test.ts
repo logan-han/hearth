@@ -5,11 +5,15 @@ const { sendMessage, sendChatAction, getFile } = vi.hoisted(() => ({
   sendChatAction: vi.fn(async (_chatId: string | number, _action: string) => true),
   getFile: vi.fn<(fileId: string) => Promise<{ file_path?: string; file_size?: number }>>(),
 }))
-vi.mock('grammy', () => ({
+vi.mock('grammy', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('grammy')>()),
   Bot: class { api = { sendMessage, sendChatAction, getFile } },
 }))
 
-const { chunk, send, typing, downloadFile, MAX_FILE_BYTES } = await import('@/lib/telegram')
+const { chunk, send, typing, downloadFile, MAX_FILE_BYTES, PartlySent } = await import('@/lib/telegram')
+const { GrammyError, HttpError } = await import('grammy')
+const refused = (code: number, description: string) =>
+  new GrammyError('Call to sendMessage failed!', { ok: false, error_code: code, description }, 'sendMessage', {})
 
 const fetchMock = vi.fn()
 
@@ -76,12 +80,54 @@ describe('send', () => {
   })
 
   it('retries as the untouched plain text when Telegram rejects the html', async () => {
-    sendMessage.mockRejectedValueOnce(new Error("can't parse entities"))
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    sendMessage.mockRejectedValueOnce(refused(400, "Bad Request: can't parse entities: Unsupported start tag"))
     await send('-100', 'a *broken _markdown')
     expect(sendMessage).toHaveBeenCalledTimes(2)
     expect(sendMessage.mock.calls[0][2]).toMatchObject({ parse_mode: 'HTML' })
     expect(sendMessage.mock.calls[1][1]).toBe('a *broken _markdown')
     expect(sendMessage.mock.calls[1][2]).not.toHaveProperty('parse_mode')
+  })
+
+  it.each([
+    ['a lost response', () => new HttpError('Network request for sendMessage failed!', new Error('ECONNRESET'))],
+    ["Telegram's edge failing", () => refused(502, 'Bad Gateway')],
+    ['a flood limit', () => refused(429, 'Too Many Requests: retry after 5')],
+    ['something else entirely', () => new Error('socket hang up')],
+  ])('sends nothing again after %s, which may have posted it already', async (_what, make) => {
+    const failure = make()
+    sendMessage.mockRejectedValueOnce(failure)
+    await expect(send('-100', 'Bins out tonight.')).rejects.toBe(failure)
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('says how much reached the chat when a later part fails, so nobody posts it twice', async () => {
+    const failure = new HttpError('Network request for sendMessage failed!', new Error('ETIMEDOUT'))
+    sendMessage.mockResolvedValueOnce({}).mockResolvedValueOnce({}).mockRejectedValueOnce(failure)
+    const text = ['a'.repeat(3000), 'b'.repeat(3000), 'c'.repeat(3000)].join('\n\n')
+    const err = await send('-100', text).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(PartlySent)
+    expect((err as InstanceType<typeof PartlySent>).sent).toBe(`${'a'.repeat(3000)}\n\n${'b'.repeat(3000)}`)
+    expect((err as InstanceType<typeof PartlySent>).failure).toBe(failure)
+    expect((err as Error).message).toBe('Only part of the message was sent: Network request for sendMessage failed!')
+    expect(sendMessage).toHaveBeenCalledTimes(3)
+  })
+
+  it('counts a later part as unsent when its plain copy is refused too', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const failure = refused(400, 'Bad Request: message is too long')
+    sendMessage.mockResolvedValueOnce({}).mockRejectedValueOnce(refused(400, "Bad Request: can't parse entities")).mockRejectedValueOnce(failure)
+    const err = await send('-100', `${'a'.repeat(3000)}\n\n${'b'.repeat(3000)}`).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(PartlySent)
+    expect((err as InstanceType<typeof PartlySent>).sent).toBe('a'.repeat(3000))
+    expect((err as InstanceType<typeof PartlySent>).failure).toBe(failure)
+  })
+
+  it('throws the failure itself when not even the first part went', async () => {
+    const failure = refused(403, 'Forbidden: bot was blocked by the user')
+    sendMessage.mockRejectedValueOnce(failure)
+    await expect(send('-100', `${'a'.repeat(3000)}\n\n${'b'.repeat(3000)}`)).rejects.toBe(failure)
+    expect(sendMessage).toHaveBeenCalledTimes(1)
   })
 
   it('replies to the triggering message only on the first chunk', async () => {

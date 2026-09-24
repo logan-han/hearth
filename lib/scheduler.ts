@@ -133,6 +133,24 @@ export function suggestAligned(grid: TickGrid, cronExpr: string, from: Date = ne
 const ASSUMED_TICK_MINUTES = 5
 const MISSED_TICKS = 3
 
+/**
+ * When a QStash retry goes down as a tick, or null when it does not. A retry
+ * lands anything from seconds to most of an hour after the tick it stands in
+ * for, off the grid, so it adds nothing once that tick's first try left its
+ * stamp: the last stamp is then within one interval. Past that, the first try left none (it failed
+ * before recording, or never arrived), the retry is the only word of that
+ * tick, and it goes down at the time on the grid it was due, so neither a
+ * lost stamp nor a late one bends the grid. The interval is judged the way
+ * the pulse judges it.
+ */
+export function retryTickAt(lastTickAt: string | null, prevTickAt: string | null, now: Date): Date | null {
+  if (!lastTickAt) return now
+  const last = new Date(lastTickAt).getTime()
+  const every = Math.max(ASSUMED_TICK_MINUTES, tickCadence(lastTickAt, prevTickAt)?.everyMinutes ?? 0) * MINUTE
+  const missed = Math.floor((now.getTime() - last) / every)
+  return missed >= 1 ? new Date(last + missed * every) : null
+}
+
 export type SchedulerPulse = {
   lastTick: string | null
   minutesAgo: number | null

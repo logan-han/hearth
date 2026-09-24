@@ -93,7 +93,9 @@ export function automationTools(ctx: ToolContext) {
       inputSchema: z.object({ id: z.number().int() }),
       execute: async ({ id }) => {
         const existing = await getAutomation(id)
-        if (!existing) return { error: `No automation ${id}.` }
+        // Only this chat's, the ones list_automations shows: another chat's is
+        // someone else's to manage, there or from the admin pages.
+        if (existing?.chatId !== ctx.chatId) return { error: `No automation ${id} in this chat.` }
         // Built in means the tick would only put it back; a pause is the off switch.
         if (isBuiltinKind(existing.kind)) {
           return { error: `"${existing.label}" is built in and cannot be deleted. Pause it with pause_automation if it is not wanted.` }
@@ -107,7 +109,7 @@ export function automationTools(ctx: ToolContext) {
       inputSchema: z.object({ id: z.number().int(), enabled: z.boolean() }),
       execute: async ({ id, enabled }) => {
         const existing = await getAutomation(id)
-        if (!existing) return { error: `No automation ${id}.` }
+        if (existing?.chatId !== ctx.chatId) return { error: `No automation ${id} in this chat.` }
         // A paused automation's next_run_at goes stale, so recompute on resume.
         const next = enabled ? nextRun(existing.cronExpr) : null
         const row = await setAutomationEnabled(id, enabled, next ?? undefined)

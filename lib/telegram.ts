@@ -1,4 +1,4 @@
-import { Bot } from 'grammy'
+import { Bot, GrammyError } from 'grammy'
 import { required } from './env'
 import { toTelegramHtml } from './telegram-format'
 import { describeError } from './errors'
@@ -37,24 +37,52 @@ export function chunk(text: string, max = MAX_LEN): string[] {
 }
 
 /**
+ * A send that failed after its first part had reached the chat. Sending the
+ * whole text again would post those parts twice, so the error carries what
+ * got through, for whoever would try again to count as said.
+ */
+export class PartlySent extends Error {
+  constructor(
+    readonly sent: string,
+    readonly failure: unknown,
+  ) {
+    super(`Only part of the message was sent: ${describeError(failure)}`)
+    this.name = 'PartlySent'
+  }
+}
+
+/**
  * Send a possibly-long reply, chunked. Each part is converted from the
  * model's Markdown to Telegram HTML; a part Telegram still rejects goes out
  * as plain text rather than not at all. Chunks stop short of the 4096 cap so
- * the HTML tags have room.
+ * the HTML tags have room. A part that fails after the first throws
+ * PartlySent.
  */
 export async function send(chatId: string | number, text: string, replyTo?: number): Promise<void> {
-  const b = bot()
   const parts = chunk(text, 3800)
   for (const [i, part] of parts.entries()) {
-    const opts = i === 0 && replyTo ? { reply_parameters: { message_id: replyTo } } : {}
     try {
-      await b.api.sendMessage(chatId, toTelegramHtml(part), { parse_mode: 'HTML', ...opts })
+      await sendPart(chatId, part, i === 0 && replyTo ? { reply_parameters: { message_id: replyTo } } : {})
     } catch (err) {
-      // Said in the logs, or a reply that reaches the chat with its asterisks
-      // showing looks like a formatting choice rather than a rejected message.
-      console.warn('[telegram] HTML rejected, sent as plain text:', describeError(err))
-      await b.api.sendMessage(chatId, part, opts)
+      throw i === 0 ? err : new PartlySent(parts.slice(0, i).join('\n\n'), err)
     }
+  }
+}
+
+/** One part, as HTML, or as plain text when Telegram turns the HTML down. */
+async function sendPart(chatId: string | number, part: string, opts: { reply_parameters?: { message_id: number } }): Promise<void> {
+  const b = bot()
+  try {
+    await b.api.sendMessage(chatId, toTelegramHtml(part), { parse_mode: 'HTML', ...opts })
+  } catch (err) {
+    // Only a request Telegram turned down as it stands is safe to send again.
+    // A timeout, a lost response or a 5xx may have posted it already, and the
+    // plain copy would be a second one.
+    if (!(err instanceof GrammyError) || err.error_code !== 400) throw err
+    // Said in the logs, or a reply that reaches the chat with its asterisks
+    // showing looks like a formatting choice rather than a rejected message.
+    console.warn('[telegram] HTML rejected, sent as plain text:', describeError(err))
+    await b.api.sendMessage(chatId, part, opts)
   }
 }
 

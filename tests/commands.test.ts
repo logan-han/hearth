@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
+import { HttpError } from 'grammy'
 
 const { send, typing, runAgent, sendMessage, sendChatAction, getFile, getChatMember, me } = vi.hoisted(() => ({
   send: vi.fn(async (_chatId: string | number, _text: string, _replyTo?: number) => {}),
@@ -21,7 +22,10 @@ vi.mock('@/lib/telegram', async (orig) => ({
   send, typing,
   bot: () => ({ api: { getMe: async () => me.value, sendMessage, sendChatAction, getFile, getChatMember } }),
 }))
-vi.mock('@/lib/agent', () => ({ runAgent, shouldChimeIn: vi.fn(async () => false) }))
+vi.mock('@/lib/agent', async (orig) => ({
+  runAgent, shouldChimeIn: vi.fn(async () => false),
+  unconfirmedLine: (await orig<typeof import('@/lib/agent')>()).unconfirmedLine,
+}))
 vi.mock('@vercel/functions', () => ({ waitUntil: (p: Promise<unknown>) => p }))
 
 const { processUpdate } = await import('@/lib/handler')
@@ -733,6 +737,33 @@ describe('what a reply reports as new', () => {
     send.mockRejectedValueOnce(new Error('Telegram is down'))
     await processUpdate(dm('any new mail?'))
     expect(await q.getSetting('mail_cursor:111:1:google')).toBeNull()
+    expect(lastSent()).toBe('Telegram did not confirm my reply, so some or all of it may be missing. Ask again if you did not see it.')
+  })
+})
+
+describe('a reply Telegram did not confirm', () => {
+  it('says what the turn did stands, rather than that it went wrong', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    runAgent.mockResolvedValueOnce({ text: 'Added milk to Shopping.', notices: [], model: 'g', wrote: ['add_to_list'] } as never)
+    // A stale keep-alive socket: the request may or may not have reached Telegram.
+    send.mockRejectedValueOnce(new HttpError("Network request for 'sendMessage' failed!", new Error('socket hang up')))
+    await processUpdate(group('@heart_family_bot add milk to the shopping list'))
+    expect(lastSent()).not.toContain('went wrong')
+    expect(lastSent()).toContain('What I did stands: added to a list')
+    // The next turn sees it too, so a second "add milk" is not simply done again.
+    const history = await q.recentMessages('-100')
+    expect(history.at(-1)).toMatchObject({ role: 'assistant', content: lastSent() })
+    expect(history.some((m) => m.content === 'Added milk to Shopping.')).toBe(false)
+  })
+
+  it('still ends quietly when the chat will not take the notice either', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    runAgent.mockResolvedValueOnce({ text: 'Added milk to Shopping.', notices: [], model: 'g', wrote: ['add_to_list'] } as never)
+    // The reply, then the notice.
+    send.mockRejectedValueOnce(new Error('Telegram is down')).mockRejectedValueOnce(new Error('Telegram is down'))
+    await expect(processUpdate(group('@heart_family_bot add milk to the shopping list'))).resolves.toBeUndefined()
+    expect(send.mock.calls.map(([, text]) => text).some((t) => t.includes('went wrong'))).toBe(false)
+    expect(error).toHaveBeenCalledWith('[telegram] could not say the reply was not confirmed:', expect.any(Error))
   })
 })
 

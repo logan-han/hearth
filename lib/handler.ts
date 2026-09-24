@@ -1,7 +1,7 @@
 import type { Update, Message } from 'grammy/types'
 import { waitUntil } from '@vercel/functions'
 import { send, typing, bot, downloadFile, mediaTypeFor, type Attachment } from './telegram'
-import { runAgent, shouldChimeIn } from './agent'
+import { runAgent, shouldChimeIn, unconfirmedLine } from './agent'
 import { idSet, appUrl, ambientMode } from './env'
 import {
   upsertMember,
@@ -764,7 +764,17 @@ export async function processUpdate(update: Update): Promise<void> {
       .join('\n\n')
       .trim()
 
-    if (reply) await send(c.chatId, reply, c.chatType === 'private' ? undefined : c.messageId)
+    if (reply) {
+      try {
+        await send(c.chatId, reply, c.chatType === 'private' ? undefined : c.messageId)
+      } catch (err) {
+        // The turn itself worked, and whatever it wrote stands, so this is not
+        // "that went wrong", which would be asked again and done twice.
+        console.error('[telegram] reply not confirmed:', err)
+        await sayUnconfirmed(c.chatId, result.wrote)
+        return
+      }
+    }
     // What the reply reported as new is now seen; a send that failed leaves it new.
     await commitCursors(result.cursors)
     if (reply) await recordMessage({ chatId: c.chatId, role: 'assistant', content: reply, model: result.model })
@@ -774,6 +784,21 @@ export async function processUpdate(update: Update): Promise<void> {
   } finally {
     await endTurn(c.chatId, turn)
     await housekeeping(c.chatId)
+  }
+}
+
+/**
+ * Tell the chat a finished turn's reply may be missing, and keep that in the
+ * history, where the next turn sees what was done before doing it again. When
+ * this fails too, only the log has it.
+ */
+async function sayUnconfirmed(chatId: string, wrote: readonly string[] | undefined): Promise<void> {
+  const line = unconfirmedLine(wrote)
+  try {
+    await send(chatId, line)
+    await recordMessage({ chatId, role: 'assistant', content: line })
+  } catch (err) {
+    console.error('[telegram] could not say the reply was not confirmed:', err)
   }
 }
 

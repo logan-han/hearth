@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  schedulerPulse, tickCadence, onGrid, nextTickOnOrAfter, fitsGrid, suggestAligned, describeGrid, type TickGrid,
+  schedulerPulse, tickCadence, retryTickAt, onGrid, nextTickOnOrAfter, fitsGrid, suggestAligned, describeGrid, type TickGrid,
 } from '@/lib/scheduler'
 
 const TZ = 'Australia/Melbourne'
@@ -77,6 +77,35 @@ describe('the tick grid', () => {
 
   it('has nothing left to suggest once the only candidate already matches the input', () => {
     expect(suggestAligned(quarterly, '0,15,30,45 * * * *', now, TZ)).toBeNull()
+  })
+})
+
+describe('a QStash retry', () => {
+  const at = (iso: string) => new Date(iso)
+
+  it('adds nothing once the tick it retries is on record', () => {
+    // Stamped at 01:00:05; retried twelve seconds, two and a half minutes and half an hour on.
+    for (const retry of ['2026-09-14T01:00:17Z', '2026-09-14T01:02:45Z', '2026-09-14T01:32:53Z']) {
+      expect(retryTickAt('2026-09-14T01:00:05Z', '2026-09-14T00:00:05Z', at(retry))).toBeNull()
+    }
+  })
+
+  it('stands in for a tick that left no stamp, at the time it was due', () => {
+    // The 01:00:05 tick failed before it was recorded; whichever retry gets
+    // through, the grid stays hourly on the hour.
+    for (const retry of ['2026-09-14T01:00:17Z', '2026-09-14T01:02:45Z', '2026-09-14T01:32:53Z']) {
+      const stamp = retryTickAt('2026-09-14T00:00:05Z', '2026-09-13T23:00:05Z', at(retry))
+      expect(stamp).toEqual(at('2026-09-14T01:00:05Z'))
+      expect(tickCadence(stamp!.toISOString(), '2026-09-14T00:00:05Z')).toEqual({ everyMinutes: 60, anchor: stamp })
+    }
+    // A tick missed outright before it: the retry still lands on the grid.
+    expect(retryTickAt('2026-09-13T23:00:05Z', '2026-09-13T22:00:05Z', at('2026-09-14T01:00:17Z'))).toEqual(at('2026-09-14T01:00:05Z'))
+  })
+
+  it('judges by five minutes until a second tick shows the cadence', () => {
+    expect(retryTickAt(null, null, at('2026-09-14T01:00:17Z'))).toEqual(at('2026-09-14T01:00:17Z'))
+    expect(retryTickAt('2026-09-14T01:00:05Z', null, at('2026-09-14T01:02:45Z'))).toBeNull()
+    expect(retryTickAt('2026-09-14T00:00:05Z', null, at('2026-09-14T01:00:17Z'))).toEqual(at('2026-09-14T01:00:05Z'))
   })
 })
 

@@ -194,9 +194,11 @@ AADSTS code.
   about 16 CU-hours a month, every 15 minutes about 60. A reminder due
   between ticks runs at the next one, so schedules belong on the hour, as the
   built-in watchers are. The bot holds itself to this: it learns the tick
-  grid from QStash's own calls, `create_automation` refuses a cron that
-  would not land on a tick and offers the nearest that does, and Home marks
-  any reminder already off the grid with the tick it will really run at.
+  grid from QStash's own calls (a retry of a failed one lands off the grid,
+  so it counts only for a tick that left no record, and then at the time
+  that tick was due), `create_automation` refuses a cron that would not land
+  on a tick and offers the nearest that does, and Home marks any reminder
+  already off the grid with the tick it will really run at.
   (Vercel Hobby cron is once-a-day minimum, which cannot drive reminders.)
 - **Tavily** — API key, 1k credits/month free.
 - **OpenWeatherMap** — optional; a free key from
@@ -582,10 +584,12 @@ post that fails, one the hourly cap holds back, a run that reports a PROBLEM,
 a reply Telegram refuses or a model that gives out leaves it where it was, so
 the next run reports the same transactions (and the same mail) rather than
 skipping them unseen, short of runs stuck on the same ones for half a day
-(see Keeping watch). A chat Telegram refuses outright (the bot removed,
-blocked or muted in the group) pauses its automation rather than failing every
-hour. The first run looks back only 24 hours, so switching it on does not
-dump months of history into the chat.
+(see Keeping watch). A post long enough to go in parts that fails after the
+first counts as posted, since posting it again would repeat what the chat
+already has, and an admin is told the rest did not go. A chat Telegram
+refuses outright (the bot removed, blocked or muted in the group) pauses its
+automation rather than failing every hour. The first run looks back only 24
+hours, so switching it on does not dump months of history into the chat.
 
 Ask for it once and it keeps happening:
 
@@ -698,9 +702,9 @@ actually answered (the head answering nearly everything is the healthy shape),
 every reminder with its schedule, and any chat currently muted by an
 unrecognised person. Two diagnostics sit beside those. **Last tick** is when
 QStash last called the scheduler, with the cadence read off its last two
-calls, and flagged once three of those intervals have passed without one,
-because a scheduler that has gone quiet otherwise shows up only as reminders
-not arriving. **Chain health** is every model call of the last
+calls (retries aside), and flagged once three of those intervals have passed
+without one, because a scheduler that has gone quiet otherwise shows up only
+as reminders not arriving. **Chain health** is every model call of the last
 seven days, per slot: how many it answered and how quickly, how many times it
 was skipped for the next slot and why (rate limited, timed out, no reply,
 provider error), and how many chat replies were sent back for reporting a

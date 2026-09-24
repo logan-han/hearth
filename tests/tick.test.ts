@@ -79,7 +79,7 @@ vi.mock('@/lib/db/queries', () => ({
 vi.mock('@/lib/builtins', () => ({ installBuiltins }))
 vi.mock('@/lib/agent', () => ({ runAgent, decideWatcherPost, reviewDraft, looksBefore }))
 vi.mock('@/lib/tools', () => ({ buildTools }))
-vi.mock('@/lib/telegram', () => ({ send }))
+vi.mock('@/lib/telegram', async (importOriginal) => ({ send, PartlySent: (await importOriginal<typeof import('@/lib/telegram')>()).PartlySent }))
 vi.mock('@upstash/qstash', () => ({ Receiver: class { verify = verify } }))
 vi.mock('@/lib/db', () => ({
   db: () => ({
@@ -90,6 +90,7 @@ vi.mock('@/lib/db', () => ({
 }))
 
 const { POST, GET } = await import('@/app/api/tick/route')
+const { PartlySent } = await import('@/lib/telegram')
 const { GrammyError, HttpError } = await import('grammy')
 const { APICallError, RetryError } = await import('ai')
 
@@ -190,6 +191,40 @@ describe('POST /api/tick authorisation', () => {
     expect(console.error).toHaveBeenCalledWith('[tick] could not record the tick:', expect.any(Error))
   })
 
+  /** Hourly stamps, the last one `ago` before now. */
+  function stamped(ago: number) {
+    const last = Date.now() - ago
+    getSetting.mockImplementation(async (key: string) => {
+      if (key === 'last_tick_at') return new Date(last).toISOString()
+      if (key === 'prev_tick_at') return new Date(last - 3_600_000).toISOString()
+      return key === 'memory_sweep_day' ? today() : null
+    })
+    return last
+  }
+
+  it('records nothing for a QStash retry of a tick already on record, and still runs it', async () => {
+    process.env.QSTASH_CURRENT_SIGNING_KEY = 'sig_current'
+    verify.mockResolvedValue(true)
+    stamped(12_000)
+    expect((await tick({ 'upstash-signature': 'v1=abc', 'upstash-retried': '1' })).status).toBe(200)
+    expect(recordTick).not.toHaveBeenCalled()
+    expect(dueAutomations).toHaveBeenCalled()
+    // The first attempt says it is one, and is the pulse.
+    await tick({ 'upstash-signature': 'v1=abc', 'upstash-retried': '0' })
+    expect(recordTick).toHaveBeenCalledTimes(1)
+  })
+
+  it('records a retry whose first try left no stamp, at the time that tick was due', async () => {
+    process.env.QSTASH_CURRENT_SIGNING_KEY = 'sig_current'
+    verify.mockResolvedValue(true)
+    // The last stamp is an hour and twelve seconds old: the tick due twelve
+    // seconds ago failed before it was recorded, and this is its retry.
+    const last = stamped(3_612_000)
+    await tick({ 'upstash-signature': 'v1=abc', 'upstash-retried': '1' })
+    expect(recordTick).toHaveBeenCalledTimes(1)
+    expect(recordTick.mock.calls[0][0].getTime()).toBe(last + 3_600_000)
+  })
+
   it('records nothing for a tick it refuses', async () => {
     expect((await tick()).status).toBe(401)
     expect(recordTick).not.toHaveBeenCalled()
@@ -271,6 +306,23 @@ describe('running due automations', () => {
     expect(asOf.getTime()).toBeGreaterThan(Date.now() - 60_000)
     expect(asOf.getTime()).toBeLessThanOrEqual(Date.now())
     expect(next!.getTime()).toBeGreaterThan(Date.now())
+  })
+
+  it('starts no run late in the tick, leaving the rest unclaimed for the next one', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      dueAutomations.mockResolvedValue([automation({ id: 1 }), automation({ id: 2 }), automation({ id: 3 })])
+      // The first run is a slow one: past the point where another may start.
+      runAgent.mockImplementationOnce(async () => {
+        vi.setSystemTime(Date.now() + 200_000)
+        return { text: 'Bins out tonight.', notices: [], model: 'primary:test' }
+      })
+      await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
+      expect(claimAutomation).toHaveBeenCalledTimes(1)
+      expect(console.warn).toHaveBeenCalledWith('[tick] out of time: 2 due automation(s) left for the next tick')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('skips an automation another tick already claimed', async () => {
@@ -928,6 +980,23 @@ describe('ready-made watchers', () => {
     await authed()
     expect(send.mock.calls[0][0]).toBe('-100999')
     expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+  })
+
+  it('spends it when only the start of a long post went, since the next run would post that again', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    stagingMail()
+    newMail.mockResolvedValue(mailWaiting)
+    runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.\n\n**Heads-up**\n- Footy moved to 5pm.', notices: [], model: 'primary:test' })
+    send.mockRejectedValueOnce(new PartlySent('**To do**\n- School: permission slip due Friday.', new Error('socket hang up')))
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
+    expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.stringContaining('m1'))
+    expect(setSetting).toHaveBeenCalledWith('proactive_posts:-100999', expect.any(String))
+    // History holds what the chat has, not what it was meant to get.
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ content: '**To do**\n- School: permission slip due Friday.' }))
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('**Morning brief** was cut off'))
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('socket hang up'))
+    expect(send).not.toHaveBeenCalledWith('900', expect.stringContaining('failed:'))
+    expect(send.mock.calls.filter(([to]) => to === '-100999')).toHaveLength(1)
   })
 
   it('spends it before the bookkeeping after the post, so a failed write there cannot bring the post round again', async () => {

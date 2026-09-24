@@ -8,6 +8,7 @@ import {
   unaskedQuestions, markQuestionsAsked, memberByTelegramId, setAutomationEnabled,
 } from '@/lib/db/queries'
 import { localDateKey, tzOffsetMs, nextRun, formatLocal } from '@/lib/cron'
+import { retryTickAt } from '@/lib/scheduler'
 import { timezone, idSet } from '@/lib/env'
 import { db, schema } from '@/lib/db'
 import { eq } from 'drizzle-orm'
@@ -18,7 +19,7 @@ import { WATCHERS, isWatcherKind, isGroupChat, watcherInstruction, type WatcherK
 import { installBuiltins } from '@/lib/builtins'
 import { unaccountedIn } from '@/lib/headcount'
 import { commitCursors, type StagedCursor } from '@/lib/tools/cursor'
-import { send } from '@/lib/telegram'
+import { send, PartlySent } from '@/lib/telegram'
 import { hydrateSecrets, recheckSecrets } from '@/lib/settings'
 import { flushTelemetry } from '@/lib/telemetry'
 import { pruneModelEvents } from '@/lib/model-events'
@@ -456,10 +457,11 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
  * admin. `spent` marks what the run read as seen, and is called only once that
  * has reached the chat, or was deliberately kept from it: a plain SKIP, or a
  * draft the checks held back (an admin has it). A PROBLEM, a post the hourly
- * cap held back, or a send that fails leaves it new for the next run, with one
- * exception: a run that wrote something unrepeatable on the strength of it (a
- * list item, a reminder) spends it whatever else happened, or the next run
- * would write it again. Says which it was.
+ * cap held back, or a send that fails before any of it is in the chat leaves
+ * it new for the next run, with one exception: a run that wrote something
+ * unrepeatable on the strength of it (a list item, a reminder) spends it
+ * whatever else happened, or the next run would write it again. Says which it
+ * was.
  */
 async function deliver(
   a: Automation,
@@ -540,16 +542,32 @@ async function deliver(
     return 'capped'
   }
 
-  await send(a.chatId, message)
+  let posted = message
+  let broken: PartlySent | null = null
+  try {
+    await send(a.chatId, message)
+  } catch (err) {
+    // The start is in the chat, and the next run would post it all again:
+    // spent like a whole post, with what went on record and an admin told.
+    if (!(err instanceof PartlySent)) throw err
+    posted = err.sent
+    broken = err
+  }
   // Spent the moment it is posted, before the bookkeeping below can fail and bring it round again.
   await spent()
   await setSetting(capKey, JSON.stringify(recordPost(log, now)))
   await db().insert(schema.messages).values({
     chatId: a.chatId,
     role: 'assistant',
-    content: message,
+    content: posted,
     model: result.model,
   })
+  if (broken) {
+    await tellAdminQuietly(
+      member,
+      `Watcher **${a.label}** was cut off: its post was long enough to go in parts, and a later part failed (${describeError(broken.failure)}), so only the start of it reached the chat.`,
+    )
+  }
   if (result.cutShort) {
     await tellAdminQuietly(
       member,
@@ -712,13 +730,25 @@ async function heldForHeadcount(a: Automation): Promise<boolean> {
   return true
 }
 
+/**
+ * Vercel ends the tick at maxDuration, and a run cut off there is lost: it
+ * was claimed, so it is not due again until its next time. No run starts this
+ * far into the loop, which leaves the last one started room to finish, and
+ * whatever is still due unclaimed and first in line at the next tick.
+ */
+const START_RUNS_WITHIN_MS = 200_000
+
 async function runDue(): Promise<{ ran: number; skipped: number }> {
   const now = new Date()
   const due = await dueAutomations(now)
   let ran = 0
   let skipped = 0
 
-  for (const a of due) {
+  for (const [i, a] of due.entries()) {
+    if (Date.now() - now.getTime() >= START_RUNS_WITHIN_MS) {
+      console.warn(`[tick] out of time: ${due.length - i} due automation(s) left for the next tick`)
+      break
+    }
     // Claim before running: an overlapping tick then finds nothing to do.
     const following = nextRun(a.cronExpr, new Date(now.getTime() + 1000))
     if (!(await claimAutomation(a.id, now, following))) {
@@ -819,10 +849,19 @@ export async function POST(req: Request) {
   // failure mode that otherwise presents as reminders silently not firing.
   // Only the scheduler's own calls count: the gap between its last two is the
   // grid every automation's timing is judged against, and a manual poke
-  // would put a phantom tick on it.
+  // would put a phantom tick on it. So would QStash trying a failed tick
+  // again, seconds or minutes after the time it was due, unless the first try
+  // left no stamp: then the retry is all there is of that tick, and it goes
+  // down at the time it was due, or the grid would read a missed interval.
+  const retried = Number(req.headers.get('upstash-retried')) > 0
   if (via === 'scheduler') {
     try {
-      await recordTick(new Date())
+      let at: Date | null = new Date()
+      if (retried) {
+        const [last, prev] = await Promise.all([getSetting('last_tick_at'), getSetting('prev_tick_at')])
+        at = retryTickAt(last, prev, at)
+      }
+      if (at) await recordTick(at)
     } catch (err) {
       console.error('[tick] could not record the tick:', err)
     }

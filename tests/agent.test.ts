@@ -18,7 +18,7 @@ vi.mock('@typesafe-ai/sdk', async (orig) => {
   return { ...actual, TypeSafeClient }
 })
 
-const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, isStructuredOutputError } = await import('@/lib/agent')
+const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, isStructuredOutputError, unconfirmedLine } = await import('@/lib/agent')
 const { generateText: sdkGenerateText } = await vi.importActual<typeof import('ai')>('ai')
 const { MockLanguageModelV4 } = await import('ai/test')
 
@@ -1251,6 +1251,17 @@ describe('collectEvidence', () => {
   it('passes over a step that called no tools', () => {
     const steps = [{}, { toolResults: [{ toolName: 'list_email', input: { limit: 1 }, output: [] }] }]
     expect(collectEvidence(steps)).toBe('list_email({"limit":1}) -> []')
+  })
+})
+
+describe('unconfirmedLine', () => {
+  it('names what a finished turn did, and without a name still warns against doing it again', () => {
+    expect(unconfirmedLine(undefined)).toMatch(/Ask again if you did not see it\.$/)
+    expect(unconfirmedLine(['add_to_list', 'add_to_list', 'create_automation'])).toContain(
+      'What I did stands: added to a list, set up a reminder, so ask again only for anything else you wanted.',
+    )
+    // A new ticket has no words of its own here: it announces itself, in the reply that may be missing.
+    expect(unconfirmedLine(['jira_create_issue'])).toMatch(/What I did stands, so check what changed before asking again\.$/)
   })
 })
 
