@@ -1,3 +1,5 @@
+import { deadline } from '../deadline'
+
 /**
  * Up Bank (https://developer.up.com.au). One household token, not per member:
  * the API is read-only, so the worst it can do is tell you what you spent.
@@ -54,7 +56,7 @@ async function api<T>(path: string, params: Record<string, string> = {}): Promis
   const url = path.startsWith('http') ? new URL(path) : new URL(`${BASE}${path}`)
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v)
 
-  const res = await fetch(url, { headers: { authorization: `Bearer ${token}` } })
+  const res = await fetch(url, { headers: { authorization: `Bearer ${token}` }, signal: deadline() })
   if (!res.ok) {
     const body = await res.text()
     throw new Error(`Up API ${res.status} on ${url.pathname}: ${body.slice(0, 200)}`)

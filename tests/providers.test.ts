@@ -8,6 +8,7 @@ vi.mock('@/lib/providers/token', async (orig) => ({
 
 const { googleClient } = await import('@/lib/providers/google')
 const { microsoftClient } = await import('@/lib/providers/microsoft')
+const { MAX_EVENTS } = await import('@/lib/providers/types')
 
 const fetchMock = vi.fn()
 const b64url = (s: string) => Buffer.from(s, 'utf8').toString('base64url')
@@ -231,6 +232,16 @@ describe('google mail', () => {
     expect(decoded.split('\r\n\r\n')[1].trim()).toBe(Buffer.from('Body').toString('base64'))
   })
 
+  it('keeps each recipient header to its one line, so a line break in an address cannot add a Bcc', async () => {
+    fetchMock.mockResolvedValueOnce(reply({}))
+    await googleClient(1).sendMail({ to: ['bob@school.edu\r\nBcc: eve@evil.test'], cc: ['c@d.com\nBcc: x@evil.test'], subject: 's', body: 'b' })
+    const decoded = Buffer.from(JSON.parse(String(lastCall()[1].body)).raw, 'base64url').toString('utf8')
+    const headers = decoded.split('\r\n\r\n')[0].split('\r\n')
+    expect(headers.filter((h) => /^bcc:/i.test(h))).toEqual([])
+    expect(headers).toContain('To: bob@school.edu Bcc: eve@evil.test')
+    expect(headers).toContain('Cc: c@d.com Bcc: x@evil.test')
+  })
+
   it('encodes a non-ASCII subject as an RFC 2047 word', async () => {
     fetchMock.mockResolvedValueOnce(reply({}))
     await googleClient(1).sendMail({ to: ['a@b.com'], subject: 'Café ☕', body: 'x' })
@@ -285,7 +296,7 @@ describe('google mail', () => {
     fetchMock.mockResolvedValueOnce({ ok: true, status: 204, json: async () => { throw new Error('no body') }, text: async () => '' })
     expect(await googleClient(1).sendMail({ to: ['a@b.com'], subject: 's', body: 'b' })).toEqual({ ok: true })
     fetchMock.mockResolvedValueOnce(reply({}))
-    expect(await googleClient(1).listEvents(new Date(), new Date())).toEqual([])
+    expect(await googleClient(1).listEvents(new Date(), new Date())).toEqual({ events: [], more: false })
   })
 })
 
@@ -308,9 +319,33 @@ describe('google calendar', () => {
         ],
       }),
     )
-    const events = await googleClient(1).listEvents(new Date(), new Date())
+    const { events } = await googleClient(1).listEvents(new Date(), new Date())
     expect(events[0]).toMatchObject({ title: 'Timed', allDay: false })
     expect(events[1]).toMatchObject({ title: '(untitled)', allDay: true, start: '2026-09-02' })
+  })
+
+  it('follows the page token past a short page, reading to one past the most it lists', async () => {
+    const events = (n: number, from = 0) => Array.from({ length: n }, (_, i) => ({ id: `e${from + i}`, start: { dateTime: '2026-09-01T09:00:00Z' } }))
+    fetchMock
+      .mockResolvedValueOnce(reply({ items: events(3), nextPageToken: 'p2' }))
+      .mockResolvedValueOnce(reply({ items: events(2, 3) }))
+    const short = await googleClient(1).listEvents(new Date(), new Date())
+    expect(short.events.map((e) => e.id)).toEqual(['e0', 'e1', 'e2', 'e3', 'e4'])
+    expect(short.more).toBe(false)
+    expect(new URL(lastCall(0)[0]).searchParams.get('maxResults')).toBe(String(MAX_EVENTS + 1))
+    expect(new URL(lastCall(1)[0]).searchParams.get('pageToken')).toBe('p2')
+
+    // Exactly the most it lists, and a token onto an empty page: not more.
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValueOnce(reply({ items: events(MAX_EVENTS), nextPageToken: 'p2' })).mockResolvedValueOnce(reply({ items: [] }))
+    expect((await googleClient(1).listEvents(new Date(), new Date())).more).toBe(false)
+
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValueOnce(reply({ items: events(MAX_EVENTS + 1), nextPageToken: 'p2' }))
+    const long = await googleClient(1).listEvents(new Date(), new Date())
+    expect(long.events).toHaveLength(MAX_EVENTS)
+    expect(long.more).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('sends an all-day event as the household\'s dates, not the UTC dates of its midnights', async () => {
@@ -460,14 +495,35 @@ describe('microsoft graph', () => {
     fetchMock.mockResolvedValueOnce(
       reply({ value: [{ id: 'e', subject: 'X', start: { dateTime: '2026-09-01T09:00:00.0000000' }, end: { dateTime: '2026-09-01T10:00:00.0000000' } }] }),
     )
-    const events = await microsoftClient(1).listEvents(new Date('2026-09-01T00:00:00Z'), new Date('2026-09-02T00:00:00Z'))
+    const { events } = await microsoftClient(1).listEvents(new Date('2026-09-01T00:00:00Z'), new Date('2026-09-02T00:00:00Z'))
     expect((lastCall()[1].headers as Record<string, string>).Prefer).toContain('UTC')
     expect(events[0].start).toBe('2026-09-01T09:00:00.0000000Z')
   })
 
+  it('follows the next link with the time zone pinned on every page, and says when the range holds more', async () => {
+    const events = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `e${i}`, start: { dateTime: '2026-09-01T09:00:00' } }))
+    const next = 'https://graph.microsoft.com/v1.0/me/calendarView?$skip=50'
+    fetchMock
+      .mockResolvedValueOnce(reply({ value: events(50), '@odata.nextLink': next }))
+      .mockResolvedValueOnce(reply({ value: events(30) }))
+    const month = await microsoftClient(1).listEvents(new Date(), new Date())
+    expect(month).toMatchObject({ more: false })
+    expect(month.events).toHaveLength(80)
+    expect(lastCall(1)[0]).toBe(next)
+    expect((lastCall(1)[1].headers as Record<string, string>).Prefer).toContain('UTC')
+
+    fetchMock.mockReset()
+    fetchMock.mockImplementation(async () => reply({ value: events(50), '@odata.nextLink': next }))
+    const busy = await microsoftClient(1).listEvents(new Date(), new Date())
+    expect(busy.events).toHaveLength(MAX_EVENTS)
+    expect(busy.more).toBe(true)
+    // Pages of 50 until one past the most it lists, and no further.
+    expect(fetchMock).toHaveBeenCalledTimes(Math.floor(MAX_EVENTS / 50) + 1)
+  })
+
   it('leaves an already-offset time untouched', async () => {
     fetchMock.mockResolvedValueOnce(reply({ value: [{ id: 'e', start: { dateTime: '2026-09-01T09:00:00+10:00' }, end: {} }] }))
-    const events = await microsoftClient(1).listEvents(new Date(), new Date())
+    const { events } = await microsoftClient(1).listEvents(new Date(), new Date())
     expect(events[0].start).toBe('2026-09-01T09:00:00+10:00')
   })
 
@@ -508,7 +564,7 @@ describe('microsoft graph', () => {
     fetchMock.mockResolvedValueOnce(reply({}))
     expect(await microsoftClient(1).listMail({})).toEqual([])
     fetchMock.mockResolvedValueOnce(reply({}))
-    expect(await microsoftClient(1).listEvents(new Date(), new Date())).toEqual([])
+    expect(await microsoftClient(1).listEvents(new Date(), new Date())).toEqual({ events: [], more: false })
   })
 
   it('sends no cc recipients when there is no cc', async () => {

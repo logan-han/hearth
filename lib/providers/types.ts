@@ -32,6 +32,13 @@ export type CalendarEvent = {
   organizer?: string
 }
 
+/**
+ * The most events one listing returns: a busy working month, with room to spare.
+ * A longer range is cut there and says so, rather than ending at whatever one
+ * page of the provider's happened to hold and reading as free time after it.
+ */
+export const MAX_EVENTS = 100
+
 export type DraftMail = {
   to: string[]
   cc?: string[]
@@ -57,7 +64,8 @@ export interface AccountClient {
    */
   readAttachment(messageId: string, filename: string): Promise<MailFile>
   sendMail(draft: DraftMail): Promise<{ ok: true }>
-  listEvents(from: Date, to: Date): Promise<CalendarEvent[]>
+  /** Soonest first, at most MAX_EVENTS; `more` when the range holds others after them. */
+  listEvents(from: Date, to: Date): Promise<{ events: CalendarEvent[]; more: boolean }>
   createEvent(input: {
     title: string
     start: Date

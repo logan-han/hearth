@@ -12,8 +12,16 @@ import { requireMember } from './context'
 import { providerConfig, type Provider } from '../oauth/providers'
 import { describeError } from '../errors'
 import { timezone } from '../env'
+import { UnconfirmedError } from '../deadline'
 
 const providerEnum = z.enum(['google', 'microsoft'])
+
+/**
+ * A recipient as both providers take one: a bare address. A line break could
+ * start a header of its own in the message Gmail is sent (a hidden Bcc, say),
+ * a comma would split the stored list, and Graph wants the address alone.
+ */
+const ADDRESS = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/
 
 /** A mailbox as the family names it, owner first. The provider is an id for read_email, not a name. */
 const mailboxName = (owner: string, provider: Provider) => `${owner}'s ${providerConfig(provider).mailbox}`
@@ -231,6 +239,10 @@ export function mailTools(ctx: ToolContext) {
       }),
       execute: async ({ to, cc, subject, body, provider }) => {
         const member = requireMember(ctx)
+        const notAddress = [...to, ...(cc ?? [])].find((a) => !ADDRESS.test(a.trim()))
+        if (notAddress !== undefined) {
+          return { error: `"${notAddress}" is not an email address. Give each recipient as a bare address, like name@example.com.` }
+        }
         const linked = await linkedProviders(member.id)
         if (linked.length === 0) return { error: 'No email account linked. Send /connect to link one.' }
         const from = provider && linked.includes(provider) ? provider : linked[0]
@@ -317,6 +329,17 @@ export function mailTools(ctx: ToolContext) {
           })
           return { sent: true, to: draft.recipients, subject: draft.subject }
         } catch (e) {
+          // A send that ran out of time may have gone all the same, and a
+          // draft handed back could then go twice. It stays claimed. A timeout
+          // before it, on the token, is a send never made, and goes back below.
+          if (e instanceof UnconfirmedError) {
+            return {
+              error:
+                'The send took too long to be confirmed, so it may or may not have gone. ' +
+                'Check the Sent folder before drafting it again.',
+              maybe_done: true,
+            }
+          }
           // Hand the draft back so the member can retry rather than lose it.
           await markDraft(draft_id, 'pending', 'sent')
           return { error: describe(e) }

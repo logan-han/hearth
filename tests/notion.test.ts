@@ -275,6 +275,13 @@ describe('notion_append_to_page', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('says an append that ran out of time may have gone through, so it is checked rather than added twice', async () => {
+    fetchMock.mockRejectedValue(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+    const r = await call('notion_append_to_page', { id: 'p1', text: 'milk' })
+    expect(String(r.error)).toContain('may or may not have gone through')
+    expect(r.maybe_done).toBe(true)
+  })
+
   it('is additive only: it never issues a delete or a page update', async () => {
     fetchMock.mockResolvedValue(json({}))
     await call('notion_append_to_page', { id: 'p1', text: 'x' })

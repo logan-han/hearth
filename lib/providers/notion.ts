@@ -1,3 +1,5 @@
+import { deadline, unconfirmedOnTimeout } from '../deadline'
+
 /**
  * Notion (https://developers.notion.com) via an internal integration token.
  *
@@ -37,6 +39,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
       'content-type': 'application/json',
       ...init.headers,
     },
+    signal: deadline(),
   })
   if (!res.ok) {
     const body = await res.text()
@@ -206,6 +209,6 @@ export async function appendToPage(id: string, text: string): Promise<{ added: n
     }))
   if (children.length === 0) return { added: 0 }
 
-  await api(`/blocks/${id}/children`, { method: 'PATCH', body: JSON.stringify({ children }) })
+  await unconfirmedOnTimeout(() => api(`/blocks/${id}/children`, { method: 'PATCH', body: JSON.stringify({ children }) }))
   return { added: children.length }
 }

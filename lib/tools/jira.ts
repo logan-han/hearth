@@ -3,11 +3,14 @@ import { z } from 'zod'
 import * as jira from '../providers/jira'
 import { clientFor } from '../providers'
 import { localDateKey } from '../cron'
-import { announce, requireMember, type ToolContext } from './context'
+import { announce, requireMember, writeFailure, type ToolContext } from './context'
 import { mailboxOwner, describeMailError } from './mail'
 import { describeError } from '../errors'
 
 const NOT_CONFIGURED = 'Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).'
+
+/** The most open issues the board summary counts, five pages of Jira's; far more than a household board holds. */
+const BOARD_MAX = 500
 
 function defaultProject(): string {
   return process.env.JIRA_PROJECT_KEY || 'HTL'
@@ -65,10 +68,12 @@ export function jiraTools(ctx: ToolContext) {
       execute: async () => {
         if (!jira.jiraConfigured()) return { error: NOT_CONFIGURED }
         try {
-          const issues = await jira.searchIssues(
+          // One past the most that is counted, so a bigger board says "at least".
+          const found = await jira.searchIssues(
             `project = ${defaultProject()} AND statusCategory != Done ORDER BY duedate ASC`,
-            100,
+            BOARD_MAX + 1,
           )
+          const issues = found.slice(0, BOARD_MAX)
           const today = localDateKey(ctx.now)
           const byStatus = new Map<string, number>()
           for (const i of issues) byStatus.set(i.status, (byStatus.get(i.status) ?? 0) + 1)
@@ -77,6 +82,7 @@ export function jiraTools(ctx: ToolContext) {
           return {
             project: defaultProject(),
             open: issues.length,
+            ...(found.length > BOARD_MAX ? { open_is_at_least: true } : {}),
             by_status: [...byStatus].map(([status, count]) => ({ status, count })),
             overdue: overdue.map((i) => ({ key: i.key, summary: i.summary, due: i.dueDate })),
             due_next: issues
@@ -120,7 +126,7 @@ export function jiraTools(ctx: ToolContext) {
           })
           return { ...made, summary, due: due_date ?? null, ...announce(ctx, `Added to the board: **${made.key}** ${summary}`) }
         } catch (e) {
-          return { error: describeError(e) }
+          return writeFailure(e)
         }
       },
     }),
@@ -171,7 +177,7 @@ export function jiraTools(ctx: ToolContext) {
           const made = await jira.attachFile(key, file)
           return { key, attached: made.filename, size: made.size }
         } catch (e) {
-          return { error: describeMailError(e) }
+          return writeFailure(e, describeMailError)
         }
       },
     }),
@@ -205,7 +211,7 @@ export function jiraTools(ctx: ToolContext) {
           await jira.addComment(key, text)
           return { commented: true, key }
         } catch (e) {
-          return { error: describeError(e) }
+          return writeFailure(e)
         }
       },
     }),

@@ -771,7 +771,7 @@ export async function processUpdate(update: Update): Promise<void> {
         // The turn itself worked, and whatever it wrote stands, so this is not
         // "that went wrong", which would be asked again and done twice.
         console.error('[telegram] reply not confirmed:', err)
-        await sayUnconfirmed(c.chatId, result.wrote)
+        await sayUnconfirmed(c.chatId, result.wrote, result.unconfirmed)
         return
       }
     }
@@ -792,8 +792,8 @@ export async function processUpdate(update: Update): Promise<void> {
  * history, where the next turn sees what was done before doing it again. When
  * this fails too, only the log has it.
  */
-async function sayUnconfirmed(chatId: string, wrote: readonly string[] | undefined): Promise<void> {
-  const line = unconfirmedLine(wrote)
+async function sayUnconfirmed(chatId: string, wrote: readonly string[] | undefined, unconfirmed?: readonly string[]): Promise<void> {
+  const line = unconfirmedLine(wrote, unconfirmed)
   try {
     await send(chatId, line)
     await recordMessage({ chatId, role: 'assistant', content: line })

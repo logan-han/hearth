@@ -1,4 +1,5 @@
 import { required, appUrl } from '../env'
+import { deadline } from '../deadline'
 
 export type Provider = 'google' | 'microsoft'
 
@@ -117,6 +118,7 @@ async function tokenRequest(p: Provider, body: Record<string, string>): Promise<
       client_secret: c.clientSecret(),
       ...body,
     }),
+    signal: deadline(),
   })
   const text = await res.text()
   if (!res.ok) {

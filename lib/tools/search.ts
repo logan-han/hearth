@@ -1,5 +1,6 @@
 import { tool } from 'ai'
 import { z } from 'zod'
+import { deadline } from '../deadline'
 
 type TavilyResult = { title: string; url: string; content: string; score?: number }
 
@@ -25,6 +26,7 @@ export const searchTools = {
           max_results: 5,
           include_answer: true,
         }),
+        signal: deadline(),
       })
       if (!res.ok) return { error: `Search failed (${res.status}): ${(await res.text()).slice(0, 200)}` }
 

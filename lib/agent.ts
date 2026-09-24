@@ -81,6 +81,8 @@ export type AgentResult = {
   cursors?: StagedCursor[]
   /** Writes this turn made that would double if done again; what they acted on must not be offered twice. */
   wrote?: string[]
+  /** The writes in `wrote` that ran out of time and may or may not have happened; see ToolContext.unconfirmed. */
+  unconfirmed?: string[]
   /** Watcher runs: the output allowance cut the post short, and it lost its unfinished end. */
   cutShort?: boolean
 }
@@ -572,21 +574,28 @@ const DONE: Partial<Record<ToolName, string>> = {
   notion_append_to_page: 'added to a Notion page',
 }
 
-/** What the turn's unrepeatable writes did, for a reply that cannot say it any other way. */
-function doneSoFar(wrote: readonly string[] | undefined): string {
-  return [...new Set((wrote ?? []).map((t) => DONE[t as ToolName]).filter(Boolean))].join(', ')
+/**
+ * What the turn's unrepeatable writes did, for a reply that cannot say it any
+ * other way. A write that ran out of time may not have happened, so it is not
+ * said to have.
+ */
+function doneSoFar(wrote: readonly string[] | undefined, unconfirmed: readonly string[] = []): string {
+  const done = (wrote ?? []).filter((t) => !unconfirmed.includes(t))
+  return [...new Set(done.map((t) => DONE[t as ToolName]).filter(Boolean))].join(', ')
 }
 
 /**
  * The reply for a turn that changed things and then lost its model. It says
  * what was done, so it is not asked for again, and not that the rest was: a
- * request for three things may have got through one.
+ * request for three things may have got through one. After a write that may
+ * or may not have gone, asking again is safe only once it has been checked.
  */
 function doneLine(ctx: ToolContext): string {
-  const done = doneSoFar(ctx.wrote)
-  return done
-    ? `Done so far: ${done}. My reply was cut off there, so ask again only for anything else you wanted.`
-    : 'My reply was cut off after I had started on that, so check what changed before asking again.'
+  const done = doneSoFar(ctx.wrote, ctx.unconfirmed)
+  if (!done) return 'My reply was cut off after I had started on that, so check what changed before asking again.'
+  return ctx.unconfirmed?.length
+    ? `Done so far: ${done}. My reply was cut off there, so check what else changed before asking again.`
+    : `Done so far: ${done}. My reply was cut off there, so ask again only for anything else you wanted.`
 }
 
 /**
@@ -596,13 +605,14 @@ function doneLine(ctx: ToolContext): string {
  * Telegram's answer to it was lost. So it says what was done, as doneLine
  * does.
  */
-export function unconfirmedLine(wrote: readonly string[] | undefined): string {
+export function unconfirmedLine(wrote: readonly string[] | undefined, unconfirmed?: readonly string[]): string {
   const lead = 'Telegram did not confirm my reply, so some or all of it may be missing.'
   if (!wrote?.length) return `${lead} Ask again if you did not see it.`
-  const done = doneSoFar(wrote)
-  return done
-    ? `${lead} What I did stands: ${done}, so ask again only for anything else you wanted.`
-    : `${lead} What I did stands, so check what changed before asking again.`
+  const done = doneSoFar(wrote, unconfirmed)
+  if (!done) return `${lead} What I did stands, so check what changed before asking again.`
+  return unconfirmed?.length
+    ? `${lead} What I did stands: ${done}, so check what else changed before asking again.`
+    : `${lead} What I did stands: ${done}, so ask again only for anything else you wanted.`
 }
 
 export async function runAgent(input: AgentInput): Promise<AgentResult> {
@@ -802,7 +812,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           if (mode === 'chat') throw new EndOnFailure({ text: doneLine(ctx), model: slot.name, evidence: undefined, cutShort: false }, err)
           // Unattended, the run posts nothing and an admin hears why, the way a
           // watcher's own PROBLEM line reaches them.
-          const done = doneSoFar(ctx.wrote) || 'changed something'
+          const done = doneSoFar(ctx.wrote, ctx.unconfirmed) || 'changed something'
           throw new EndOnFailure({
             text: `PROBLEM: ${slot.name} failed (${describeError(err)}) after it had ${done}, so this run posted nothing.\nSKIP`,
             model: slot.name,
@@ -833,6 +843,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     // calendar line, a new ticket) say nothing about the mail it read.
     ...(result.text && ctx.pendingCursors?.length ? { cursors: ctx.pendingCursors } : {}),
     ...(ctx.wrote?.length ? { wrote: ctx.wrote } : {}),
+    ...(ctx.unconfirmed?.length ? { unconfirmed: ctx.unconfirmed } : {}),
     ...(result.cutShort ? { cutShort: true } : {}),
     ...(mode === 'watcher' ? { facts: context } : {}),
   }

@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import type { ToolContext } from '@/lib/tools/context'
 
 const extractText = vi.hoisted(() => vi.fn())
@@ -6,20 +8,16 @@ vi.mock('unpdf', () => ({ extractText }))
 const lookup = vi.hoisted(() => vi.fn())
 vi.mock('node:dns/promises', () => ({ lookup }))
 
-const { browseTools, htmlToText } = await import('@/lib/tools/browse')
+const { browseTools, htmlToText, looksLikeShell, lookupPublic } = await import('@/lib/tools/browse')
 
+/** Node's own fetch, for the tests that go as far as a connection. */
+const realFetch = globalThis.fetch
 const fetchMock = vi.fn()
 const ctx: ToolContext = { chatId: '-1', member: null, memberName: 'Rowan', now: new Date(), notices: [] }
 const read = (url: string) =>
   (browseTools(ctx).read_url.execute as unknown as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)({ url }, {})
 
-const page = (html: string, type = 'text/html', url = 'https://school.example/x') => ({
-  ok: true,
-  status: 200,
-  url,
-  headers: new Headers({ 'content-type': type }),
-  arrayBuffer: async () => new TextEncoder().encode(html).buffer,
-})
+const page = (html: string, type = 'text/html') => new Response(html, { status: 200, headers: { 'content-type': type } })
 const moved = (location: string, status = 302, extra: object = {}) => ({ ok: false, status, url: '', headers: new Headers({ location }), ...extra })
 const resolvesTo = (address: string) => [{ address, family: address.includes(':') ? 6 : 4 }]
 
@@ -64,6 +62,24 @@ describe('htmlToText', () => {
     const text = htmlToText('<p>Look <a href="https://x.test/blank"></a> there</p>')
     expect(text).toContain('[https://x.test/blank]')
   })
+
+  it('reads an anchor with no href as its text, and a link left unclosed as its text too', () => {
+    expect(htmlToText('<a name="top">Top</a> <a href="https://x.test/next">Next</a>')).toBe('Top Next [https://x.test/next]')
+    expect(htmlToText('<p>See <a href="https://x.test/form">the form')).toBe('See the form')
+  })
+
+  it('reads a crafted page in one pass, however much of its markup is left open', () => {
+    // Each of these took from seconds to hours at a megabyte, when every open
+    // tag, or every space in a run, read on to the end of the page again.
+    for (const bait of ['<a href="x" ', '<a href="x">', '<br', '\r', '&nbsp;']) {
+      const started = performance.now()
+      htmlToText(bait.repeat(1_000_000 / bait.length))
+      expect(performance.now() - started, bait).toBeLessThan(1000)
+    }
+    const started = performance.now()
+    looksLikeShell('', '['.repeat(1_000_000))
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
 })
 
 describe('read_url', () => {
@@ -97,19 +113,52 @@ describe('read_url', () => {
 
   it('refuses a public name that resolves inward, even beside a public address', async () => {
     lookup.mockResolvedValue([...resolvesTo('203.0.113.10'), ...resolvesTo('::ffff:10.0.0.5')])
+    fetchMock.mockImplementation(realFetch)
     expect(String((await read('https://sneaky.example/x')).error)).toContain('public')
-    expect(lookup).toHaveBeenCalledWith('sneaky.example', { all: true })
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(lookup).toHaveBeenCalledWith('sneaky.example', expect.objectContaining({ all: true }))
+  })
+
+  it('judges a name by the answer the connection dials, so the name cannot answer one way and connect another', async () => {
+    // A service on this machine, where a rebinding name would point the bot.
+    let reached = 0
+    const inside = createServer((_, res) => {
+      reached++
+      res.end('inside')
+    })
+    await new Promise<void>((listening) => inside.listen(0, '127.0.0.1', listening))
+    lookup.mockResolvedValue(resolvesTo('127.0.0.1'))
+    fetchMock.mockImplementation(realFetch)
+    try {
+      const r = await read(`http://rebind.example:${(inside.address() as AddressInfo).port}/x`)
+      expect(r.error).toBe('Only public http(s) addresses can be read.')
+      // The request was made, and its connection looked the name up and stopped.
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(lookup).toHaveBeenCalledWith('rebind.example', expect.objectContaining({ all: true }))
+      expect(reached).toBe(0)
+    } finally {
+      inside.close()
+    }
+  })
+
+  it('answers a connection that wants one address with the first, and one that wants them all with every one', async () => {
+    const both = [...resolvesTo('203.0.113.10'), ...resolvesTo('2001:db8::1')]
+    lookup.mockResolvedValue(both)
+    const ask = (options: object) =>
+      new Promise((answered) => lookupPublic('school.example', options, (err, address, family) => answered({ err, address, family })))
+    expect(await ask({ family: 0 })).toEqual({ err: null, address: '203.0.113.10', family: 4 })
+    expect(await ask({ all: true })).toEqual({ err: null, address: both, family: undefined })
   })
 
   it('never requests a redirect hop that is private, by address or by what its name resolves to', async () => {
     lookup.mockImplementation(async (host: string) => resolvesTo(host === 'intranet.example' ? '10.1.2.3' : '203.0.113.10'))
     for (const location of ['http://192.168.1.5/admin', 'https://intranet.example/admin']) {
       fetchMock.mockReset()
-      fetchMock.mockResolvedValueOnce(moved(location))
+      // The first hop is answered here; the next goes as far as a real connection.
+      fetchMock.mockResolvedValueOnce(moved(location)).mockImplementation(realFetch)
       expect(String((await read('https://bit.example/short')).error)).toBe('That address redirected somewhere private.')
-      expect(fetchMock).toHaveBeenCalledTimes(1)
     }
+    expect(lookup).toHaveBeenCalledTimes(1)
+    expect(lookup).toHaveBeenCalledWith('intranet.example', expect.objectContaining({ all: true }))
   })
 
   it('follows public redirects one hop at a time, relative ones included, and says where it landed', async () => {
@@ -134,9 +183,9 @@ describe('read_url', () => {
   })
 
   it('says so when the name does not exist', async () => {
-    lookup.mockRejectedValue(new Error('getaddrinfo ENOTFOUND nowhere.example'))
+    lookup.mockRejectedValue(Object.assign(new Error('getaddrinfo ENOTFOUND nowhere.example'), { code: 'ENOTFOUND' }))
+    fetchMock.mockImplementation(realFetch)
     expect(String((await read('https://nowhere.example/x')).error)).toBe('That address could not be found.')
-    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('spots a template-heavy form shell even when its labels add up to real text', async () => {
@@ -165,7 +214,7 @@ describe('read_url', () => {
       if (String(u).includes('tavily')) {
         return { ok: true, status: 200, json: async () => ({ results: [{ raw_content: 'Breakfast is on Friday 5 September at 7:30 am in the Junior Schools.' }] }) }
       }
-      return page('<div id="app"></div>', 'text/html', 'https://spa.example/r/abc')
+      return page('<div id="app"></div>')
     })
     const r = await read('https://spa.example/r/abc')
     expect(r.rendered).toBe(true)
@@ -177,7 +226,7 @@ describe('read_url', () => {
     fetchMock.mockImplementation(async (u: unknown) =>
       String(u).includes('tavily')
         ? { ok: false, status: 500, text: async () => 'tavily down' }
-        : page('<div id="app"></div>', 'text/html', 'https://spa.example/r/abc'),
+        : page('<div id="app"></div>'),
     )
     const r = await read('https://spa.example/r/abc')
     expect(r.rendered).toBeUndefined()
@@ -189,7 +238,7 @@ describe('read_url', () => {
     fetchMock.mockImplementation(async (u: unknown) =>
       String(u).includes('tavily')
         ? { ok: true, status: 200, json: async () => ({ results: [] }) }
-        : page('<div id="app"></div>', 'text/html', 'https://spa.example/r/abc'),
+        : page('<div id="app"></div>'),
     )
     const r = await read('https://spa.example/r/abc')
     expect(r.rendered).toBeUndefined()
@@ -197,7 +246,7 @@ describe('read_url', () => {
   })
 
   it('reports an http failure as such', async () => {
-    fetchMock.mockResolvedValue({ ...page(''), ok: false, status: 404 })
+    fetchMock.mockResolvedValue(new Response('', { status: 404 }))
     expect(String((await read('https://school.example/gone')).error)).toContain('404')
   })
 
@@ -207,30 +256,52 @@ describe('read_url', () => {
   })
 
   it('falls back to a generic file kind, naming it from the content type when there is one', async () => {
-    fetchMock.mockResolvedValueOnce(page('a,b,c', 'text/csv', 'https://example.com/data.csv'))
+    fetchMock.mockResolvedValueOnce(page('a,b,c', 'text/csv'))
     const withType = await read('https://example.com/data.csv')
     expect(withType.kind).toBe('text/csv')
 
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      url: 'https://example.com/data',
-      headers: new Headers(),
-      arrayBuffer: async () => new TextEncoder().encode('a,b,c').buffer,
-    })
+    // Bytes, unlike a string, give the response no content type of their own.
+    fetchMock.mockResolvedValueOnce(new Response(new TextEncoder().encode('a,b,c')))
     const noType = await read('https://example.com/data')
-    expect(noType.kind).toBe('file')
+    expect(noType).toMatchObject({ kind: 'file', text: 'a,b,c' })
+
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers(), body: null })
+    expect(await read('https://example.com/empty')).toMatchObject({ kind: 'file', text: '' })
   })
 
   it('refuses a file bigger than the read limit', async () => {
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      url: 'https://example.com/huge.bin',
-      headers: new Headers({ 'content-type': 'application/octet-stream' }),
-      arrayBuffer: async () => new ArrayBuffer(3 * 1024 * 1024 + 1),
-    })
+    fetchMock.mockResolvedValue(new Response(new Uint8Array(3 * 1024 * 1024 + 1), { headers: { 'content-type': 'application/octet-stream' } }))
     expect(String((await read('https://example.com/huge.bin')).error)).toContain('too large')
+  })
+
+  /** A body that never ends, counting what was taken from it and whether it was let go. */
+  const endless = () => {
+    const source = { taken: 0, cancel: vi.fn() }
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        source.taken += 64 * 1024
+        controller.enqueue(new Uint8Array(64 * 1024))
+      },
+      cancel: source.cancel,
+    })
+    return { source, stream }
+  }
+
+  it('refuses a body that declares itself over the limit without reading it', async () => {
+    const { source, stream } = endless()
+    fetchMock.mockResolvedValue(new Response(stream, { headers: { 'content-type': 'video/mp4', 'content-length': String(700 * 1024 * 1024) } }))
+    expect(String((await read('https://example.com/film.mp4')).error)).toContain('too large')
+    expect(source.cancel).toHaveBeenCalled()
+    // What the stream buffers of its own accord when it is made, and no more.
+    expect(source.taken).toBeLessThanOrEqual(64 * 1024)
+  })
+
+  it('stops reading a body once it runs past the limit, however long it would go on', async () => {
+    const { source, stream } = endless()
+    fetchMock.mockResolvedValue(new Response(stream, { headers: { 'content-type': 'application/octet-stream' } }))
+    expect(String((await read('https://example.com/stream')).error)).toContain('too large')
+    expect(source.cancel).toHaveBeenCalled()
+    expect(source.taken).toBeLessThan(4 * 1024 * 1024)
   })
 
   it('reports a timeout in plain language', async () => {

@@ -547,6 +547,43 @@ describe('runAgent', () => {
     expect(r.text).toBe('Done so far: added to a list. My reply was cut off there, so ask again only for anything else you wanted.')
   })
 
+  describe('after a write that ran out of time', () => {
+    beforeEach(() => {
+      process.env.OPENROUTER_API_KEY = 'sk-or'
+      Object.assign(process.env, { JIRA_BASE_URL: 'https://example.atlassian.net', JIRA_EMAIL: 'r@hearth.example', JIRA_API_TOKEN: 'token' })
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+      }))
+    })
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      for (const k of ['JIRA_BASE_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN']) delete process.env[k]
+    })
+
+    type Tools = Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }>
+
+    it('ends the turn rather than have the next model do it again, and does not say it was done', async () => {
+      generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+        expect(await opts.tools.jira_comment.execute({ key: 'HTL-1', text: 'Paid' }, {})).toMatchObject({ maybe_done: true })
+        throw new Error('429 quota')
+      })
+      const r = await runAgent({ ...input, text: 'note on HTL-1 that the rates are paid' })
+      expect(generateText).toHaveBeenCalledTimes(1)
+      expect(r.text).toBe('My reply was cut off after I had started on that, so check what changed before asking again.')
+    })
+
+    it('says what was done besides, and to check the rest before asking again', async () => {
+      generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+        await opts.tools.add_to_list.execute({ items: ['stamps'], list: 'shopping' }, {})
+        await opts.tools.jira_comment.execute({ key: 'HTL-1', text: 'Paid' }, {})
+        throw new Error('429 quota')
+      })
+      const r = await runAgent({ ...input, text: 'add stamps, and note on HTL-1 that the rates are paid' })
+      expect(generateText).toHaveBeenCalledTimes(1)
+      expect(r.text).toBe('Done so far: added to a list. My reply was cut off there, so check what else changed before asking again.')
+    })
+  })
+
   it('still hands the turn on when nothing was changed, a refused write included', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     generateText
@@ -1282,6 +1319,12 @@ describe('unconfirmedLine', () => {
     )
     // A new ticket has no words of its own here: it announces itself, in the reply that may be missing.
     expect(unconfirmedLine(['jira_create_issue'])).toMatch(/What I did stands, so check what changed before asking again\.$/)
+  })
+
+  it('does not say a write that ran out of time was done', () => {
+    const line = unconfirmedLine(['add_to_list', 'create_calendar_event'], ['create_calendar_event'])
+    expect(line).toContain('What I did stands: added to a list, so check what else changed before asking again.')
+    expect(line).not.toContain('calendar')
   })
 })
 

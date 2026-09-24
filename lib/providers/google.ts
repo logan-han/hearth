@@ -1,8 +1,9 @@
-import type { AccountClient, CalendarEvent, DraftMail, MailAttachment, MailSummary } from './types'
+import { MAX_EVENTS, type AccountClient, type CalendarEvent, type DraftMail, type MailAttachment, type MailSummary } from './types'
 import { accessTokenFor } from './token'
 import { timezone } from '../env'
 import { localDateKey } from '../cron'
 import { htmlToPlainText } from '../html'
+import { deadline, unconfirmedOnTimeout } from '../deadline'
 
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me'
 const GCAL = 'https://www.googleapis.com/calendar/v3/calendars/primary'
@@ -11,6 +12,7 @@ async function api<T>(token: string, url: string, init: RequestInit = {}): Promi
   const res = await fetch(url, {
     ...init,
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...init.headers },
+    signal: deadline(),
   })
   if (!res.ok) {
     const body = await res.text()
@@ -103,10 +105,13 @@ function encodeHeader(value: string): string {
     : `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`
 }
 
+/** A header kept to its one line: a line break in a recipient would start a header of its own, a Bcc say. */
+const oneLine = (value: string) => value.replace(/[\r\n]+/g, ' ')
+
 function buildRaw(draft: DraftMail): string {
   const lines = [
-    `To: ${draft.to.join(', ')}`,
-    ...(draft.cc?.length ? [`Cc: ${draft.cc.join(', ')}`] : []),
+    `To: ${oneLine(draft.to.join(', '))}`,
+    ...(draft.cc?.length ? [`Cc: ${oneLine(draft.cc.join(', '))}`] : []),
     `Subject: ${encodeHeader(draft.subject)}`,
     'MIME-Version: 1.0',
     'Content-Type: text/plain; charset="UTF-8"',
@@ -203,10 +208,10 @@ export function googleClient(memberId: number): AccountClient {
 
     async sendMail(draft) {
       const t = await token()
-      await api(t, `${GMAIL}/messages/send`, {
+      await unconfirmedOnTimeout(() => api(t, `${GMAIL}/messages/send`, {
         method: 'POST',
         body: JSON.stringify({ raw: buildRaw(draft) }),
-      })
+      }))
       return { ok: true as const }
     },
 
@@ -217,9 +222,18 @@ export function googleClient(memberId: number): AccountClient {
       url.searchParams.set('timeMax', to.toISOString())
       url.searchParams.set('singleEvents', 'true')
       url.searchParams.set('orderBy', 'startTime')
-      url.searchParams.set('maxResults', '50')
-      const res = await api<{ items?: GEvent[] }>(t, url.toString())
-      return (res.items ?? []).map(toEvent)
+      // One past the most that is listed, so a range with more can say so.
+      url.searchParams.set('maxResults', String(MAX_EVENTS + 1))
+      const events: CalendarEvent[] = []
+      for (;;) {
+        const res = await api<{ items?: GEvent[]; nextPageToken?: string }>(t, url.toString())
+        events.push(...(res.items ?? []).map(toEvent))
+        // A page can come back short, even empty, with more behind it: the
+        // token says whether the range is done, not the count.
+        if (!res.nextPageToken || events.length > MAX_EVENTS) break
+        url.searchParams.set('pageToken', res.nextPageToken)
+      }
+      return { events: events.slice(0, MAX_EVENTS), more: events.length > MAX_EVENTS }
     },
 
     async createEvent(input) {
@@ -238,10 +252,10 @@ export function googleClient(memberId: number): AccountClient {
           : { dateTime: input.end.toISOString(), timeZone: timezone() },
         attendees: input.attendees?.map((email) => ({ email })),
       }
-      const created = await api<GEvent>(t, `${GCAL}/events`, {
+      const created = await unconfirmedOnTimeout(() => api<GEvent>(t, `${GCAL}/events`, {
         method: 'POST',
         body: JSON.stringify(body),
-      })
+      }))
       return toEvent(created)
     },
   }

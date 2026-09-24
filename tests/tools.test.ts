@@ -48,6 +48,7 @@ const { memoryTools } = await import('@/lib/tools/memory')
 const { automationTools } = await import('@/lib/tools/automation')
 const { searchTools } = await import('@/lib/tools/search')
 const { requireMember } = await import('@/lib/tools/context')
+const { UnconfirmedError } = await import('@/lib/deadline')
 
 let client: PGlite
 let ctx: ToolContext
@@ -151,6 +152,40 @@ describe('mail tools', () => {
     const r = await call(mailTools(later()), 'send_email', { draft_id: d.draft_id, confirmed: true })
     expect(String(r.error)).toContain('smtp exploded')
     expect((await q.getDraft(Number(d.draft_id)))!.status).toBe('pending')
+  })
+
+  it('keeps a draft claimed when its send runs out of time, since it may have gone', async () => {
+    sendMail.mockRejectedValue(new UnconfirmedError({ cause: new DOMException('The operation was aborted due to timeout', 'TimeoutError') }))
+    const d = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com'], subject: 's', body: 'b' })
+    const r = await call(mailTools(later()), 'send_email', { draft_id: d.draft_id, confirmed: true })
+    expect(String(r.error)).toContain('may or may not have gone')
+    expect(r.maybe_done).toBe(true)
+    expect((await q.getDraft(Number(d.draft_id)))!.status).toBe('sent')
+    expect(String((await call(mailTools(later()), 'send_email', { draft_id: d.draft_id, confirmed: true })).error)).toContain('already sent')
+  })
+
+  it('hands a draft back when the token ran out of time before the send, which was never made', async () => {
+    sendMail.mockRejectedValue(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+    const d = await call(mailTools(ctx), 'draft_email', { to: ['a@b.com'], subject: 's', body: 'b' })
+    const r = await call(mailTools(later()), 'send_email', { draft_id: d.draft_id, confirmed: true })
+    expect(String(r.error)).not.toContain('may or may not')
+    expect(r.maybe_done).toBeUndefined()
+    expect((await q.getDraft(Number(d.draft_id)))!.status).toBe('pending')
+  })
+
+  it('refuses a recipient that is not a bare address, one with a line break in it above all', async () => {
+    for (const [to, cc] of [
+      [['bob@school.edu\r\nBcc: eve@evil.test'], []],
+      [['a@b.com'], ['Bob <bob@school.edu>']],
+      [['a@b.com, c@d.com'], []],
+      [['bob'], []],
+    ]) {
+      const r = await call(mailTools(ctx), 'draft_email', { to, cc, subject: 's', body: 'b' })
+      expect(String(r.error), String(to)).toContain('is not an email address')
+    }
+    expect(await q.pendingDrafts(ctx.chatId)).toEqual([])
+    // Space around an address is only space.
+    expect((await call(mailTools(ctx), 'draft_email', { to: [' a@b.com '], subject: 's', body: 'b' })).draft_id).toBeDefined()
   })
 
   it('will not let one member send another member\'s draft', async () => {
@@ -650,14 +685,14 @@ describe('new_mail', () => {
 
 describe('calendar tools', () => {
   it('reads a window as Melbourne local time', async () => {
-    listEvents.mockResolvedValue([])
+    listEvents.mockResolvedValue({ events: [], more: false })
     await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27T00:00', to: '2026-08-28T00:00' })
     // 27 Aug is AEST, so local midnight is 14:00 UTC the day before.
     expect((listEvents.mock.calls[0][0] as Date).toISOString()).toBe('2026-08-26T14:00:00.000Z')
   })
 
   it('reads a date alone as the end of a window as the whole of that day', async () => {
-    listEvents.mockResolvedValue([])
+    listEvents.mockResolvedValue({ events: [], more: false })
     await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27', to: '2026-08-27' })
     const [from, to] = listEvents.mock.calls[0] as [Date, Date]
     expect(from.toISOString()).toBe('2026-08-26T14:00:00.000Z')
@@ -665,14 +700,14 @@ describe('calendar tools', () => {
   })
 
   it('renders each event with a local time alongside the raw one', async () => {
-    listEvents.mockResolvedValue([{ id: 'e', title: 'X', start: '2026-08-27T00:00:00Z', end: '', allDay: false }])
+    listEvents.mockResolvedValue({ events: [{ id: 'e', title: 'X', start: '2026-08-27T00:00:00Z', end: '', allDay: false }], more: false })
     const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27T00:00', to: '2026-08-28T00:00' })
     const acct = (r.accounts as { events: { start_local: string }[] }[])[0]
     expect(acct.events[0].start_local).toMatch(/Aug/)
   })
 
   it('gives a timed event its local end too', async () => {
-    listEvents.mockResolvedValue([{ id: 'e', title: 'Dentist', start: '2026-10-13T22:00:00.0000000Z', end: '2026-10-13T23:00:00.0000000Z', allDay: false }])
+    listEvents.mockResolvedValue({ events: [{ id: 'e', title: 'Dentist', start: '2026-10-13T22:00:00.0000000Z', end: '2026-10-13T23:00:00.0000000Z', allDay: false }], more: false })
     const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-10-14', to: '2026-10-14' })
     const [e] = (r.accounts as { events: Record<string, string>[] }[])[0].events
     expect(e).toMatchObject({ start_local: 'Wed, 14 Oct 2026, 9:00 am', end_local: 'Wed, 14 Oct 2026, 10:00 am' })
@@ -730,6 +765,25 @@ describe('calendar tools', () => {
     expect(String(r.error)).toContain('calendar full')
   })
 
+  it('counts an event whose request ran out of time as written, since it may be there, and has the model check first', async () => {
+    const { buildTools } = await import('@/lib/tools')
+    const turn = later()
+    const tools = buildTools(turn) as unknown as Parameters<typeof call>[0]
+    createEvent.mockRejectedValueOnce(new UnconfirmedError())
+    const r = await call(tools, 'create_calendar_event', { title: 'T', start: '2026-08-27T09:00', all_day: false })
+    expect(String(r.error)).toContain('may or may not have gone through. Check before trying it again.')
+    expect(r.maybe_done).toBe(true)
+    expect(turn.wrote).toEqual(['create_calendar_event'])
+    expect(turn.unconfirmed).toEqual(['create_calendar_event'])
+    expect(turn.changed).toEqual(['create_calendar_event'])
+    // A timeout before the request, on the token, is only a failure: nothing was asked.
+    createEvent.mockRejectedValueOnce(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+    const plain = await call(tools, 'create_calendar_event', { title: 'T', start: '2026-08-27T09:00', all_day: false })
+    expect(plain.error).toBeDefined()
+    expect(plain.maybe_done).toBeUndefined()
+    expect(turn.wrote).toHaveLength(1)
+  })
+
   it('reports one account failing without sinking the reply', async () => {
     listEvents.mockRejectedValue(new Error('Graph said 503'))
     const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27T00:00', to: '2026-08-28T00:00' })
@@ -737,10 +791,13 @@ describe('calendar tools', () => {
   })
 
   it('gives an all-day entry its date, not a made-up 10am', async () => {
-    listEvents.mockResolvedValue([
-      { id: 'g', title: 'Show and tell', start: '2026-09-02', end: '2026-09-03', allDay: true },
-      { id: 'm', title: 'Pupil free day', start: '2026-09-04T00:00:00.0000000', end: '2026-09-05T00:00:00.0000000', allDay: true },
-    ])
+    listEvents.mockResolvedValue({
+      events: [
+        { id: 'g', title: 'Show and tell', start: '2026-09-02', end: '2026-09-03', allDay: true },
+        { id: 'm', title: 'Pupil free day', start: '2026-09-04T00:00:00.0000000', end: '2026-09-05T00:00:00.0000000', allDay: true },
+      ],
+      more: false,
+    })
     const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-09-01T00:00', to: '2026-09-07T00:00' })
     const shown = (r.accounts as { events: { start_local: string }[] }[])[0].events.map((e) => e.start_local)
     expect(shown).toEqual(['Wed, 2 Sept 2026', 'Fri, 4 Sept 2026'])
@@ -749,11 +806,14 @@ describe('calendar tools', () => {
   it('gives an all-day entry its first and last day, as the tools that make events take them', async () => {
     // Both providers end an all-day entry on the day after; copied across as
     // an end, that would add a day.
-    listEvents.mockResolvedValue([
-      { id: 'g', title: 'Camp', start: '2026-10-09', end: '2026-10-12', allDay: true },
-      { id: 'm', title: 'Pupil free day', start: '2026-09-04T00:00:00.0000000Z', end: '2026-09-05T00:00:00.0000000Z', allDay: true },
-      { id: 'x', title: 'No end given', start: '2026-09-06', end: '', allDay: true },
-    ])
+    listEvents.mockResolvedValue({
+      events: [
+        { id: 'g', title: 'Camp', start: '2026-10-09', end: '2026-10-12', allDay: true },
+        { id: 'm', title: 'Pupil free day', start: '2026-09-04T00:00:00.0000000Z', end: '2026-09-05T00:00:00.0000000Z', allDay: true },
+        { id: 'x', title: 'No end given', start: '2026-09-06', end: '', allDay: true },
+      ],
+      more: false,
+    })
     const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-09-01', to: '2026-10-31' })
     const shown = (r.accounts as { events: Record<string, string>[] }[])[0].events
     expect(shown.map(({ start, end, end_local }) => ({ start, end, end_local }))).toEqual([
@@ -788,13 +848,25 @@ describe('calendar tools', () => {
   })
 
   it('shows an event that has no start time without inventing one', async () => {
-    listEvents.mockResolvedValue([{ id: 'e', title: 'X', start: '', end: '', allDay: true }])
+    listEvents.mockResolvedValue({ events: [{ id: 'e', title: 'X', start: '', end: '', allDay: true }], more: false })
     const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27T00:00', to: '2026-08-28T00:00' })
     expect((r.accounts as { events: { start_local: string }[] }[])[0].events[0].start_local).toBe('')
   })
 
+  it('says when a range holds more events than one listing returns, so the time after them is not read as free', async () => {
+    listEvents.mockResolvedValue({ events: [{ id: 'e', title: 'Standup', start: '2026-09-01T23:00:00Z', end: '', allDay: false }], more: true })
+    const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-09-01T00:00', to: '2026-10-01T00:00' })
+    const [account] = r.accounts as Record<string, unknown>[]
+    expect(account.truncated).toBe(true)
+    expect(String(account.note)).toContain('not free')
+
+    listEvents.mockResolvedValue({ events: [], more: false })
+    const whole = await call(calendarTools(ctx), 'list_calendar', { from: '2026-09-01T00:00', to: '2026-09-02T00:00' })
+    expect((whole.accounts as Record<string, unknown>[])[0]).not.toHaveProperty('truncated')
+  })
+
   it('restricts the listing to the named provider when one is given', async () => {
-    listEvents.mockResolvedValue([])
+    listEvents.mockResolvedValue({ events: [], more: false })
     const r = await call(calendarTools(ctx), 'list_calendar', { from: '2026-08-27T00:00', to: '2026-08-28T00:00', provider: 'microsoft' })
     expect((r.accounts as { provider: string }[])[0].provider).toBe('microsoft')
   })

@@ -1,8 +1,9 @@
-import type { AccountClient, CalendarEvent, MailAttachment, MailSummary } from './types'
+import { MAX_EVENTS, type AccountClient, type CalendarEvent, type MailAttachment, type MailSummary } from './types'
 import { accessTokenFor } from './token'
 import { timezone } from '../env'
 import { localDateKey } from '../cron'
 import { htmlToPlainText } from '../html'
+import { deadline, unconfirmedOnTimeout } from '../deadline'
 
 const GRAPH = 'https://graph.microsoft.com/v1.0/me'
 
@@ -10,6 +11,7 @@ async function api<T>(token: string, url: string, init: RequestInit = {}): Promi
   const res = await fetch(url, {
     ...init,
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...init.headers },
+    signal: deadline(),
   })
   if (!res.ok) {
     const body = await res.text()
@@ -159,7 +161,7 @@ export function microsoftClient(memberId: number): AccountClient {
 
     async sendMail(draft) {
       const t = await token()
-      await api(t, `${GRAPH}/sendMail`, {
+      await unconfirmedOnTimeout(() => api(t, `${GRAPH}/sendMail`, {
         method: 'POST',
         body: JSON.stringify({
           message: {
@@ -170,7 +172,7 @@ export function microsoftClient(memberId: number): AccountClient {
           },
           saveToSentItems: true,
         }),
-      })
+      }))
       return { ok: true as const }
     },
 
@@ -181,15 +183,23 @@ export function microsoftClient(memberId: number): AccountClient {
       url.searchParams.set('endDateTime', to.toISOString())
       url.searchParams.set('$orderby', 'start/dateTime')
       url.searchParams.set('$top', '50')
-      const res = await api<{ value?: GraphEvent[] }>(t, url.toString(), {
-        headers: { Prefer: 'outlook.timezone="UTC"' },
-      })
-      return (res.value ?? []).map(toEvent)
+      const events: CalendarEvent[] = []
+      // Graph pages by link, followed to one past the most that is listed, so
+      // a range with more can say so.
+      for (let next = url.toString(); ; ) {
+        const res = await api<{ value?: GraphEvent[]; '@odata.nextLink'?: string }>(t, next, {
+          headers: { Prefer: 'outlook.timezone="UTC"' },
+        })
+        events.push(...(res.value ?? []).map(toEvent))
+        if (!res['@odata.nextLink'] || events.length > MAX_EVENTS) break
+        next = res['@odata.nextLink']
+      }
+      return { events: events.slice(0, MAX_EVENTS), more: events.length > MAX_EVENTS }
     },
 
     async createEvent(input) {
       const t = await token()
-      const created = await api<GraphEvent>(t, `${GRAPH}/events`, {
+      const created = await unconfirmedOnTimeout(() => api<GraphEvent>(t, `${GRAPH}/events`, {
         method: 'POST',
         body: JSON.stringify({
           subject: input.title,
@@ -212,7 +222,7 @@ export function microsoftClient(memberId: number): AccountClient {
             type: 'required',
           })),
         }),
-      })
+      }))
       return toEvent(created)
     },
   }

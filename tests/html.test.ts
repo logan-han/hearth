@@ -33,4 +33,23 @@ describe('stripping markup', () => {
   it('reads a document down to one run of text', () => {
     expect(htmlToPlainText('<style>x{}</style><p>Hello&nbsp;&amp;\n  <b>there</b></p>')).toBe('Hello & there')
   })
+
+  it('lets a style or a comment left open run to the end, as a browser reads it', () => {
+    expect(stripBlocks('a<style never closed')).toBe('a ')
+    expect(stripBlocks('a<!-- never closed')).toBe('a ')
+  })
+
+  it('keeps a stray < after the last tag as the text it is', () => {
+    expect(htmlToPlainText('<p>Ages</p> 3 < 5')).toBe('Ages 3 < 5')
+  })
+
+  it('reads a crafted message in one pass, however much of its markup is left open', () => {
+    // Each of these took minutes at a megabyte, when a pattern that failed was
+    // tried again from every later '<' and read on to the end each time.
+    for (const bait of ['<style ', '<', '<!--']) {
+      const started = performance.now()
+      htmlToPlainText(bait.repeat(1_000_000 / bait.length))
+      expect(performance.now() - started, bait).toBeLessThan(1000)
+    }
+  })
 })

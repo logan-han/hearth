@@ -259,10 +259,11 @@ behaviour: move to the next slot. The one exception is a turn that has already
 done something that would double if done again (added to a list, set up a
 reminder, sent an invitation, opened a ticket): the next slot would start from
 the message again and do it twice, so the turn ends there with a line saying
-what was done so far. Writes that check for themselves first (a draft, a
-proposal, a calendar entry, a fact) do not stop the chain, and an unattended
-run that stops this way tells an admin instead of posting. Every model in the
-chain must support tool calling.
+what was done so far. One whose request ran out of time counts too, since it
+may have gone through, but is not said to be done. Writes that check for
+themselves first (a draft, a proposal, a calendar entry, a fact) do not stop
+the chain, and an unattended run that stops this way tells an admin instead
+of posting. Every model in the chain must support tool calling.
 
 `LLM_REASONING` (none, minimal, low, medium, high) is passed through as
 `reasoning_effort` when set. Leave it empty for the provider default. Gemini's
@@ -900,7 +901,8 @@ scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
 - `/api/tick` verifies the QStash signature.
 - Email is never sent without a human "yes": `draft_email` and `send_email` are
   separate tools, the draft is persisted, and the send claims it atomically so a
-  repeated confirmation cannot send twice. In a chat, `send_email` refuses a
+  repeated confirmation cannot send twice. A send that times out stays claimed
+  too, since it may have gone. In a chat, `send_email` refuses a
   draft written in the same turn, and refuses anything at all in a turn that has
   read mail, a web page, a search result, Notion, the board, a calendar invite or
   an attached file, so the yes has to come from a person's own message and never

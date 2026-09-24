@@ -4,11 +4,18 @@
  * `</script >` end tag a naive pattern walks straight past, a tag that only
  * becomes visible once the tag wrapped around it is removed, and an `&amp;lt;`
  * that a second decoding pass would take all the way down to `<`.
+ *
+ * The markup is whatever a stranger sent, so no pattern may be left to fail
+ * slowly. One that looks for a closing mark and never finds it is tried again
+ * from every later `<`, reading on to the end each time, and a megabyte of
+ * `<style ` took minutes that way. So a script, style or comment left open
+ * runs to the end of the text, as a browser reads it, and tags are looked for
+ * only up to the last `>`, past which none can close.
  */
 
 /** Script and style bodies, tolerating `</script >` and a missing end tag. */
-const BLOCK = /<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi
-const COMMENT = /<!--[\s\S]*?-->/g
+const BLOCK = /<(script|style)\b[^>]*(?:>|$)[\s\S]*?(?:<\/\1\s*>|$)/gi
+const COMMENT = /<!--[\s\S]*?(?:-->|$)/g
 const TAG = /<[^>]*>/g
 
 /** Removing markup can expose more of it, so keep going until nothing changes. */
@@ -27,7 +34,10 @@ export function stripBlocks(html: string): string {
 }
 
 export function stripTags(html: string): string {
-  return untilStable(html, (s) => s.replace(TAG, ' '))
+  return untilStable(html, (s) => {
+    const end = s.lastIndexOf('>') + 1
+    return s.slice(0, end).replace(TAG, ' ') + s.slice(end)
+  })
 }
 
 const NAMED: Record<string, string> = {

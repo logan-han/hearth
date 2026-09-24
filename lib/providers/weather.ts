@@ -1,4 +1,5 @@
 import { timezone, units } from '../env'
+import { deadline } from '../deadline'
 
 /**
  * OpenWeatherMap, free tier: geocoding, current conditions, and the 5-day
@@ -39,7 +40,7 @@ async function owm<T>(kind: keyof typeof TTL_MS, path: string, params: Record<st
   if (hit && Date.now() - hit.at < TTL_MS[kind]) return hit.value as T
 
   url.searchParams.set('appid', key)
-  const res = await fetch(url)
+  const res = await fetch(url, { signal: deadline() })
   if (!res.ok) throw new Error(`OpenWeatherMap said ${res.status}: ${(await res.text()).slice(0, 200)}`)
   const value = (await res.json()) as T
   cache.set(cacheKey, { at: Date.now(), value })

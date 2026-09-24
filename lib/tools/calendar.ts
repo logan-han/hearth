@@ -1,12 +1,12 @@
 import { tool } from 'ai'
 import { z } from 'zod'
-import { clientFor, clientsFor } from '../providers'
+import { clientFor, clientsFor, MAX_EVENTS } from '../providers'
 import { NotConnectedError, ReconnectNeededError } from '../providers/token'
 import type { CalendarEvent } from '../providers/types'
 import { localToUtc, formatLocal, formatLocalDate, resolveSpan, rangeEnd, lastDay } from '../cron'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
-import { requireMember } from './context'
+import { requireMember, writeFailure } from './context'
 import { ALL_DAY_END } from './familycal'
 import { describeError } from '../errors'
 
@@ -38,10 +38,16 @@ export function calendarTools(ctx: ToolContext) {
         const accounts = await Promise.all(
           clients.map(async (c) => {
             try {
-              const events = await c.listEvents(start, end)
+              const { events, more } = await c.listEvents(start, end)
               return {
                 provider: c.provider,
                 events: events.map(asShown),
+                ...(more
+                  ? {
+                      truncated: true,
+                      note: `This range holds more than the ${MAX_EVENTS} events listed. List again from the last one's start for the rest; the time after it is not free.`,
+                    }
+                  : {}),
               }
             } catch (e) {
               return { provider: c.provider, error: describe(e) }
@@ -101,7 +107,7 @@ export function calendarTools(ctx: ToolContext) {
             start_local: span.allDay ? formatLocalDate(span.startsAt) : formatLocal(span.startsAt),
           }
         } catch (e) {
-          return { error: describe(e) }
+          return writeFailure(e, describe)
         }
       },
     }),

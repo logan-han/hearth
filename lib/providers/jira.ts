@@ -1,3 +1,5 @@
+import { deadline, unconfirmedOnTimeout } from '../deadline'
+
 /**
  * Jira Cloud (https://developer.atlassian.com/cloud/jira/platform/rest/v3).
  *
@@ -49,6 +51,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
       'content-type': 'application/json',
       ...init.headers,
     },
+    signal: deadline(),
   })
   if (!res.ok) {
     const body = await res.text()
@@ -105,12 +108,18 @@ function toIssue(raw: any): JiraIssue {
 
 export async function searchIssues(jql: string, limit = 20): Promise<JiraIssue[]> {
   // The old GET /search is gone; /search/jql is the supported endpoint and
-  // paginates by token rather than by offset.
-  const res = await api<{ issues?: any[] }>('/rest/api/3/search/jql', {
-    method: 'POST',
-    body: JSON.stringify({ jql, maxResults: Math.min(limit, 100), fields: FIELDS }),
-  })
-  return (res.issues ?? []).map(toIssue)
+  // paginates by token rather than by offset, at most 100 to a page.
+  const out: JiraIssue[] = []
+  let nextPageToken: string | undefined
+  do {
+    const res = await api<{ issues?: any[]; nextPageToken?: string }>('/rest/api/3/search/jql', {
+      method: 'POST',
+      body: JSON.stringify({ jql, maxResults: Math.min(limit - out.length, 100), fields: FIELDS, nextPageToken }),
+    })
+    out.push(...(res.issues ?? []).map(toIssue))
+    nextPageToken = res.nextPageToken
+  } while (nextPageToken && out.length < limit)
+  return out.slice(0, limit)
 }
 
 export async function getIssue(key: string): Promise<JiraIssue & { description: string }> {
@@ -144,10 +153,10 @@ export async function createIssue(input: {
   if (input.description) fields.description = adf(input.description)
   if (input.dueDate) fields.duedate = input.dueDate
 
-  const res = await api<{ key: string }>('/rest/api/3/issue', {
+  const res = await unconfirmedOnTimeout(() => api<{ key: string }>('/rest/api/3/issue', {
     method: 'POST',
     body: JSON.stringify({ fields }),
-  })
+  }))
   return { key: res.key, url: `${baseUrl()}/browse/${res.key}` }
 }
 
@@ -174,10 +183,10 @@ export async function transitionIssue(key: string, statusName: string): Promise<
 }
 
 export async function addComment(key: string, text: string): Promise<void> {
-  await api(`/rest/api/3/issue/${encodeURIComponent(key)}/comment`, {
+  await unconfirmedOnTimeout(() => api(`/rest/api/3/issue/${encodeURIComponent(key)}/comment`, {
     method: 'POST',
     body: JSON.stringify({ body: adf(text) }),
-  })
+  }))
 }
 
 /** Change what is given and nothing else; a null due date clears it. */
@@ -206,15 +215,19 @@ export async function attachFile(key: string, file: { filename: string; mimeType
   const bytes = file.bytes.buffer.slice(file.bytes.byteOffset, file.bytes.byteOffset + file.bytes.byteLength) as ArrayBuffer
   form.append('file', new Blob([bytes], { type: file.mimeType }), file.filename)
   const path = `/rest/api/3/issue/${encodeURIComponent(key)}/attachments`
-  const res = await fetch(`${baseUrl()}${path}`, {
-    method: 'POST',
-    headers: { authorization: authHeader(), accept: 'application/json', 'X-Atlassian-Token': 'no-check' },
-    body: form,
+  // The upload and its answer, which together are the one write.
+  return unconfirmedOnTimeout(async () => {
+    const res = await fetch(`${baseUrl()}${path}`, {
+      method: 'POST',
+      headers: { authorization: authHeader(), accept: 'application/json', 'X-Atlassian-Token': 'no-check' },
+      body: form,
+      signal: deadline(),
+    })
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Jira API ${res.status} on ${path}: ${body.slice(0, 250)}`)
+    }
+    const [made] = ((await res.json()) as Partial<JiraAttachment>[] | undefined) ?? []
+    return { id: made?.id ?? '', filename: made?.filename ?? file.filename, size: made?.size ?? file.bytes.byteLength }
   })
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`Jira API ${res.status} on ${path}: ${body.slice(0, 250)}`)
-  }
-  const [made] = ((await res.json()) as Partial<JiraAttachment>[] | undefined) ?? []
-  return { id: made?.id ?? '', filename: made?.filename ?? file.filename, size: made?.size ?? file.bytes.byteLength }
 }

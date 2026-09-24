@@ -30,6 +30,8 @@ const call = (name: string, args: unknown) => {
   return (tools[name].execute as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)(parsed, {})
 }
 
+const timedOut = () => new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+
 const json = (body: unknown, status = 200) => ({
   ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body),
 })
@@ -211,6 +213,21 @@ describe('jira_board_summary', () => {
     const listed = [...(r.overdue as { key: string }[]), ...(r.due_next as { key: string }[])].map((i) => i.key)
     expect(listed).not.toContain('HTL-3')
   })
+
+  it('counts a board past one page of Jira\'s, and says "at least" past what it counts', async () => {
+    const page = (n: number, nextPageToken?: string) =>
+      json({ issues: Array.from({ length: n }, (_, i) => issue(`HTL-${i}`, 'To Do', 'Chore')), nextPageToken })
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValueOnce(page(100, 'p2')).mockResolvedValueOnce(page(40))
+    const r = await call('jira_board_summary', {})
+    expect(r.open).toBe(140)
+    expect(r.by_status).toEqual([{ status: 'To Do', count: 140 }])
+    expect(r).not.toHaveProperty('open_is_at_least')
+
+    fetchMock.mockReset()
+    fetchMock.mockImplementation(async () => page(100, 'more'))
+    expect(await call('jira_board_summary', {})).toMatchObject({ open: 500, open_is_at_least: true })
+  })
 })
 
 describe('jira_create_issue', () => {
@@ -328,6 +345,33 @@ describe('jira_attach_email_file', () => {
     expect(r).toEqual({ error: 'No family member called "Nobody".' })
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  it('says only that it failed when the mailbox ran out of time, since nothing was uploaded', async () => {
+    ctx = { ...ctx, member }
+    readAttachment.mockRejectedValue(timedOut())
+    const r = await call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })
+    expect(r.error).toBeDefined()
+    expect(r.maybe_done).toBeUndefined()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('a board write that runs out of time', () => {
+  const member = { id: 3, name: 'Rowan', telegramUserId: '111', allowed: true, isAdmin: false } as unknown as ToolContext['member']
+
+  it.each([
+    ['jira_create_issue', { summary: 'Pay the rates' }],
+    ['jira_comment', { key: 'HTL-1', text: 'paid today' }],
+    ['jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' }],
+  ])('%s says it may have gone through, so it is checked rather than done twice', async (name, args) => {
+    ctx = { ...ctx, member }
+    readAttachment.mockResolvedValue({ filename: 'x.pdf', mimeType: 'application/pdf', size: 1, bytes: new Uint8Array([1]) })
+    fetchMock.mockRejectedValue(timedOut())
+    const r = await call(name, args)
+    expect(String(r.error)).toContain('may or may not have gone through')
+    expect(r.maybe_done).toBe(true)
+    expect(ctx.notices).toEqual([])
+  })
 })
 
 describe('jira_move_issue', () => {
@@ -425,6 +469,18 @@ describe('provider odds and ends', () => {
     fetchMock.mockResolvedValue(json({ issues: [] }))
     await jira.searchIssues('project = HTL', 5000)
     expect(lastBody().maxResults).toBe(100)
+  })
+
+  it('follows the page token until it has as many as were asked for, and no further', async () => {
+    fetchMock
+      .mockResolvedValueOnce(json({ issues: [issue('HTL-1', 'To Do', 'a'), issue('HTL-2', 'To Do', 'b')], nextPageToken: 'p2' }))
+      .mockResolvedValueOnce(json({ issues: [issue('HTL-3', 'To Do', 'c')], nextPageToken: 'p3' }))
+    const found = await jira.searchIssues('project = HTL', 3)
+    expect(found.map((i) => i.key)).toEqual(['HTL-1', 'HTL-2', 'HTL-3'])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(bodyOf(0)).toMatchObject({ maxResults: 3 })
+    expect(bodyOf(0)).not.toHaveProperty('nextPageToken')
+    expect(bodyOf(1)).toMatchObject({ maxResults: 1, nextPageToken: 'p2' })
   })
 
   it('reports an empty transition list rather than crashing', async () => {

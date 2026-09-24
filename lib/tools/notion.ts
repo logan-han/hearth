@@ -1,7 +1,7 @@
 import { tool } from 'ai'
 import { z } from 'zod'
 import * as notion from '../providers/notion'
-import type { ToolContext } from './context'
+import { writeFailure, type ToolContext } from './context'
 import { describeError } from '../errors'
 
 const NOT_CONFIGURED = 'Notion is not configured (NOTION_TOKEN missing).'
@@ -82,7 +82,7 @@ export function notionTools(_ctx: ToolContext) {
           const { added } = await notion.appendToPage(id, text)
           return added === 0 ? { error: 'Nothing to add.' } : { added, id }
         } catch (e) {
-          return { error: describeError(e) }
+          return writeFailure(e)
         }
       },
     }),

@@ -1,3 +1,5 @@
+import { deadline } from '../deadline'
+
 /**
  * PocketSmith (https://developers.pocketsmith.com). Categorised transactions
  * and budgets across every account the household has connected there, which is
@@ -62,6 +64,7 @@ async function api<T>(path: string, params: Record<string, string> = {}): Promis
 
   const res = await fetch(url, {
     headers: { 'X-Developer-Key': key, accept: 'application/json' },
+    signal: deadline(),
   })
   if (!res.ok) {
     const body = await res.text()

@@ -1,10 +1,12 @@
 import { lookup } from 'node:dns/promises'
-import { BlockList, isIP } from 'node:net'
+import { BlockList, isIP, type LookupFunction } from 'node:net'
+import type { Agent } from 'undici'
 import { tool } from 'ai'
 import { z } from 'zod'
 import type { ToolContext } from './context'
 import { decodeEntities, stripBlocks, stripTags } from '../html'
 import { describeError } from '../errors'
+import { deadline } from '../deadline'
 
 /**
  * Following links is what separates "the email mentions a form" from actually
@@ -32,19 +34,41 @@ for (const [net, bits] of [['::', 127], ['fc00::', 7], ['fe80::', 10], ['ff00::'
 
 const inward = (address: string) => INWARD.check(address, isIP(address) === 6 ? 'ipv6' : 'ipv4')
 
+/** How a connection refuses a name that leads inward. */
+class InwardAddressError extends Error {}
+
 /**
- * The bot fetches URLs out of family chat; it must never reach inward. A name
- * is judged by every address it resolves to, since the fetch may use any of
- * them: a public name pointed at 127.0.0.1 is as private as 127.0.0.1. The
- * fetch resolves the name again to connect, so one whose answer changes in
- * between (DNS rebinding) is beyond this check.
+ * A name is judged by every address it resolves to, since the connection may
+ * use any of them: a public name pointed at 127.0.0.1 is as private as
+ * 127.0.0.1. The judging is done in the connection's own lookup, so the answer
+ * checked is the answer dialled. A lookup of our own ahead of the fetch left
+ * the name free to answer differently the second time (DNS rebinding).
  */
-async function readable(url: URL): Promise<boolean> {
+export const lookupPublic: LookupFunction = (hostname, options, callback) => {
+  lookup(hostname, { ...options, all: true }).then(
+    (addresses) => {
+      if (addresses.some((a) => inward(a.address))) callback(new InwardAddressError(`${hostname} leads to a private address`), '')
+      else if (options.all) callback(null, addresses)
+      else callback(null, addresses[0].address, addresses[0].family)
+    },
+    (err: NodeJS.ErrnoException) => callback(err, ''),
+  )
+}
+
+// Made on first use: the library behind it takes a while to load, and most turns read no link.
+let publicOnly: Promise<Agent> | undefined
+const publicConnections = () => (publicOnly ??= import('undici').then(({ Agent }) => new Agent({ connect: { lookup: lookupPublic } })))
+
+/**
+ * The bot fetches URLs out of family chat; it must never reach inward. An
+ * address written into the URL is judged here, and a name as the connection
+ * resolves it.
+ */
+function readable(url: URL): boolean {
   if (!/^https?:$/.test(url.protocol)) return false
   const host = url.hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1')
   if (host === 'localhost' || /\.(?:localhost|local|internal)$/.test(host)) return false
-  if (isIP(host)) return !inward(host)
-  return (await lookup(host, { all: true })).every((a) => !inward(a.address))
+  return !isIP(host) || !inward(host)
 }
 
 /**
@@ -56,14 +80,22 @@ async function fetchPublic(start: URL): Promise<{ res: Response; url: URL } | { 
   const signal = AbortSignal.timeout(12_000)
   let url = start
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    if (!(await readable(url))) {
-      return { error: hop === 0 ? 'Only public http(s) addresses can be read.' : 'That address redirected somewhere private.' }
-    }
-    const res = await fetch(url, {
+    const refusal = hop === 0 ? 'Only public http(s) addresses can be read.' : 'That address redirected somewhere private.'
+    if (!readable(url)) return { error: refusal }
+    // Node's fetch takes a dispatcher, which the DOM's RequestInit has no word for.
+    const init: RequestInit & { dispatcher: Agent } = {
       redirect: 'manual',
       signal,
+      dispatcher: await publicConnections(),
       headers: { 'user-agent': 'Mozilla/5.0 (compatible; Hearth family assistant)' },
-    })
+    }
+    let res: Response
+    try {
+      res = await fetch(url, init)
+    } catch (e) {
+      if (e instanceof Error && e.cause instanceof InwardAddressError) return { error: refusal }
+      throw e
+    }
     const location = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null
     if (!location) return { res, url }
     await res.body?.cancel()
@@ -83,24 +115,47 @@ function resolved(href: string, base?: string): string {
 }
 
 /**
+ * Keep hrefs beside their labels, so the next link can be followed too. The
+ * tags are found one at a time and paired here: a single pattern spanning the
+ * whole link read on to the end of the page from every link left unclosed.
+ */
+function inlineLinks(html: string, base?: string): string {
+  let out = ''
+  let copied = 0
+  let open: { at: number; end: number; href: string } | null = null
+  for (const m of html.matchAll(/<a\s[^<>]*>|<\/a\s*>/gi)) {
+    if (m[0][1] !== '/') {
+      const raw: string | undefined = open ? undefined : /\shref="([^"#][^"]*)"/i.exec(m[0])?.[1]
+      if (raw) open = { at: m.index, end: m.index + m[0].length, href: resolved(raw, base) }
+    } else if (open) {
+      const text = stripTags(html.slice(open.end, m.index)).replace(/\s+/g, ' ').trim()
+      out += html.slice(copied, open.at) + (text ? ` ${text} [${open.href}] ` : ` [${open.href}] `)
+      copied = m.index + m[0].length
+      open = null
+    }
+  }
+  return out + html.slice(copied)
+}
+
+/**
  * `base` is the page's address after redirects, and relative links come out
  * whole against it: the model opens a link as it reads it, and once a page
  * has been read, read_url opens only a link that appears as written.
+ *
+ * Each step reads the page in one pass, for the reason lib/html.ts gives: a
+ * line break tag is looked for only up to the next `<`, and lines are trimmed
+ * one at a time, where a pattern would reread a long run of spaces from each
+ * space in it.
  */
 export function htmlToText(html: string, base?: string): string {
-  const laidOut = stripBlocks(html)
-    // Keep hrefs beside their labels, so the next link can be followed too.
-    .replace(/<a\s[^>]*href="([^"#][^"]*)"[^>]*>([\s\S]*?)<\/a\s*>/gi, (_, raw: string, label: string) => {
-      const text = stripTags(label).replace(/\s+/g, ' ').trim()
-      const href = resolved(raw, base)
-      return text ? ` ${text} [${href}] ` : ` [${href}] `
-    })
-    .replace(/<(br|\/p|\/div|\/li|\/tr|\/h[1-6])[^>]*>/gi, '\n')
+  const laidOut = inlineLinks(stripBlocks(html), base).replace(/<(br|\/p|\/div|\/li|\/tr|\/h[1-6])[^<>]*>/gi, '\n')
 
   return decodeEntities(stripTags(laidOut))
     .replace(/[ \t]+/g, ' ')
-    .replace(/\s*\n\s*/g, '\n')
-    .trim()
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n')
 }
 
 /**
@@ -108,7 +163,7 @@ export function htmlToText(html: string, base?: string): string {
  * machinery, has not really been read yet — the content arrives by JavaScript.
  */
 export function looksLikeShell(raw: string, text: string): boolean {
-  if (text.replace(/\[[^\]]*\]/g, '').trim().length < 600) return true
+  if (text.replace(/\[[^[\]]*\]/g, '').trim().length < 600) return true
   const markers =
     (raw.match(/\bng-[a-z]/g)?.length ?? 0) +
     (raw.match(/\{\{/g)?.length ?? 0) +
@@ -120,6 +175,35 @@ export function looksLikeShell(raw: string, text: string): boolean {
   return hidden >= 8 && text.length < raw.length * 0.15
 }
 
+/**
+ * The body, or null when it is larger than can be read. It is read a piece at
+ * a time and dropped once past the limit, so a link to a video is not held in
+ * memory whole before being refused; a declared length over it is refused
+ * before anything is read.
+ */
+async function readBody(res: Response): Promise<Uint8Array | null> {
+  if (Number(res.headers.get('content-length')) > MAX_BYTES) {
+    await res.body?.cancel()
+    return null
+  }
+  if (!res.body) return new Uint8Array()
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > MAX_BYTES) {
+      await reader.cancel()
+      return null
+    }
+    chunks.push(value)
+  }
+  // A plain Uint8Array rather than the Buffer concat makes: the PDF reader refuses a Buffer.
+  return new Uint8Array(Buffer.concat(chunks, size))
+}
+
 async function renderViaTavily(url: string): Promise<string | null> {
   const key = process.env.TAVILY_API_KEY
   if (!key) return null
@@ -127,6 +211,8 @@ async function renderViaTavily(url: string): Promise<string | null> {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
     body: JSON.stringify({ urls: [url], extract_depth: 'advanced' }),
+    // An advanced extract is given 30 seconds on Tavily's side before it gives up.
+    signal: deadline(35_000),
   })
   if (!res.ok) return null
   const data = (await res.json()) as { results?: { raw_content?: string }[] }
@@ -164,12 +250,12 @@ export function browseTools(_ctx: ToolContext) {
           if (!res.ok) return { error: `The page answered ${res.status}.` }
 
           const type = res.headers.get('content-type') ?? ''
-          const buf = await res.arrayBuffer()
-          if (buf.byteLength > MAX_BYTES) return { error: 'That file is too large to read here.' }
+          const buf = await readBody(res)
+          if (!buf) return { error: 'That file is too large to read here.' }
 
           if (type.includes('pdf') || target.pathname.toLowerCase().endsWith('.pdf')) {
             const { extractText } = await import('unpdf')
-            const { text, totalPages } = await extractText(new Uint8Array(buf), { mergePages: true })
+            const { text, totalPages } = await extractText(buf, { mergePages: true })
             return { url: at, kind: 'pdf', pages: totalPages, text: text.slice(0, MAX_CHARS) }
           }
 
@@ -194,7 +280,8 @@ export function browseTools(_ctx: ToolContext) {
 
           return { url: at, kind: type.split(';')[0] || 'file', text: raw.slice(0, MAX_CHARS) }
         } catch (e) {
-          const reason = describeError(e)
+          // What went wrong on the connection, a name not found say, is the cause of fetch's own error.
+          const reason = describeError(e instanceof Error && e.cause instanceof Error ? e.cause : e)
           if (reason.includes('ENOTFOUND')) return { error: 'That address could not be found.' }
           return { error: reason.includes('timeout') || reason.includes('timed out') ? 'The page took too long to answer.' : reason }
         }

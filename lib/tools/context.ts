@@ -1,6 +1,8 @@
 import type { Member } from '../db/schema'
 import type { ParsedIcs } from '../ics-parse'
 import type { StagedCursor } from './cursor'
+import { UnconfirmedError } from '../deadline'
+import { describeError } from '../errors'
 
 /** Ambient facts every tool needs: who is asking, and where. */
 export type ToolContext = {
@@ -42,13 +44,18 @@ export type ToolContext = {
    * from the message again and do it a second time. Writes that check for
    * themselves first (a draft, a proposal, an event, a fact) are not listed:
    * doing those again is harmless, and the next model can still finish.
+   * A write whose request ran out of time is listed too, since it may have
+   * gone through (see UnconfirmedError), and in `unconfirmed` as well.
    */
   wrote?: string[]
+  /** The writes in `wrote` that may or may not have happened, which a reply after a failure does not say were done. */
+  unconfirmed?: string[]
   /**
-   * Every write tool that returned without an error this turn, repeatable or
-   * not. It may still have changed nothing (an event already there, a fact
-   * already known), so it decides only what a reply can honestly say after a
-   * failure, never what the turn claims was done.
+   * Every write tool that returned without an error this turn, or that ran
+   * out of time and may have gone through, repeatable or not. It may still
+   * have changed nothing (an event already there, a fact already known), so
+   * it decides only what a reply can honestly say after a failure, never what
+   * the turn claims was done.
    */
   changed?: string[]
   /** Cursor moves waiting on this turn's result reaching someone; see StagedCursor. */
@@ -91,3 +98,15 @@ export function announce(ctx: ToolContext, line: string, also?: string): { poste
 const POSTED =
   'Hearth posts the `posted` line in the chat itself, straight after your reply. ' +
   'Do not say the same thing again in other words: reply with only whatever else is worth saying, or with nothing at all.'
+
+/**
+ * A write tool's result for what it caught. One whose request ran out of time
+ * is still an error to the model, which must check rather than say it is done
+ * or try again, and `maybe_done` has the turn count it as a write all the same
+ * (see ToolContext.wrote).
+ */
+export function writeFailure(e: unknown, describe: (e: unknown) => string = describeError) {
+  return e instanceof UnconfirmedError
+    ? { error: `${e.message} Check before trying it again.`, maybe_done: true as const }
+    : { error: describe(e) }
+}
