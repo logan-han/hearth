@@ -44,7 +44,7 @@ jobs:
       # A run Dependabot starts sees only Dependabot's secrets, so unless
       # CODECOV_TOKEN is copied there as well (Settings, Secrets, Dependabot)
       # Codecov refuses its upload. That should not turn its pull requests red.
-      - uses: codecov/codecov-action@v5
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
