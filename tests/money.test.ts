@@ -216,6 +216,13 @@ describe('spending_summary via PocketSmith', () => {
     expect(r.received).toBe('$1,000.00')
   })
 
+  it('says a credit filed under an expense is a refund, so a post may call it one', async () => {
+    const r = await call('spending_summary', { source: 'pocketsmith' })
+    const credits = r.largest_credits as { payee: string; counts_as?: string }[]
+    expect(credits.find((c) => c.payee === 'Medicare rebate')?.counts_as).toBe('a refund, taken off the spend in its category')
+    expect(credits.find((c) => c.payee === 'Salary')?.counts_as).toBeUndefined()
+  })
+
   it('says nothing about deductions when there are none', async () => {
     serve(psTxns.filter((t) => t.id !== 8))
     const r = await call('spending_summary', { source: 'pocketsmith' })

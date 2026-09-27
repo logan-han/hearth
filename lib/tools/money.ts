@@ -231,7 +231,10 @@ export function moneyTools(ctx: ToolContext) {
                 ...(isDeduction(t) ? { counts_as: 'a deduction from income, not spend' } : {}),
               })),
             // Salary credits are the income source, not news; this list exists
-            // so a genuinely unusual credit (a refund, a payout) is visible.
+            // so a genuinely unusual credit (a refund, a payout) is visible. A
+            // credit filed under an expense came off that spend above, and
+            // says so: without the word, a post that called one a refund was
+            // cut as saying what the evidence did not.
             largest_credits: real
               .filter((t) => t.amount > 0)
               .sort((a, b) => b.amount - a.amount)
@@ -242,6 +245,7 @@ export function moneyTools(ctx: ToolContext) {
                 category: t.category ?? 'Uncategorised',
                 date: t.date,
                 note: t.note ?? t.memo,
+                ...(sideOf(t) === 'expense' ? { counts_as: 'a refund, taken off the spend in its category' } : {}),
               })),
           }
         } catch (e) {

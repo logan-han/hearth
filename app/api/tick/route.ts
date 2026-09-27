@@ -449,6 +449,10 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
   // check that could not run, or one whose rewrite put back a draft nobody has
   // checked since, leaves this false and the full line stands.
   let verified = false
+  // What the check took out, for the admin's note if the decision then holds
+  // the rest back: a draft cut and re-judged is on the full line, and without
+  // this the note gives a number and no way to see why.
+  let cut: string[] = []
   try {
     const review = await reviewDraft({ label: a.label, draft, evidence, deadline: deadline - DECISION_RESERVE_MS })
     if (review.message === null) {
@@ -468,6 +472,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
     if (review.unsupported.length) {
       console.warn(`[tick] ${a.label}: cut ${review.unsupported.length} unsupported claim(s): ${review.unsupported.join(' | ')}`)
     }
+    cut = review.unsupported
     reviewed = review.message
     verified = review.claims.length > 0 && review.unsupported.length === 0
   } catch (err) {
@@ -480,7 +485,9 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
       JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, verified, model: d.model, reason: d.reason ?? null }),
     )
     if (d.decision === 'post') return reviewed
-    const why = `the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}`
+    const why =
+      `the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}` +
+      (cut.length ? `. The claim check had already cut: ${cut.join(' | ')}` : '')
     console.warn(`[tick] ${a.label}: held back, ${why}`)
     await tellAdminQuietly(member, heldBack(a, why, reviewed))
     return null

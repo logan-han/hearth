@@ -468,16 +468,18 @@ worth saying**:
   reckoned the way PocketSmith reckons it, by the side of the ledger each
   category keeps: a payment filed under an income category (a tax payment,
   say) is a deduction from income, reported as one and never as spend, and a
-  rebate filed under the expense it refunds comes off that spend. The figures
-  and the over-budget categories go out as two-column tables, which
-  `lib/telegram-format.ts` lays out as aligned monospace lines in inline
-  `code` spans: Telegram has no table element, and the `pre` block that could
-  hold one is drawn as a code box with a copy button. A budget position comes
+  rebate filed under the expense it refunds comes off that spend. The post is
+  written for a phone: a line for the week (in, out, net) and one for the
+  month (spent, budget used, days in), then the week's categories, its largest
+  payments by business name with what a note says each was for, and the
+  categories over budget, all as bullets with the headline figures in bold.
+  It has no tables: Telegram has no table element, and the monospace lines
+  that stood in for one wrapped mid-row at phone width. A budget position comes
   from PocketSmith's own analysis, in which a month's allowance is the budget
   after rollover, so a category overspent earlier in the year can be allowed
   nothing this month while still being budgeted: it reads "over by $X", the
-  categories in that state are named together once under the table, and only
-  a category with no budget at all is called "no budget set".
+  categories in that state are named together once at the end, and only a
+  category with no budget at all is called "no budget set".
 
 Home lists both under Reminders with a pause; neither can be deleted, since
 the next tick would only put it back. The tick also keeps them in step with

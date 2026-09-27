@@ -69,14 +69,20 @@ const flaggedData = plainData(FLAGGED)
 const base = { chatId: '-100', chatType: 'group', member: null, memberName: 'the family', history: false as const, mode: 'watcher' as const }
 
 // A week as the tick fetches it: totals, the largest payments, and the budget positions as the money tool now words them.
+// One payee string appears twice under two categories, one with a note: a check that names the payee without its amount reads the second as contradicting the first.
 const SNAPSHOT = {
   week: '2026-09-14 to 2026-09-20',
   this_week: {
     source: 'pocketsmith', from: '2026-09-14', to: '2026-09-20', transactions: 12, spent: '$1,842.10', received: '$3,200.00', net: '$1,357.90',
-    by_category: [{ category: 'Groceries', amount: '$612.40', share_of_spend: '33%' }, { category: 'Kids', amount: '$385.00', share_of_spend: '21%' }],
+    by_category: [
+      { category: 'Groceries', amount: '$612.40', share_of_spend: '33%' },
+      { category: 'Kids', amount: '$385.00', share_of_spend: '21%' },
+      { category: 'Home', amount: '$149.00', share_of_spend: '8%' },
+    ],
     largest: [
       { payee: 'Harbour Art School', amount: '$385.00', category: 'Kids', date: '2026-09-17', note: null },
       { payee: 'FRESHMART 2041 HILLSIDE', amount: '$212.30', category: 'Groceries', date: '2026-09-19', note: null },
+      { payee: 'FRESHMART 2041 HILLSIDE', amount: '$149.00', category: 'Home', date: '2026-09-19', note: 'Bathroom tap' },
     ],
     largest_credits: [{ payee: 'SALARY ACME PTY LTD', amount: '$3,200.00', category: 'Income', date: '2026-09-15', note: null }],
   },
@@ -104,29 +110,92 @@ const snapshotData = plainData(SNAPSHOT)
 
 afterAll(() => printSummary('watchers'))
 
+/*
+ * The snapshot's figures once went out as two-column tables, aligned
+ * monospace lines of about 32 characters, and a phone that holds about 28
+ * wrapped every row, each label a line above its figure. A household-written
+ * snapshot in bullets and bold figures read well on the same phone, so the
+ * built-in is written that way now, with payees by their business name.
+ */
 describe.skipIf(!liveChainConfigured())('money snapshot', () => {
-  it('lays the week out as a title, two-column tables and bold parts, the rollover said once, no purpose line, over-budget only', async () => {
+  it('writes the week in lines and bullets with bold figures, payees by business name, the rollover said once, over-budget only', async () => {
     calls.length = 0
     const r = await runAgent({ ...base, tools: WATCHERS.snapshot.tools, text: `Scheduled check "Money snapshot".\n\n${WATCHERS.snapshot.instruction}\n\nDATA (fetched just now):\n${snapshotData}` })
     if (process.env.EVAL_PRINT) console.log(`\n----- snapshot draft -----\n${r.text}\n----- as Telegram HTML -----\n${toTelegramHtml(r.text)}\n-----`)
-    const figures = figuresGrounded(r.text, snapshotData)
-    const tables = (r.text.match(/^\s*\|\s*-{3,}/gm) ?? []).length
-    const hasTitle = /^\*\*[^*\n]+\*\*\s*$/m.test(r.text)
-    const rolloverLines = (r.text.match(/rollover/gi) ?? []).length
-    const overOnly = /Shopping/.test(r.text) && /Kids/.test(r.text) && !/Pets/.test(r.text) && !/under by/i.test(r.text)
-    const hard = figures.ok && noLeak(r.text) && tables >= 2 && hasTitle && rolloverLines === 1 && !/purpose not recorded/i.test(r.text) && overOnly && /1,842\.10/.test(r.text) && /6,210\.55/.test(r.text) && /115%/.test(r.text)
-    const g = await judgeGroundedness({ answer: r.text, context: snapshotData })
-    record({ case: 'snapshot: tables, rollover once, no purpose line, over-budget only', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
+    const text = r.text
+    const figures = figuresGrounded(text, snapshotData)
+    const noTable = !/^\s*\|/m.test(text)
+    const hasTitle = /^\*\*[^*\n]+\*\*\s*$/m.test(text)
+    const boldTotals = /\*\*\$1,842\.10\*\*/.test(text) && /\*\*\$6,210\.55\*\*/.test(text) && /\*\*115%\*\*/.test(text)
+    // The business name in title case, the bank's store number and town left off, both payments kept, the note woven in.
+    const payees = (text.match(/Freshmart/g) ?? []).length === 2 && !/FRESHMART|2041|hillside/i.test(text.replace(/Freshmart/g, ''))
+    const note = /Bathroom tap/i.test(text)
+    const rolloverLines = (text.match(/rollover/gi) ?? []).length
+    const overOnly = /Shopping/.test(text) && /Kids/.test(text) && !/Pets/.test(text) && !/under by/i.test(text)
+    const hard = figures.ok && noLeak(text) && noTable && hasTitle && boldTotals && payees && note && rolloverLines === 1 && !/purpose not recorded/i.test(text) && overOnly
+    const g = await judgeGroundedness({ answer: text, context: snapshotData })
+    record({ case: 'snapshot: bullets, bold totals, business names, rollover once, over-budget only', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: text.slice(0, 80) })
     expect(figures.missing).toEqual([])
-    expect(tables).toBeGreaterThanOrEqual(2)
+    expect(noTable).toBe(true)
     expect(hasTitle).toBe(true)
+    expect(boldTotals).toBe(true)
+    expect(payees).toBe(true)
+    expect(note).toBe(true)
     expect(rolloverLines).toBe(1)
-    expect(r.text).toMatch(/Nothing left this month after rollover:.*Shopping/i)
-    expect(r.text).not.toMatch(/purpose not recorded/i)
-    expect(r.text).not.toMatch(/Pets/)
-    expect(r.text).not.toMatch(/under by/i)
-    expect(noLeak(r.text)).toBe(true)
+    expect(text).toMatch(/Nothing left this month after rollover:.*Shopping/i)
+    expect(text).not.toMatch(/purpose not recorded/i)
+    expect(text).not.toMatch(/Pets/)
+    expect(text).not.toMatch(/under by/i)
+    expect(noLeak(text)).toBe(true)
     if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
+  })
+
+  // A snapshot listing one payee twice, under two categories, lost its second
+  // line: the check wrote "<payee> was for <category>", with no amount to say
+  // which payment, and on the real week Jev put that at 0.52 to 0.62 against
+  // the 0.6 line, where "<payee> $<amount> is filed under <category>" answers
+  // 1.00. A cut then puts the rest on the full line, where a long post can be
+  // held back on a coin flip. So every statement about a payee names the payment.
+  it('passes a grounded snapshot whole through the claim check and the decision, the repeated payee and all', async () => {
+    const draft = [
+      '**Money snapshot, 14 to 20 Sep**',
+      'This week: in **$3,200.00**, out **$1,842.10**, net **$1,357.90**.',
+      'This month so far: **$6,210.55** spent, **115%** of the budget used, 20 of 30 days in.',
+      '',
+      '**Where it went**',
+      '- Groceries: $612.40 (33%)',
+      '- Kids: $385.00 (21%)',
+      '- Home: $149.00 (8%)',
+      '',
+      '**Largest payments**',
+      '- Harbour Art School: **$385.00** (Kids)',
+      '- Freshmart: **$212.30** (Groceries)',
+      '- Freshmart: **$149.00** (Home, Bathroom tap)',
+      '',
+      '**Over budget**',
+      '- Kids: over by $619.47',
+      '- Shopping: over by $177.43',
+      '- Transport: over by $14.31',
+      '',
+      'Nothing left this month after rollover: Shopping, Transport',
+    ].join('\n')
+    const evidence = `INSTRUCTION:\n${WATCHERS.snapshot.instruction}\n\nDATA:\n${snapshotData}\n\nTOOL RESULTS:\n(none)`
+    const review = await reviewDraft({ label: 'Money snapshot', draft, evidence })
+    const verified = review.claims.length > 0 && review.unsupported.length === 0
+    const d = await decideWatcherPost({ label: 'Money snapshot', draft: review.message ?? '', evidence, verified })
+    const payeeClaims = review.claims.filter((c) => /freshmart|harbour art/i.test(c))
+    const pinned = payeeClaims.every((c) => /\$\d/.test(c))
+    const hard = pinned && review.unsupported.length === 0 && review.message === draft && d.decision === 'post'
+    record({
+      case: 'snapshot: payee statements name the payment, grounded post passes',
+      hard: hard ? 'pass' : 'fail',
+      model: d.model,
+      note: `${payeeClaims.join(' // ') || 'no payee statements'} | cut: ${review.unsupported.join(' | ') || 'none'} | ${d.decision}@${d.confidence}`,
+    })
+    expect(payeeClaims.filter((c) => !/\$\d/.test(c))).toEqual([])
+    expect(review.unsupported).toEqual([])
+    expect(review.message).toBe(draft)
+    expect(d.decision).toBe('post')
   })
 })
 

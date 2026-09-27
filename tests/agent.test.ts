@@ -1613,10 +1613,17 @@ describe('watcher formatting', () => {
     const p = systemPrompt({ ...base, mode: 'watcher', chatType: 'group' })
     expect(p).toContain('**bold**')
     expect(p).toContain('> at the start of each line')
-    expect(p).toContain('pipe table for figures')
-    expect(p).toContain('aligned monospace lines')
     expect(p).toContain('**bold** title line')
     expect(p).not.toMatch(/plain Telegram text/)
+  })
+
+  it('keeps tables out of a post: a phone wraps their monospace rows', () => {
+    // A snapshot's figures table went out as rows of about 32 characters and
+    // wrapped on a phone that holds about 28, each label a line above its figure.
+    const p = systemPrompt({ ...base, mode: 'watcher', chatType: 'group' })
+    expect(p).toContain('No tables')
+    expect(p).not.toMatch(/pipe table/)
+    for (const w of Object.values(WATCHERS)) expect(w.instruction).not.toMatch(/pipe table|\| \|/)
   })
 })
 
