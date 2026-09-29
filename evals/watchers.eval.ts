@@ -152,9 +152,9 @@ describe.skipIf(!liveChainConfigured())('money snapshot', () => {
 
   // A snapshot listing one payee twice, under two categories, lost its second
   // line: the check wrote "<payee> was for <category>", with no amount to say
-  // which payment, and on the real week Jev put that at 0.52 to 0.62 against
-  // the 0.6 line, where "<payee> $<amount> is filed under <category>" answers
-  // 1.00. A cut then puts the rest on the full line, where a long post can be
+  // which payment, and on the real week the checker cut that as often as it
+  // kept it, where "<payee> $<amount> is filed under <category>" was kept every
+  // time. A cut then puts the rest on the full line, where a long post can be
   // held back on a coin flip. So every statement about a payee names the payment.
   it('passes a grounded snapshot whole through the claim check and the decision, the repeated payee and all', async () => {
     const draft = [

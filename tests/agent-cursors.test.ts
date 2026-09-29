@@ -31,7 +31,6 @@ beforeEach(async () => {
   process.env.OPENROUTER_API_KEY = 'sk-or'
   process.env.OPENROUTER_MODEL = 'minimax/minimax-m3:free'
   delete process.env.LLM_BASE_URL
-  delete process.env.TYPESAFE_API_KEY
   client = (await freshDb()).client
 })
 afterEach(async () => closeDb(client))

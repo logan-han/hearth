@@ -39,13 +39,8 @@ function sourceFiles(dir: string): string[] {
 const root = fileURLToPath(new URL('..', import.meta.url))
 const appSources = [...sourceFiles(join(root, 'lib')), ...sourceFiles(join(root, 'app')), join(root, 'instrumentation.ts')]
 
-/**
- * The calls to a model, each of which Langfuse should see inside a trace: the
- * AI SDK's own, and observed(), which wraps every other one (Jev's). The
- * telemetry module only defines observed(), so every call to it found here
- * is a model call.
- */
-const MODEL_CALLS = new Set(['generateText', 'streamText', 'generateObject', 'streamObject', 'observed'])
+/** The calls to a model, each of which Langfuse should see inside a trace: the AI SDK's own. */
+const MODEL_CALLS = new Set(['generateText', 'streamText', 'generateObject', 'streamObject'])
 
 /** Every model call in a file, and whether it sits inside a traced() call. */
 function modelCalls(file: string): { at: string; traced: boolean }[] {
@@ -89,7 +84,6 @@ describe('Langfuse v4 readiness', () => {
     // check; this is that no call to a model goes around it.
     const calls = appSources.flatMap(modelCalls)
     expect(calls.filter((c) => c.at.startsWith('lib/agent.ts:')).length).toBeGreaterThan(0)
-    expect(calls.filter((c) => c.at.startsWith('lib/jev.ts:')).length).toBeGreaterThan(0)
     expect(calls.filter((c) => !c.traced).map((c) => c.at)).toEqual([])
   })
 })

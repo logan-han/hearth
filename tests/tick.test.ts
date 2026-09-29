@@ -898,7 +898,7 @@ describe('the post decision', () => {
     // A cut draft is judged on the full line; a note with only the number in
     // it left the admin guessing why a grounded-looking draft was held.
     reviewDraft.mockResolvedValue({ claims: ['bins tonight', 'a refund'], unsupported: ['a refund'], message: 'Bins out tonight.' })
-    decideWatcherPost.mockResolvedValue({ decision: 'skip', confidence: 0.59, model: 'jev:jev-latest', reason: 'the draft states something the evidence does not contain' })
+    decideWatcherPost.mockResolvedValue({ decision: 'skip', confidence: 0.59, model: 'gemini:gemini-3.5-flash-lite', reason: 'the draft states something the evidence does not contain' })
     await authed()
     const [, text] = send.mock.calls[0]
     expect(text).toContain('skip at 0.59: the draft states something the evidence does not contain. The claim check had already cut: a refund')
@@ -906,7 +906,7 @@ describe('the post decision', () => {
   })
 
   it('posts what the judge decided: the line is the judge\'s own, never a second one here', async () => {
-    decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.63, model: 'jev:jev-latest' })
+    decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.63, model: 'gemini:gemini-3.5-flash-lite' })
     await authed()
     expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
     expect(send).not.toHaveBeenCalledWith('900', expect.stringContaining('held back'))

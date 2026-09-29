@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { telemetryConfigured, recordContent, callTelemetry, traced, observed, flushTelemetry, setupTelemetry } from '@/lib/telemetry'
+import { telemetryConfigured, recordContent, callTelemetry, traced, flushTelemetry, setupTelemetry } from '@/lib/telemetry'
 
 /** The processor lives on globalThis, where instrumentation.ts and the routes both find it. */
 const slot = globalThis as unknown as { __hearthLangfuse?: { forceFlush: () => Promise<void> } | null }
@@ -21,20 +21,12 @@ vi.mock('@langfuse/otel', () => ({ LangfuseSpanProcessor: otel.LangfuseSpanProce
 vi.mock('@langfuse/vercel-ai-sdk', () => ({ LangfuseVercelAiSdkIntegration: otel.LangfuseVercelAiSdkIntegration }))
 vi.mock('ai', () => ({ registerTelemetry: otel.registerTelemetry }))
 
-// traced() and observed() import these once a processor is live; mocked so a
+// traced() imports these once a processor is live; mocked so a
 // test sees what would reach Langfuse, not only that the call came back.
-const tracing = vi.hoisted(() => {
-  const generation = { update: vi.fn() }
-  return {
-    generation,
-    propagateAttributes: vi.fn(async (_attrs: unknown, fn: () => Promise<unknown>) => fn()),
-    startActiveObservation: vi.fn(async (_name: string, fn: (g: typeof generation) => Promise<unknown>) => fn(generation)),
-  }
-})
-vi.mock('@langfuse/tracing', () => ({
-  propagateAttributes: tracing.propagateAttributes,
-  startActiveObservation: tracing.startActiveObservation,
+const tracing = vi.hoisted(() => ({
+  propagateAttributes: vi.fn(async (_attrs: unknown, fn: () => Promise<unknown>) => fn()),
 }))
+vi.mock('@langfuse/tracing', () => ({ propagateAttributes: tracing.propagateAttributes }))
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -149,44 +141,6 @@ describe('telemetry', () => {
     // The call itself runs within the attributes, so every span it opens carries them.
     expect(ranInside).toBe(true)
     expect(tracing.propagateAttributes).toHaveBeenCalledWith(attrs, expect.any(Function))
-  })
-
-  it('runs a hand-made observation plainly when tracing is off, without summarising', async () => {
-    const summarise = vi.fn(() => ({ output: 'never' }))
-    expect(await observed('hearth.gate', { model: 'jev-latest', input: { state: 's' } }, async () => 7, summarise)).toBe(7)
-    expect(summarise).not.toHaveBeenCalled()
-  })
-
-  it('records a hand-made observation with its output and usage once a processor is live, keeping content on the switch', async () => {
-    slot.__hearthLangfuse = { forceFlush: async () => {} }
-    const summarise = vi.fn((out: number) => ({ output: { got: out }, usage: { input: 12, output: 0 } }))
-    expect(await observed('hearth.gate', { model: 'jev-latest', input: { state: 's' } }, async () => 7, summarise)).toBe(7)
-    expect(summarise).toHaveBeenCalledWith(7)
-    expect(tracing.startActiveObservation).toHaveBeenCalledWith('hearth.gate', expect.any(Function), { asType: 'generation' })
-    expect(tracing.generation.update.mock.calls).toStrictEqual([
-      [{ model: 'jev-latest', input: { state: 's' } }],
-      [{ output: { got: 7 }, usageDetails: { input: 12, output: 0 } }],
-    ])
-
-    // Off keeps the shape of the call and nothing the family said or was told.
-    tracing.generation.update.mockClear()
-    process.env.LANGFUSE_RECORD_CONTENT = 'off'
-    expect(await observed('hearth.gate', { model: 'jev-latest', input: { state: 's' } }, async () => 8, summarise)).toBe(8)
-    expect(tracing.generation.update.mock.calls).toStrictEqual([
-      [{ model: 'jev-latest' }],
-      [{ usageDetails: { input: 12, output: 0 } }],
-    ])
-
-    // A failure inside the call is the caller's to handle, not swallowed by the observation.
-    await expect(observed('hearth.gate', { model: 'jev-latest', input: null }, async () => { throw new Error('down') }, summarise)).rejects.toThrow('down')
-  })
-
-  it('omits usage details when the summary does not report any', async () => {
-    slot.__hearthLangfuse = { forceFlush: async () => {} }
-    const summarise = vi.fn(() => ({ output: 'ok' }))
-    await expect(observed('hearth.gate', { model: 'jev-latest', input: {} }, async () => 1, summarise)).resolves.toBe(1)
-    expect(summarise).toHaveBeenCalledWith(1)
-    expect(tracing.generation.update.mock.calls.at(-1)).toStrictEqual([{ output: 'ok' }])
   })
 
   it('reads the content switch case- and space-insensitively', () => {

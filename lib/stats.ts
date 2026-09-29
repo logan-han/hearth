@@ -7,7 +7,6 @@ import * as notion from './providers/notion'
 import * as jira from './providers/jira'
 import * as weather from './providers/weather'
 import { describeChain } from './model'
-import { jevConfigured } from './jev'
 import { chainHealth, type ChainHealth } from './model-events'
 import { getSetting } from './db/queries'
 import { schedulerPulse, tickCadence, onGrid, nextTickOnOrAfter, describeGrid, type TickGrid } from './scheduler'
@@ -159,10 +158,6 @@ export async function gatherStats(month?: string) {
       {
         group: 'Notes',
         items: [{ name: 'Notion', on: notion.notionConfigured(), note: 'pages and databases' }],
-      },
-      {
-        group: 'TypeSafe Jev',
-        items: [{ name: 'Jev', on: jevConfigured(), note: 'the gate, the reply check and the post checks' }],
       },
       {
         group: 'Web search',

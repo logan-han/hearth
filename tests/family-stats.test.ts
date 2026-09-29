@@ -68,7 +68,7 @@ describe('what System shows', () => {
     // Three weeks back: older than the history keeps, well inside the thirty days shown.
     await client.query(`update model_events set created_at = now() - interval '21 days' where slot = 'openrouter:free'`)
     await recordModelEvent({ slot: 'openrouter:free', purpose: 'hearth.chat', outcome: 'failed', error: '429' })
-    await recordModelEvent({ slot: 'jev:jev-latest', purpose: 'hearth.gate', outcome: 'answered' })
+    await recordModelEvent({ slot: 'gemini:flash-lite', purpose: 'hearth.gate', outcome: 'answered' })
     await recordModelEvent({ slot: 'gemini:flash', purpose: 'hearth.summary', outcome: 'answered' })
     const stats = await gatherStats()
     expect(stats.models).toEqual([{ model: 'gemini:flash', count: 2 }, { model: 'openrouter:free', count: 1 }])

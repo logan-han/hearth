@@ -419,9 +419,9 @@ const UNJUDGED = Symbol('unjudged')
 /**
  * Post-or-skip is decided in a fresh context against the evidence, by a
  * judge that answers two questions and never sees the writer's draft as its
- * own. Each judge draws its own line (Jev's in lib/jev.ts, the chain's in
- * lib/agent.ts) and what comes back is honoured as decided: a second line
- * here once stacked on Jev's and held back a grounded brief at 0.63. If the
+ * own. The judge draws its own line (in lib/agent.ts) and what comes back is
+ * honoured as decided: a second line here once stacked on the judge's and
+ * held back a grounded brief at 0.63. If the
  * decision itself cannot be made (a provider that will not return the
  * structured object) the draft goes out as it always did, and an admin hears
  * that the safety net was down; a decision the tick ran out of time for is
@@ -445,7 +445,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
   // and every one came back supported. The decision below asks its own
   // grounding question of the draft all at once, which is the coarser of the
   // two and drifts up with the draft's length, so what it takes to override a
-  // check that has already passed is set where the lines are, in lib/jev.ts. A
+  // check that has already passed is set where the line is, in lib/agent.ts. A
   // check that could not run, or one whose rewrite put back a draft nobody has
   // checked since, leaves this false and the full line stands.
   let verified = false

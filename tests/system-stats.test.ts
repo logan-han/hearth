@@ -18,7 +18,7 @@ let client: PGlite
 
 const HOUR = 3600_000
 const DAY = 24 * HOUR
-const INTEGRATION_KEYS = ['UP_API_TOKEN', 'POCKETSMITH_DEVELOPER_KEY', 'NOTION_TOKEN', 'JIRA_BASE_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN', 'OPENWEATHER_API_KEY', 'TYPESAFE_API_KEY', 'TAVILY_API_KEY', 'QSTASH_CURRENT_SIGNING_KEY']
+const INTEGRATION_KEYS = ['UP_API_TOKEN', 'POCKETSMITH_DEVELOPER_KEY', 'NOTION_TOKEN', 'JIRA_BASE_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN', 'OPENWEATHER_API_KEY', 'TAVILY_API_KEY', 'QSTASH_CURRENT_SIGNING_KEY']
 
 beforeEach(async () => {
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
@@ -180,7 +180,7 @@ describe('what System and Settings show an admin', () => {
     process.env.TAVILY_API_KEY = 'tv'
     const stats = await gatherStats()
     const on = Object.fromEntries(stats.connected.flatMap((g) => g.items.map((i) => [i.name, i.on])))
-    expect(on).toMatchObject({ 'Up Bank': true, Tavily: true, PocketSmith: false, Jira: false, Notion: false, Jev: false, OpenWeatherMap: false, QStash: false })
+    expect(on).toMatchObject({ 'Up Bank': true, Tavily: true, PocketSmith: false, Jira: false, Notion: false, OpenWeatherMap: false, QStash: false })
     expect(stats.chain.find((t) => t.name === 'gemini')).toMatchObject({ configured: true, models: ['gemini-flash'] })
   })
 

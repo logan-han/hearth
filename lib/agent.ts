@@ -9,7 +9,6 @@ import {
 } from 'ai'
 import { z } from 'zod'
 import { withModelFallback, structuredChain, modelChain, EndOnFailure, type ModelSlot } from './model'
-import { jevConfigured, wantsAssistant, claimsChange, checkClaims, decidePost, POST_REASONS } from './jev'
 import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, PENDING_WRITES, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
 import type { ToolContext } from './tools/context'
 import type { StagedCursor } from './tools/cursor'
@@ -458,15 +457,14 @@ const CLAIM_RULES = [
 /**
  * A typed judgement, like the ambient gate, rather than a list of verbs: the
  * household may have the bot speak any language, and a small model finds new
- * ways to say "done" faster than a pattern could be extended. Jev answers it
- * when a key is set; otherwise the chain does, as a structured call like the
- * others: recorded, so a slot that answers the choice with prose (the SDK
- * throws on that, and on an allowance thought away with nothing written)
- * falls behind the ones that answer it. Either way it ends at the turn's
- * deadline, since the check after a retry can start with little of it left.
+ * ways to say "done" faster than a pattern could be extended. The chain
+ * answers it as a structured call like the others: recorded, so a slot that
+ * answers the choice with prose (the SDK throws on that, and on an allowance
+ * thought away with nothing written) falls behind the ones that answer it. It
+ * ends at the turn's deadline, since the check after a retry can start with
+ * little of it left.
  */
 async function reportsChange(reply: string, chatId: string, deadline: number): Promise<boolean> {
-  if (jevConfigured()) return claimsChange({ reply, chatId, deadline })
   return withModelFallback(async (slot) => {
     const out = await traced(
       { traceName: 'hearth.claim', sessionId: chatId, tags: ['claim'], metadata: { model: slot.name } },
@@ -897,16 +895,13 @@ const DECISION_PROMPT = [
  * embellishments. Post or skip is all it decides: the draft it approves goes
  * out as written, so a retype cannot flatten the formatting or bring back a
  * figure the claim check never saw. Grounding is all it judges, too, and the
- * judge is never asked to choose: it answers the two questions Jev is asked
- * (lib/jev.ts), is anything in the draft not in the evidence and does the
- * draft only say there is nothing new, and code turns the answers into post
- * or skip. A judge asked for a verdict once held a whole brief back over a
- * mail item it took for a promotion, and again over a collection whose time
- * had passed: both were the writer's selection, neither was invented, and a
- * verdict left room to enforce the instruction instead. With a TypeSafe key
- * the answers are Jev's probabilities; the prompt below is the chain's, asked
- * when there is no key or Jev cannot answer, so a draft is never posted
- * unchecked while any judge is up.
+ * judge is never asked to choose: it answers two questions, is anything in
+ * the draft not in the evidence and does the draft only say there is nothing
+ * new, and code turns the answers into post or skip. A judge asked for a
+ * verdict once held a whole brief back over a mail item it took for a
+ * promotion, and again over a collection whose time had passed: both were the
+ * writer's selection, neither was invented, and a verdict left room to
+ * enforce the instruction instead.
  */
 export async function decideWatcherPost(input: {
   label: string
@@ -917,17 +912,6 @@ export async function decideWatcherPost(input: {
   /** When the decision must be made by, in epoch ms: the tick's, which the platform stops soon after. */
   deadline?: number
 }): Promise<PostDecision & { model: string }> {
-  if (jevConfigured()) {
-    try {
-      // Jev answers in a fraction of a second or not at all, so with a
-      // deadline it has half of what is left: a Jev that hangs still leaves
-      // the chain time to answer, and the draft is not left with no judge.
-      const jevBy = input.deadline === undefined ? undefined : Date.now() + Math.floor((input.deadline - Date.now()) / 2)
-      return await decidePost({ ...input, deadline: jevBy })
-    } catch (err) {
-      console.warn(`[agent] Jev could not decide on "${input.label}"; asking the chain:`, describeError(err))
-    }
-  }
   return withModelFallback(async (slot) => {
     const r = await traced({ traceName: 'hearth.decision', tags: ['decision'], metadata: { label: input.label, model: slot.name } }, () =>
       generateText({
@@ -949,18 +933,25 @@ export async function decideWatcherPost(input: {
  * How sure the chain must be of its two answers before a post goes out on
  * them. A chat model's confidence is its own estimate, not a calibrated
  * probability, and one that admits doubt is usually right to: the grey zone
- * is a skip. Jev's lines are its own, in lib/jev.ts.
+ * is a skip.
  */
 export const CHAIN_POST_CONFIDENCE = 0.7
 
+/** Why a draft is held back, for the log and the admin's note. */
+const POST_REASONS = {
+  nothingNew: 'the draft only says there is nothing new',
+  invented: 'the draft states something the evidence does not contain',
+  unsure: 'the judge was not sure enough of its answers',
+} as const
+
 /**
- * The chain's two answers combined the way lib/jev.ts combines Jev's: nothing
- * new skips, invented skips, doubt skips, the rest posts. `verified` says the
- * claim check has already been through this draft statement by statement
- * against the same evidence and passed every one, and it does here what the
- * higher line does on Jev's side: this question is asked of the whole draft at
- * once, so once the finer check has passed, only an answer the judge is sure
- * of overrides it, and its doubt is no longer reason enough on its own.
+ * The chain's two answers combined in code: nothing new skips, invented
+ * skips, doubt skips, the rest posts. `verified` says the claim check has
+ * already been through this draft statement by statement against the same
+ * evidence and passed every one. This question is asked of the whole draft at
+ * once, which is the coarser of the two, so once the finer check has passed,
+ * only an answer the judge is sure of overrides it, and its doubt is no longer
+ * reason enough on its own.
  */
 function fromAnswers(o: z.infer<typeof postAnswersSchema>, verified: boolean): PostDecision {
   if (o.nothing_new) return { decision: 'skip', confidence: o.confidence, reason: POST_REASONS.nothingNew }
@@ -1031,10 +1022,8 @@ export type DraftReview = {
 }
 
 /**
- * Whether the evidence supports each statement. Jev judges them all in one
- * call when a key is set, the evidence sent once and the statements weighed
- * in parallel; the chain is asked, one statement per call, when there is no
- * key or Jev cannot answer. Either way the checker sees the evidence and one
+ * Whether the evidence supports each statement: the chain is asked one
+ * statement per call, in parallel. The checker sees the evidence and one
  * statement, never the draft.
  */
 async function checkEach(
@@ -1045,13 +1034,6 @@ async function checkEach(
   meta: (step: string, model: string) => Parameters<typeof traced>[0],
   deadline?: number,
 ): Promise<boolean[]> {
-  if (jevConfigured()) {
-    try {
-      return (await checkClaims({ label, claims, evidence, deadline })).map((c) => c.supported)
-    } catch (err) {
-      console.warn(`[agent] Jev could not check the "${label}" draft; asking the chain:`, describeError(err))
-    }
-  }
   return Promise.all(
     claims.map((claim) =>
       withModelFallback((slot) =>
@@ -1194,19 +1176,12 @@ async function askGate(
   return picked
 }
 
-/** A history message as one line of transcript; user lines already carry the speaker's name. */
-function transcriptLine(m: ModelMessage): string {
-  const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
-  return m.role === 'assistant' ? `Hearth: ${text}` : text
-}
-
 /**
  * Cheap gate for ambient group chatter: should the bot chime in at all?
- * Fails closed (stay quiet) on any error. With a TypeSafe key the question
- * goes to Jev once, as one probability with a line drawn on it. Otherwise it
- * runs on one chain model only and replies only when the question answered
- * from both sides agrees: most chatter is settled by the first call, and the
- * second is only spent on a message the first call wanted to answer.
+ * Fails closed (stay quiet) on any error. It runs on one chain model only and
+ * replies only when the question answered from both sides agrees: most
+ * chatter is settled by the first call, and the second is only spent on a
+ * message the first call wanted to answer.
  */
 export async function shouldChimeIn(input: {
   chatId: string
@@ -1216,13 +1191,6 @@ export async function shouldChimeIn(input: {
 }): Promise<boolean> {
   const history = (await historyMessages(input.chatId, input.excludeMessageId)).slice(-6)
   try {
-    if (jevConfigured()) {
-      return await wantsAssistant({
-        chatId: input.chatId,
-        conversation: history.map(transcriptLine),
-        message: `${input.memberName}: ${input.text}`,
-      })
-    }
     return await withModelFallback(
       async (slot) => {
         const first = await askGate(slot, history, input, 'reply')

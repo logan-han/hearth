@@ -8,16 +8,6 @@ import { WATCHERS } from '@/lib/watchers'
 const generateText = vi.hoisted(() => vi.fn())
 vi.mock('ai', async (orig) => ({ ...(await orig<typeof import('ai')>()), generateText }))
 
-/** Jev, with the transport faked: what the SDK would have asked, and the probabilities it hands back. */
-const systemOne = vi.hoisted(() => vi.fn())
-vi.mock('@typesafe-ai/sdk', async (orig) => {
-  const actual = await orig<typeof import('@typesafe-ai/sdk')>()
-  class TypeSafeClient {
-    systemOne = systemOne
-  }
-  return { ...actual, TypeSafeClient }
-})
-
 // Nobody Telegram is asked about is in the room: a group turn that reaches
 // that question has been let past the shared-room rule, which is the point.
 vi.mock('@/lib/headcount', () => ({ presentIn: vi.fn(async () => []), unaccountedIn: vi.fn(async () => 0) }))
@@ -64,7 +54,6 @@ beforeEach(async () => {
   process.env.GEMINI_MODEL = 'gemini-3.5-flash-lite'
   delete process.env.LLM_BASE_URL
   delete process.env.OPENROUTER_API_KEY
-  delete process.env.TYPESAFE_API_KEY
   client = (await freshDb()).client
 })
 afterEach(async () => closeDb(client))
@@ -1029,7 +1018,7 @@ describe('a reply that reports a change no tool made', () => {
       .mockResolvedValueOnce(judged('no_change_claimed'))
     expect((await runAgent({ ...input, member })).text).toBe(shown)
     expect(generateText).toHaveBeenCalledTimes(2)
-    // The chain's judge is given the same line Jev's question draws: a draft shown for a yes is no change.
+    // The judge is told where the line is: a draft shown for a yes is no change.
     const judge = generateText.mock.calls[1][0]
     expect(judge.telemetry.functionId).toBe('hearth.claim')
     expect(judge.system).toContain('shows a draft or a proposal and asks for a yes before sending or adding it is no_change_claimed')
@@ -1627,151 +1616,3 @@ describe('watcher formatting', () => {
   })
 })
 
-/*
- * With a TypeSafe key the typed judgements go to Jev: one call, a probability
- * back, the line drawn in lib/jev.ts. The chain keeps writing, and is asked a
- * judgement only when Jev cannot answer it.
- */
-describe('with a TypeSafe key', () => {
-  const input = { chatId: '-100', chatType: 'group', member: null, memberName: 'Ada', text: 'replace the dentist with Thursday 2pm' }
-  const jev = (answers: Record<string, unknown>) => ({ model: 'jev-1.13.0', answers, usage: { input_tokens: 80, output_tokens: 0 } })
-  const noul = (p: number) => ({ type: 'noul', noul: p })
-  const pick = (supported: number) => ({ type: 'choice', choice: supported >= 0.5 ? 'supported' : 'not_in_evidence', confidence: 0.9, probabilities: { supported, contradicted: 0, not_in_evidence: 1 - supported } })
-
-  beforeEach(() => {
-    process.env.TYPESAFE_API_KEY = 'ts-test'
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
-  })
-
-  it('gates on Jev alone, with the conversation as transcript lines and the bot\'s own lines marked', async () => {
-    await q.recordMessage({ chatId: '-100', authorName: 'Sam', role: 'user', content: 'that movie was so bad' })
-    await q.recordMessage({ chatId: '-100', role: 'assistant', content: 'Noted.' })
-    systemOne.mockResolvedValue(jev({ forAssistant: noul(0.91) }))
-    expect(await shouldChimeIn({ chatId: '-100', text: 'anyone know the wifi password?', memberName: 'Ada' })).toBe(true)
-    expect(generateText).not.toHaveBeenCalled()
-    expect(systemOne).toHaveBeenCalledTimes(1)
-    expect(systemOne.mock.calls[0][0].state).toEqual({
-      conversation: ['Sam: that movie was so bad', 'Hearth: Noted.'],
-      message: 'Ada: anyone know the wifi password?',
-    })
-  })
-
-  it('stays quiet on a low probability, and fails closed when Jev is down', async () => {
-    systemOne.mockResolvedValue(jev({ forAssistant: noul(0.2) }))
-    expect(await shouldChimeIn({ chatId: '-100', text: 'lol same', memberName: 'Ada' })).toBe(false)
-    systemOne.mockRejectedValue(new Error('fetch failed'))
-    expect(await shouldChimeIn({ chatId: '-100', text: 'lol same', memberName: 'Ada' })).toBe(false)
-    expect(generateText).not.toHaveBeenCalled()
-  })
-
-  it('has Jev judge whether a chat reply reports a change no tool made, and sends the reply back on a yes', async () => {
-    generateText.mockResolvedValue(reply('Done, replaced it.'))
-    systemOne.mockResolvedValueOnce(jev({ claimsChange: noul(0.95) })).mockResolvedValueOnce(jev({ claimsChange: noul(0.05) }))
-    const r = await runAgent(input)
-    expect(r.text).toBe('Done, replaced it.')
-    expect(generateText).toHaveBeenCalledTimes(2)
-    expect(String(generateText.mock.calls[1][0].messages.at(-1).content)).toContain('Nothing has changed')
-    expect(systemOne.mock.calls[0][0].state).toEqual({ reply: 'Done, replaced it.' })
-    // The judgement itself never goes to the chain.
-    expect(generateText.mock.calls.every((c) => c[0].output === undefined)).toBe(true)
-  })
-
-  it('lets the reply stand when Jev cannot judge it', async () => {
-    generateText.mockResolvedValue(reply('Done, replaced it.'))
-    systemOne.mockRejectedValue(new Error('fetch failed'))
-    expect((await runAgent(input)).text).toBe('Done, replaced it.')
-    expect(generateText).toHaveBeenCalledTimes(1)
-  })
-
-  it('stops waiting on Jev\'s judgement of the reply at the turn\'s deadline, and lets the reply stand', async () => {
-    generateText.mockResolvedValue(reply('Done, replaced it.'))
-    // Jev would say the reply claims a change, but only after the turn's time is up.
-    systemOne.mockImplementation((_req: unknown, opts?: { signal?: AbortSignal }) =>
-      new Promise((resolve, reject) => {
-        const late = setTimeout(() => resolve(jev({ claimsChange: noul(0.95) })), 3_000)
-        opts?.signal?.addEventListener('abort', () => {
-          clearTimeout(late)
-          reject(opts.signal?.reason)
-        })
-      }),
-    )
-    const started = Date.now()
-    const r = await runAgent({ ...input, deadline: started + 500 })
-    expect(r.text).toBe('Done, replaced it.')
-    expect(generateText).toHaveBeenCalledTimes(1)
-    expect(Date.now() - started).toBeLessThan(2_500)
-  })
-
-  it('holds Jev\'s checks and post decision to the caller\'s deadline, as it does the chain\'s', async () => {
-    generateText.mockResolvedValueOnce({ ...reply(''), output: { claims: ['$389.60 to FARESAVER'] } })
-    systemOne.mockResolvedValueOnce(jev({ c0: pick(0.94) })).mockResolvedValueOnce(jev({ invented: noul(0.06), nothingNew: noul(0.03) }))
-    const deadline = Date.now() + 10_000
-    await reviewDraft({ label: 'x', draft: '2Up: $389.60 FARESAVER LISBON.', evidence: 'DATA ...', deadline })
-    await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e', deadline })
-    expect(systemOne).toHaveBeenCalledTimes(2)
-    for (const [, opts] of systemOne.mock.calls) expect(opts?.signal).toBeInstanceOf(AbortSignal)
-  })
-
-  it('checks every claim in one Jev call against the evidence, then edits with the chain', async () => {
-    generateText
-      .mockResolvedValueOnce({ ...reply(''), output: { claims: ['$389.60 to FARESAVER', 'a trip to Lisbon was booked'] } })
-      .mockResolvedValueOnce({ ...reply(''), output: { message: '2Up: $389.60 FARESAVER LISBON.' } })
-    systemOne.mockResolvedValue(jev({ c0: pick(0.94), c1: pick(0.08) }))
-    const r = await reviewDraft({ label: 'x', draft: '2Up: $389.60 FARESAVER LISBON. Looks like a trip to Lisbon!', evidence: 'DATA ...' })
-    expect(r.unsupported).toEqual(['a trip to Lisbon was booked'])
-    expect(r.message).toBe('2Up: $389.60 FARESAVER LISBON.')
-    expect(systemOne).toHaveBeenCalledTimes(1)
-    expect(systemOne.mock.calls[0][0].state).toEqual({ evidence: 'DATA ...' })
-    expect(Object.keys(systemOne.mock.calls[0][0].questions)).toEqual(['c0', 'c1'])
-    // Extract and rewrite are writing jobs and stay with the chain: two calls, neither a check.
-    expect(generateText).toHaveBeenCalledTimes(2)
-    expect(generateText.mock.calls.map((c) => c[0].output.name ?? '')).not.toContain('check')
-  })
-
-  it('asks the chain to check the claims when Jev cannot', async () => {
-    generateText
-      .mockResolvedValueOnce({ ...reply(''), output: { claims: ['$389.60 to FARESAVER'] } })
-      .mockResolvedValueOnce({ ...reply(''), output: { supported: true } })
-    systemOne.mockRejectedValue(new Error('529 overloaded'))
-    const r = await reviewDraft({ label: 'x', draft: '2Up: $389.60 FARESAVER LISBON.', evidence: 'DATA ...' })
-    expect(r.message).toBe('2Up: $389.60 FARESAVER LISBON.')
-    expect(generateText).toHaveBeenCalledTimes(2)
-    expect(String(generateText.mock.calls[1][0].prompt)).toContain('STATEMENT TO CHECK:\n$389.60 to FARESAVER')
-  })
-
-  it('decides post or skip with Jev, and never asks the chain while Jev answers', async () => {
-    systemOne.mockResolvedValue(jev({ invented: noul(0.06), nothingNew: noul(0.03) }))
-    const d = await decideWatcherPost({ label: '2Up transactions', draft: 'draft', evidence: 'evidence' })
-    expect(d).toEqual({ decision: 'post', confidence: 0.94, model: 'jev:jev-latest' })
-    expect(generateText).not.toHaveBeenCalled()
-    expect(systemOne.mock.calls[0][0].state).toEqual({ draft: 'draft', evidence: 'evidence' })
-  })
-
-  it('falls back to the chain for the decision when Jev is down, asked the same two questions', async () => {
-    systemOne.mockRejectedValue(new Error('fetch failed'))
-    generateText.mockResolvedValue({ ...reply(''), output: { invented: true, nothing_new: false, confidence: 0.8 } })
-    const d = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
-    expect(d).toMatchObject({ decision: 'skip', confidence: 0.8, model: 'gemini:gemini-3.5-flash-lite', reason: expect.stringContaining('evidence does not contain') })
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Jev could not decide'), 'fetch failed')
-  })
-
-  it('leaves the chain part of the decision\'s time when Jev hangs near the deadline', async () => {
-    systemOne.mockImplementationOnce((_req: unknown, opts?: { signal?: AbortSignal }) =>
-      new Promise((_resolve, reject) => {
-        opts?.signal?.addEventListener('abort', () => reject(opts.signal?.reason))
-      }),
-    )
-    generateText.mockResolvedValue({ ...reply(''), output: { invented: false, nothing_new: false, confidence: 0.9 } })
-    const d = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e', deadline: Date.now() + 400 })
-    expect(d.decision).toBe('post')
-    expect(generateText).toHaveBeenCalledTimes(1)
-  })
-
-  it('records its calls beside the chain, under the Jev slot', async () => {
-    systemOne.mockResolvedValue(jev({ forAssistant: noul(0.1) }))
-    await shouldChimeIn({ chatId: '-100', text: 'hi', memberName: 'Ada' })
-    const { chainHealth } = await import('@/lib/model-events')
-    const health = await chainHealth(1)
-    expect(health.slots.map((s) => s.slot)).toContain('jev:jev-latest')
-  })
-})
