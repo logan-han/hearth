@@ -12,7 +12,7 @@ import { retryTickAt } from '@/lib/scheduler'
 import { timezone, idSet } from '@/lib/env'
 import { db, schema } from '@/lib/db'
 import { eq } from 'drizzle-orm'
-import { runAgent, decideWatcherPost, reviewDraft, looksBefore, TURN_BUDGET_MS, type AgentResult } from '@/lib/agent'
+import { runAgent, decideWatcherPost, reviewDraft, cutFromDraft, looksBefore, TURN_BUDGET_MS, type AgentResult } from '@/lib/agent'
 import { buildTools, type ToolName } from '@/lib/tools'
 import type { ToolContext } from '@/lib/tools/context'
 import { WATCHERS, isWatcherKind, isGroupChat, watcherInstruction, type WatcherKind } from '@/lib/watchers'
@@ -417,6 +417,45 @@ const SERVICE_PROBLEM =
 const UNJUDGED = Symbol('unjudged')
 
 /**
+ * The second round for a checked draft the post decision faulted on one
+ * statement: that statement cut, and what is left put to the decision again.
+ * The cut draft is a rewrite nobody has checked since, so it is judged on the
+ * full line. Hands back the draft to post, or what to add to the admin's note
+ * when it is still held. Nothing here throws, and nothing here is UNJUDGED:
+ * the judge ruled once, and a second round that cannot be run (no model, no
+ * time) leaves that ruling standing.
+ */
+async function cutAndRejudge(
+  a: Automation,
+  member: Member | undefined,
+  draft: string,
+  statement: string,
+  evidence: string,
+  deadline: number,
+): Promise<{ posted?: string; why: string }> {
+  try {
+    const rest = await cutFromDraft({ label: a.label, draft, unsupported: [statement], deadline })
+    if (!rest) return { why: '; cutting it left nothing to post' }
+    const d = await decideWatcherPost({ label: a.label, draft: rest, evidence, verified: false, deadline })
+    console.info(
+      '[tick] decision',
+      JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, verified: false, model: d.model, reason: d.reason ?? null, cut: statement }),
+    )
+    if (d.decision !== 'post') {
+      return { why: `; with it cut, the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}` }
+    }
+    console.warn(`[tick] ${a.label}: cut the statement the post check faulted, and the rest passed: ${statement}`)
+    await tellAdminQuietly(
+      member,
+      `Watcher **${a.label}** posts without one statement: the post check said the evidence does not contain it, and the rest passed a second check. Cut: ${statement}`,
+    )
+    return { posted: rest, why: '' }
+  } catch (err) {
+    return { why: `; it could not be cut and judged again (${describeError(err)})` }
+  }
+}
+
+/**
  * Post-or-skip is decided in a fresh context against the evidence, by a
  * judge that answers two questions and never sees the writer's draft as its
  * own. The judge draws its own line (in lib/agent.ts) and what comes back is
@@ -485,9 +524,19 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
       JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, verified, model: d.model, reason: d.reason ?? null }),
     )
     if (d.decision === 'post') return reviewed
-    const why =
-      `the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}` +
-      (cut.length ? `. The claim check had already cut: ${cut.join(' | ')}` : '')
+    let why = `the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}`
+    // A draft the claim check passed whole, which the judge faults on one
+    // statement it quotes: that statement is cut, as a claim that fails the
+    // check is, and the rest is judged once more rather than going down with
+    // it. A whole brief was once lost that way over a To do a later email had
+    // answered: the check passed it (the request says it) and the judge read
+    // it with the later mail beside it.
+    if (verified && d.notInEvidence) {
+      const again = await cutAndRejudge(a, member, reviewed, d.notInEvidence, evidence, deadline)
+      if (again.posted !== undefined) return again.posted
+      why += again.why
+    }
+    if (cut.length) why += `. The claim check had already cut: ${cut.join(' | ')}`
     console.warn(`[tick] ${a.label}: held back, ${why}`)
     await tellAdminQuietly(member, heldBack(a, why, reviewed))
     return null

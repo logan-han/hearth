@@ -310,6 +310,14 @@ had just passed all six of its statements. So a draft the claim check has been
 through and passed whole is held only on an invention the judge is sure of
 (`CHAIN_POST_CONFIDENCE` in `lib/agent.ts`): its doubt alone no longer holds
 a checked draft back, and the same brief with one invented figure is still held.
+And when the judge is sure, and quotes the one statement it faults, a checked
+draft is not held whole on it either: that statement is cut, as a claim that
+fails the check is, and what is left is judged once more on the full line, so
+the brief posts without it and an admin hears what was cut. A brief was once
+lost whole over a To do for a form that a later email in the same mailbox had
+thanked the household for submitting: the claim check passed the statement,
+because the form email says it, and the judge read it beside the later mail.
+The brief's instruction now sets such a request aside before sorting the mail.
 
 ### 5. Deploy
 

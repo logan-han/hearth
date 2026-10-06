@@ -877,7 +877,13 @@ const postAnswersSchema = z.object({
   confidence: z.number().min(0).max(1).describe('How sure you are of both answers, 0 to 1'),
 })
 
-export type PostDecision = { decision: 'post' | 'skip'; confidence: number; reason?: string }
+export type PostDecision = {
+  decision: 'post' | 'skip'
+  confidence: number
+  reason?: string
+  /** The statement the judge quoted as not in the evidence, when that is what it skipped for. */
+  notInEvidence?: string
+}
 
 const DECISION_PROMPT = [
   'You answer two questions about a draft post from a scheduled family-assistant check, against the evidence it was written from. You do not decide whether it is posted; code does that from your answers.',
@@ -958,7 +964,9 @@ function fromAnswers(o: z.infer<typeof postAnswersSchema>, verified: boolean): P
   const sure = o.confidence >= CHAIN_POST_CONFIDENCE
   if (o.invented && (sure || !verified)) {
     const quoted = o.not_in_evidence?.trim()
-    return { decision: 'skip', confidence: o.confidence, reason: quoted ? `${POST_REASONS.invented}: ${quoted}` : POST_REASONS.invented }
+    return quoted
+      ? { decision: 'skip', confidence: o.confidence, reason: `${POST_REASONS.invented}: ${quoted}`, notInEvidence: quoted }
+      : { decision: 'skip', confidence: o.confidence, reason: POST_REASONS.invented }
   }
   if (!sure && !verified) return { decision: 'skip', confidence: o.confidence, reason: POST_REASONS.unsure }
   return { decision: 'post', confidence: o.confidence }
@@ -1103,27 +1111,50 @@ export async function reviewDraft(input: { label: string; draft: string; evidenc
   // Even when every listed claim fails the post is edited, not dropped: the
   // list may be the capped few, and what it left out is still the post.
   const supported = claims.filter((_, i) => checks[i])
-  const rewritten = await withModelFallback((slot) =>
-    traced(meta('rewrite', slot.name), () =>
-      generateText({
-        model: slot.model,
-        system: REWRITE_PROMPT,
-        prompt:
-          `POST:\n${input.draft}\n\nNOT SUPPORTED, remove wherever they appear:\n${unsupported.map((u) => `- ${u}`).join('\n')}` +
-          (supported.length ? `\n\nSUPPORTED, keep as written:\n${supported.map((c) => `- ${c}`).join('\n')}` : ''),
-        output: Output.object({ schema: rewriteSchema, name: 'rewrite' }),
-        temperature: 0,
-        maxOutputTokens: 800,
-        timeout: within(30_000, input.deadline),
-        telemetry: callTelemetry('hearth.verify'),
-      }),
-    ).then((r) => r.output.message.trim()),
+  const rewritten = await rewriteWithout({ label: input.label, draft: input.draft, unsupported, supported, deadline: input.deadline }, chain).catch(
+    (err: unknown) => ({ failed: describeError(err) }),
+  )
+  if (typeof rewritten !== 'string') return { claims, unsupported, message: null, rewriteFailed: rewritten.failed }
+  return { claims, unsupported, message: rewritten || null }
+}
+
+/** The draft with the listed statements taken out and nothing else changed; empty when nothing worth posting is left. */
+async function rewriteWithout(
+  input: { label: string; draft: string; unsupported: string[]; supported: string[]; deadline?: number },
+  chain: ModelSlot[],
+): Promise<string> {
+  return withModelFallback(
+    (slot) =>
+      traced({ traceName: 'hearth.verify', tags: ['verify', 'rewrite'], metadata: { label: input.label, model: slot.name } }, () =>
+        generateText({
+          model: slot.model,
+          system: REWRITE_PROMPT,
+          prompt:
+            `POST:\n${input.draft}\n\nNOT SUPPORTED, remove wherever they appear:\n${input.unsupported.map((u) => `- ${u}`).join('\n')}` +
+            (input.supported.length ? `\n\nSUPPORTED, keep as written:\n${input.supported.map((c) => `- ${c}`).join('\n')}` : ''),
+          output: Output.object({ schema: rewriteSchema, name: 'rewrite' }),
+          temperature: 0,
+          maxOutputTokens: 800,
+          timeout: within(30_000, input.deadline),
+          telemetry: callTelemetry('hearth.verify'),
+        }),
+      ).then((r) => r.output.message.trim()),
     chain,
     'hearth.verify',
     input.deadline,
-  ).catch((err: unknown) => ({ failed: describeError(err) }))
-  if (typeof rewritten !== 'string') return { claims, unsupported, message: null, rewriteFailed: rewritten.failed }
-  return { claims, unsupported, message: rewritten || null }
+  )
+}
+
+/**
+ * A statement cut from a draft the claim check had passed whole, the way the
+ * check cuts a claim that fails it: for the one the post decision quotes as
+ * not in the evidence, so that the rest can be judged again rather than held
+ * with it. Null when nothing worth posting is left. A rewrite that cannot be
+ * made throws, and the caller decides what becomes of the draft then.
+ */
+export async function cutFromDraft(input: { label: string; draft: string; unsupported: string[]; deadline?: number }): Promise<string | null> {
+  const rest = await rewriteWithout({ ...input, supported: [] }, await structuredChain())
+  return rest || null
 }
 
 /** A structured call that produced no usable object, as opposed to a transport failure. */

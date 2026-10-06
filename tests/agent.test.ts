@@ -12,7 +12,7 @@ vi.mock('ai', async (orig) => ({ ...(await orig<typeof import('ai')>()), generat
 // that question has been let past the shared-room rule, which is the point.
 vi.mock('@/lib/headcount', () => ({ presentIn: vi.fn(async () => []), unaccountedIn: vi.fn(async () => 0) }))
 
-const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, isStructuredOutputError, unconfirmedLine } = await import('@/lib/agent')
+const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, cutFromDraft, isStructuredOutputError, unconfirmedLine } = await import('@/lib/agent')
 const { generateText: sdkGenerateText } = await vi.importActual<typeof import('ai')>('ai')
 const { MockLanguageModelV4 } = await import('ai/test')
 
@@ -1422,7 +1422,12 @@ describe('decideWatcherPost', () => {
     expect(invented).toEqual({
       decision: 'skip', confidence: 0.8, model: 'gemini:gemini-3.5-flash-lite',
       reason: 'the draft states something the evidence does not contain: a time the evidence does not give',
+      // Named apart from the reason, so the tick can cut it from a checked draft.
+      notInEvidence: 'a time the evidence does not give',
     })
+    generateText.mockResolvedValueOnce(answers({ invented: true, confidence: 0.8 }))
+    const unquoted = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
+    expect(unquoted).toEqual({ decision: 'skip', confidence: 0.8, model: 'gemini:gemini-3.5-flash-lite', reason: 'the draft states something the evidence does not contain' })
     generateText.mockResolvedValueOnce(answers({ nothing_new: true, confidence: 1 }))
     const quiet = await decideWatcherPost({ label: 'x', draft: 'Nothing new.', evidence: 'e' })
     expect(quiet).toMatchObject({ decision: 'skip', confidence: 1, reason: 'the draft only says there is nothing new' })
@@ -1592,6 +1597,37 @@ describe('reviewDraft', () => {
       'Timed out before any model was asked',
     )
     expect(generateText).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('cutFromDraft', () => {
+  const out = (o: unknown) => ({ ...reply(''), output: o })
+
+  it('takes the statements it is given out of the draft, by the rewrite the claim check uses', async () => {
+    generateText.mockResolvedValueOnce(out({ message: 'Bins out tonight.' }))
+    const rest = await cutFromDraft({ label: 'Morning brief', draft: 'Bins out tonight. The swimming form is due Friday.', unsupported: ['the swimming form is due Friday'] })
+    expect(rest).toBe('Bins out tonight.')
+    expect(generateText).toHaveBeenCalledTimes(1)
+    const call = generateText.mock.calls[0][0]
+    expect(String(call.prompt)).toContain('POST:\nBins out tonight. The swimming form is due Friday.')
+    expect(String(call.prompt)).toContain('NOT SUPPORTED, remove wherever they appear:\n- the swimming form is due Friday')
+    expect(String(call.prompt)).not.toContain('SUPPORTED, keep as written')
+    expect(String(call.system)).toContain('Everything else stays exactly as written')
+  })
+
+  it('answers null when nothing worth posting is left, and throws when the rewrite cannot be made', async () => {
+    generateText.mockResolvedValueOnce(out({ message: '' }))
+    expect(await cutFromDraft({ label: 'x', draft: 'Due Friday.', unsupported: ['due Friday'] })).toBeNull()
+    generateText.mockRejectedValue(new Error('No object generated'))
+    await expect(cutFromDraft({ label: 'x', draft: 'Due Friday.', unsupported: ['due Friday'] })).rejects.toThrow('No object generated')
+  })
+
+  it("is over by the caller's deadline, and asks no model once it has passed", async () => {
+    generateText.mockResolvedValueOnce(out({ message: 'Bins out tonight.' }))
+    await cutFromDraft({ label: 'x', draft: 'd', unsupported: ['s'], deadline: Date.now() + 10_000 })
+    expect(generateText.mock.calls[0][0].timeout.totalMs).toBeLessThanOrEqual(10_000)
+    await expect(cutFromDraft({ label: 'x', draft: 'd', unsupported: ['s'], deadline: Date.now() - 1 })).rejects.toThrow('Timed out before any model was asked')
+    expect(generateText).toHaveBeenCalledTimes(1)
   })
 })
 

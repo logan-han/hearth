@@ -7,6 +7,7 @@ const runAgent = vi.fn()
 const looksBefore = vi.fn((_err?: unknown) => [] as unknown[])
 const decideWatcherPost = vi.fn()
 const reviewDraft = vi.fn()
+const cutFromDraft = vi.fn()
 const newTransactions = vi.fn()
 const newMail = vi.fn()
 const listEvents = vi.fn()
@@ -80,7 +81,7 @@ vi.mock('@/lib/db/queries', () => ({
 }))
 vi.mock('@/lib/builtins', () => ({ installBuiltins }))
 vi.mock('@/lib/agent', async (orig) => ({
-  runAgent, decideWatcherPost, reviewDraft, looksBefore,
+  runAgent, decideWatcherPost, reviewDraft, cutFromDraft, looksBefore,
   TURN_BUDGET_MS: (await orig<typeof import('@/lib/agent')>()).TURN_BUDGET_MS,
 }))
 vi.mock('@/lib/tools', () => ({ buildTools }))
@@ -138,6 +139,7 @@ beforeEach(() => {
   runAgent.mockResolvedValue({ text: 'Bins out tonight.', notices: [], model: 'primary:test' })
   decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.9, model: 'primary:test' })
   reviewDraft.mockImplementation(async ({ draft }: { draft: string }) => ({ claims: [], unsupported: [], message: draft }))
+  cutFromDraft.mockResolvedValue(null)
   newTransactions.mockResolvedValue({ account: '2Up', count: 0, transactions: [] })
   newMail.mockResolvedValue({ accounts: [] })
   listEvents.mockResolvedValue({ events: [] })
@@ -903,6 +905,115 @@ describe('the post decision', () => {
     const [, text] = send.mock.calls[0]
     expect(text).toContain('skip at 0.59: the draft states something the evidence does not contain. The claim check had already cut: a refund')
     expect(text).toContain('Draft:\nBins out tonight.')
+  })
+
+  // A whole brief was once held back at 0.95 over one To do a later email had
+  // answered: the claim check passed the statement (the request says it) and
+  // the judge, sure, faulted it with the later mail beside it. One statement
+  // the judge quotes is cut from a draft the check has passed, as a failed
+  // claim is, and the rest is judged again rather than lost with it.
+  it('cuts the one statement a sure judge faults in a checked draft, judges the rest again, and posts that', async () => {
+    runAgent.mockResolvedValue({ text: 'Bins out tonight. The swimming form is due Friday.', notices: [], model: 'primary:test' })
+    reviewDraft.mockResolvedValue({ claims: ['bins tonight', 'the swimming form is due Friday'], unsupported: [], message: 'Bins out tonight. The swimming form is due Friday.' })
+    decideWatcherPost
+      .mockResolvedValueOnce({
+        decision: 'skip', confidence: 0.95, model: 'primary:test',
+        reason: 'the draft states something the evidence does not contain: the swimming form is due Friday', notInEvidence: 'the swimming form is due Friday',
+      })
+      .mockResolvedValueOnce({ decision: 'post', confidence: 0.9, model: 'primary:test' })
+    cutFromDraft.mockResolvedValue('Bins out tonight.')
+    await authed()
+    expect(cutFromDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ label: 'bin night', draft: 'Bins out tonight. The swimming form is due Friday.', unsupported: ['the swimming form is due Friday'] }),
+    )
+    // The cut draft is a rewrite nobody has checked since: judged on the full line.
+    expect(decideWatcherPost).toHaveBeenCalledTimes(2)
+    expect(decideWatcherPost.mock.calls[1][0]).toMatchObject({ draft: 'Bins out tonight.', verified: false })
+    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('posts without one statement'))
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('Cut: the swimming form is due Friday'))
+    expect(send).not.toHaveBeenCalledWith('900', expect.stringContaining('held back'))
+  })
+
+  it('holds the draft, both answers in the note, when the rest is held too', async () => {
+    reviewDraft.mockResolvedValue({ claims: ['bins tonight'], unsupported: [], message: 'Bins out tonight.' })
+    decideWatcherPost
+      .mockResolvedValueOnce({ decision: 'skip', confidence: 0.95, model: 'primary:test', reason: 'the draft states something the evidence does not contain: a time', notInEvidence: 'a time' })
+      .mockResolvedValueOnce({ decision: 'skip', confidence: 0.6, model: 'primary:test', reason: 'the judge was not sure enough of its answers' })
+    cutFromDraft.mockResolvedValue('Bins out.')
+    await authed()
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+    expect(send).toHaveBeenCalledTimes(1)
+    const [to, text] = send.mock.calls[0]
+    expect(to).toBe('900')
+    expect(text).toContain(
+      'held back: the post check said skip at 0.95: the draft states something the evidence does not contain: a time; with it cut, the post check said skip at 0.60: the judge was not sure enough of its answers',
+    )
+    expect(text).toContain('Draft:\nBins out tonight.')
+  })
+
+  it('holds it when cutting the statement leaves nothing, and on the first ruling when the cut cannot be made', async () => {
+    reviewDraft.mockResolvedValue({ claims: ['bins tonight'], unsupported: [], message: 'Bins out tonight.' })
+    decideWatcherPost.mockResolvedValue({
+      decision: 'skip', confidence: 0.95, model: 'primary:test', reason: 'the draft states something the evidence does not contain: bins tonight', notInEvidence: 'bins tonight',
+    })
+    cutFromDraft.mockResolvedValue(null)
+    await authed()
+    expect(decideWatcherPost).toHaveBeenCalledTimes(1)
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('skip at 0.95: the draft states something the evidence does not contain: bins tonight; cutting it left nothing to post'))
+
+    send.mockClear()
+    decideWatcherPost.mockClear()
+    cutFromDraft.mockRejectedValue(new Error('No object generated'))
+    await authed()
+    expect(decideWatcherPost).toHaveBeenCalledTimes(1)
+    expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('; it could not be cut and judged again (No object generated)'))
+  })
+
+  it('leaves the first ruling standing, the draft held and what it read spent, when the tick ran out of time for the second round', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const start = Date.now()
+      const staged = [{ key: 'mail_cursor:-100999:1:google', at: '2026-10-06T01:00:00.000Z', ids: ['m1'], prev: null }]
+      runAgent.mockResolvedValueOnce({ text: 'Bins out tonight.', notices: [], model: 'primary:test', cursors: staged })
+      reviewDraft.mockResolvedValue({ claims: ['bins tonight'], unsupported: [], message: 'Bins out tonight.' })
+      decideWatcherPost.mockResolvedValue({
+        decision: 'skip', confidence: 0.95, model: 'primary:test', reason: 'the draft states something the evidence does not contain: tonight', notInEvidence: 'tonight',
+      })
+      // The judge had ruled; the cut was refused for want of time, which is no second ruling and no UNJUDGED.
+      cutFromDraft.mockImplementation(async () => {
+        vi.setSystemTime(start + 280_000)
+        throw new Error('Timed out before any model was asked')
+      })
+      await authed()
+      expect(decideWatcherPost).toHaveBeenCalledTimes(1)
+      expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+      expect(send).toHaveBeenCalledWith('900', expect.stringContaining('held back: the post check said skip at 0.95'))
+      expect(send).toHaveBeenCalledWith('900', expect.stringContaining('could not be cut and judged again (Timed out before any model was asked)'))
+      expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('cuts nothing from a draft the check did not pass whole, nor when the judge quoted no statement', async () => {
+    // The claim check cut something: the full line stands and the draft is held as before.
+    reviewDraft.mockResolvedValue({ claims: ['bins tonight', 'a refund'], unsupported: ['a refund'], message: 'Bins out tonight.' })
+    decideWatcherPost.mockResolvedValue({
+      decision: 'skip', confidence: 0.95, model: 'primary:test', reason: 'the draft states something the evidence does not contain: tonight', notInEvidence: 'tonight',
+    })
+    await authed()
+    expect(cutFromDraft).not.toHaveBeenCalled()
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('held back'))
+
+    send.mockClear()
+    reviewDraft.mockResolvedValue({ claims: ['bins tonight'], unsupported: [], message: 'Bins out tonight.' })
+    decideWatcherPost.mockResolvedValue({ decision: 'skip', confidence: 0.95, model: 'primary:test', reason: 'the draft states something the evidence does not contain' })
+    await authed()
+    expect(cutFromDraft).not.toHaveBeenCalled()
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('held back'))
   })
 
   it('posts what the judge decided: the line is the judge\'s own, never a second one here', async () => {

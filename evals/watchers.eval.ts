@@ -52,7 +52,7 @@ vi.mock('@/lib/tools', async (orig) => {
   return { ...actual, buildTools: (ctx: Parameters<typeof actual.buildTools>[0]) => withRecorded(actual.buildTools(ctx), STUBS, calls) }
 })
 
-const { runAgent, decideWatcherPost, reviewDraft } = await import('@/lib/agent')
+const { runAgent, decideWatcherPost, reviewDraft, cutFromDraft } = await import('@/lib/agent')
 const { WATCHERS, watcherInstruction } = await import('@/lib/watchers')
 const { plainData } = await import('@/lib/plain-data')
 const { toTelegramHtml } = await import('@/lib/telegram-format')
@@ -374,6 +374,79 @@ describe.skipIf(!liveChainConfigured())('morning brief, the post check', () => {
     const hard = d.decision === 'post'
     record({ case: 'decision: a stale collection is no reason to skip', hard: hard ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}${d.reason ? ` ${d.reason}` : ''}` })
     expect(d.decision).toBe('post')
+  })
+})
+
+/*
+ * A brief was held back whole, at 0.95, over one To do: a school's online
+ * form, which the mailbox also held the school's thanks for, sent three hours
+ * after the form and before the brief. The claim check passed the statement
+ * (the form email says it); the judge, with the thanks beside it, called it
+ * not in the evidence. Two things changed: the writer is told that a request
+ * a later email says is done gets no bullet, and when the judge faults one
+ * statement of a checked draft the tick cuts that and judges the rest again.
+ * These hold both.
+ */
+const FORM = {
+  id: 'm40', from: 'Riverbend College <forms@riverbendcollege.example>', subject: 'Slip from Riverbend College for Year 1 Swimming Program',
+  snippet: `Year 1 Swimming Program\n\nDear Rowan,\n\nRiverbend College has sent you a new online form for Juno.\n\nWe need your response by ${DAYS.due}. Please click this link to respond.`,
+  date: new Date(Date.now() - 86_400_000 - 4 * 3600_000).toISOString(),
+}
+const FORM_DONE = {
+  id: 'm41', from: 'Riverbend College <forms@riverbendcollege.example>', subject: "Thank you for your response 'Year 1 Swimming Program'",
+  snippet: 'Year 1 Swimming Program\n\nDear Rowan,\n\nThank you for your reply for Juno.\n\nYou can click this link at any time to view the form you submitted.',
+  date: new Date(Date.now() - 86_400_000 - 3600_000).toISOString(),
+}
+const answeredData = plainData({ events: { timezone: 'Australia/Melbourne', events: [] }, mail: mailbox([FORM_DONE, TRIAGE[1], FORM]) })
+const answeredEvidence = `INSTRUCTION:\n${briefInstruction}\n\nDATA:\n${answeredData}\n\nTOOL RESULTS:\n(none)`
+const staleDraft = [
+  '**To do**',
+  `- In Rowan's Gmail, Riverbend College asks for a response to the Year 1 Swimming Program online form for Juno by ${DAYS.due}.`,
+  '**Heads up**',
+  "- In Rowan's Gmail, Northbank Broadband says the connection at 12 Elm Street is active and the plan has started.",
+].join('\n')
+
+describe.skipIf(!liveChainConfigured())('morning brief, a request answered since', () => {
+  it('gives no To do to a form a later email thanks the household for submitting', async () => {
+    calls.length = 0
+    const r = await runAgent({ ...base, tools: WATCHERS.morning.tools, text: `Scheduled check "Morning brief".\n\n${briefInstruction}\n\nDATA (fetched just now):\n${answeredData}` })
+    const text = r.text
+    if (process.env.EVAL_PRINT) console.log(`\n----- answered-form brief -----\n${text}\n-----`)
+    const toDo = text.search(/\*\*\s*to[ -]?do\b/i)
+    const headsUp = text.search(/\*\*\s*heads[ -]?up\b/i)
+    const toDoPart = toDo < 0 ? '' : text.slice(toDo, headsUp > toDo ? headsUp : undefined)
+    const formNotAsked = !/swimming|form/i.test(toDoPart)
+    const broadbandKept = /broadband|connection|internet/i.test(text)
+    const hard = formNotAsked && broadbandKept && noLeak(text)
+    const g = await judgeGroundedness({ answer: text, context: answeredData })
+    record({ case: 'brief: answered form gets no To do', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: text.slice(0, 80) })
+    expect(formNotAsked).toBe(true)
+    expect(broadbandKept).toBe(true)
+    expect(noLeak(text)).toBe(true)
+    if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
+  })
+
+  it('posts the rest of a checked brief when the judge faults the stale To do, rather than holding it all', async () => {
+    const label = 'Morning brief'
+    const review = await reviewDraft({ label, draft: staleDraft, evidence: answeredEvidence })
+    const draft = review.message ?? staleDraft
+    const verified = review.claims.length > 0 && review.unsupported.length === 0
+    const first = await decideWatcherPost({ label, draft, evidence: answeredEvidence, verified })
+    let note = `check: ${review.unsupported.length}/${review.claims.length} cut | first ${first.decision}@${first.confidence}${first.notInEvidence ? ` naming: ${first.notInEvidence}` : ''}`
+    let posted: string | null = first.decision === 'post' ? draft : null
+    let rest: string | null = null
+    if (first.decision === 'skip' && first.notInEvidence) {
+      // What the tick does with that answer.
+      rest = await cutFromDraft({ label, draft, unsupported: [first.notInEvidence] })
+      const second = rest ? await decideWatcherPost({ label, draft: rest, evidence: answeredEvidence, verified: false }) : null
+      note += ` | cut: ${rest ? 'rest kept' : 'nothing left'}${second ? ` | second ${second.decision}@${second.confidence}${second.reason ? ` ${second.reason}` : ''}` : ''}`
+      posted = second?.decision === 'post' && rest ? rest : null
+    }
+    const hard = posted !== null && /broadband|connection/i.test(posted) && (rest === null || !/swimming/i.test(rest))
+    record({ case: 'decision: stale To do cut, the rest posts', hard: hard ? 'pass' : 'fail', model: first.model, note })
+    expect(posted).not.toBeNull()
+    expect(posted).toMatch(/broadband|connection/i)
+    if (rest !== null) expect(rest).not.toMatch(/swimming/i)
   })
 })
 
