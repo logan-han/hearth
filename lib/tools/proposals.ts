@@ -3,10 +3,10 @@ import { z } from 'zod'
 import {
   addProposal, pendingProposals, settleProposal, proposalForSource, addFamilyEvent, listFamilyEvents,
 } from '../db/queries'
-import { localToUtc, formatLocal, formatLocalDate, localDateKey, resolveSpan, nextLocalMidnight } from '../cron'
+import { localToUtc, localDateKey, resolveSpan, nextLocalMidnight } from '../cron'
 import { timezone } from '../env'
 import { announce, type ToolContext } from './context'
-import { FEED_LAG, ALL_DAY_END } from './familycal'
+import { FEED_LAG, ALL_DAY_END, whenLabel, spanLabel } from './familycal'
 
 const LOCAL_DATETIME = z
   .string()
@@ -75,7 +75,7 @@ export function proposalTools(ctx: ToolContext) {
               not_proposed_yet: true,
               that_day_already_has: {
                 on_calendar: known.events.map((e) => ({
-                  id: e.id, title: e.title, start_local: formatLocal(e.startsAt), location: e.location,
+                  id: e.id, title: e.title, start_local: whenLabel(e.startsAt, e.allDay), location: e.location,
                 })),
                 awaiting_yes: known.proposals.map((p) => ({ proposal_id: p.id, title: p.title })),
               },
@@ -98,7 +98,7 @@ export function proposalTools(ctx: ToolContext) {
         return {
           proposal_id: row.id,
           title,
-          start_local: allDay ? formatLocalDate(startsAt) : formatLocal(startsAt),
+          start_local: whenLabel(startsAt, allDay),
           all_day: allDay,
           location,
           next_step: 'Show this to the family and ask whether to add it. Do not add it yourself.',
@@ -116,7 +116,7 @@ export function proposalTools(ctx: ToolContext) {
           proposals: rows.map((r) => ({
             id: r.id,
             title: r.title,
-            start_local: formatLocal(r.startsAt),
+            start_local: whenLabel(r.startsAt, r.allDay),
             all_day: r.allDay,
             location: r.location,
           })),
@@ -145,7 +145,7 @@ export function proposalTools(ctx: ToolContext) {
               return {
                 held: true,
                 that_day_already_has: known.events.map((e) => ({
-                  id: e.id, title: e.title, start_local: formatLocal(e.startsAt), location: e.location,
+                  id: e.id, title: e.title, start_local: whenLabel(e.startsAt, e.allDay), location: e.location,
                 })),
                 next_step:
                   'If one of these is the same occasion, reject the proposal and say it is already on the calendar. ' +
@@ -171,7 +171,7 @@ export function proposalTools(ctx: ToolContext) {
           added: true,
           event_id: event.id,
           title: row.title,
-          ...announce(ctx, `Added to the family calendar: **${row.title}** — ${formatLocal(row.startsAt)}`, FEED_LAG),
+          ...announce(ctx, `Added to the family calendar: **${row.title}** — ${spanLabel(row.startsAt, row.endsAt, row.allDay)}`, FEED_LAG),
         }
       },
     }),

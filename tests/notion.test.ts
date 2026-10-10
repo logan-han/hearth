@@ -282,6 +282,21 @@ describe('notion_append_to_page', () => {
     expect(r.maybe_done).toBe(true)
   })
 
+  it('says what to change when Notion refuses the write, and that nothing else should be done in its place', async () => {
+    // Given only the status, a model asked to file a payslip there drafted an email nobody wanted instead.
+    fetchMock.mockResolvedValue({
+      ok: false, status: 403,
+      text: async () => '{"object":"error","status":403,"code":"restricted_resource","message":"Insufficient permissions for this endpoint."}',
+    })
+    const r = await call('notion_append_to_page', { id: 'p1', text: 'Payslip for the fortnight' })
+    expect(String(r.error)).toContain('can read this page but is not allowed to add to it')
+    expect(String(r.error)).toContain('Insert content capability')
+    expect(String(r.error)).toContain('do not do something else in its place')
+
+    fetchMock.mockResolvedValue({ ok: false, status: 500, text: async () => 'upstream broke' })
+    expect(String((await call('notion_append_to_page', { id: 'p1', text: 'x' })).error)).toBe('Notion API 500 on /blocks/p1/children: upstream broke')
+  })
+
   it('is additive only: it never issues a delete or a page update', async () => {
     fetchMock.mockResolvedValue(json({}))
     await call('notion_append_to_page', { id: 'p1', text: 'x' })

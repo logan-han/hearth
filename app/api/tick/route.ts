@@ -21,7 +21,7 @@ import { unaccountedIn } from '@/lib/headcount'
 import { commitCursors, type StagedCursor } from '@/lib/tools/cursor'
 import { send, PartlySent } from '@/lib/telegram'
 import { hydrateSecrets, recheckSecrets } from '@/lib/settings'
-import { flushTelemetry } from '@/lib/telemetry'
+import { flushTelemetry, traceRun, noteRun } from '@/lib/telemetry'
 import { pruneModelEvents } from '@/lib/model-events'
 import { parseLog, prune, underCap, recordPost, shouldWarn, markWarned, PROACTIVE_POSTS_PER_HOUR } from '@/lib/rate-cap'
 import type { Automation, Member } from '@/lib/db/schema'
@@ -119,23 +119,28 @@ async function maybeConsolidateMemory(now: Date, deadline: number): Promise<void
     .map((m) => `[${m.chatId}] ${m.role === 'user' ? (m.authorName ?? 'someone') : 'you'}: ${m.content.slice(0, 400)}`)
     .join('\n')
 
-  try {
-    await runAgent({
-      chatId: 'memory-sweep',
-      chatType: 'private',
-      member: null,
-      memberName: 'the household',
-      mode: 'sweep',
-      history: false,
-      text:
-        "Nightly memory pass. Yesterday's household talk follows; the Known household facts are in your context.\n\n" +
-        transcript,
-      deadline,
-    })
-  } catch (err) {
-    // A failed pass costs nothing; tomorrow re-reads a fresh day.
-    console.error('[tick] memory pass failed:', err)
-  }
+  await traceRun('hearth.sweep', { sessionId: 'memory-sweep', tags: ['sweep'] }, async () => {
+    noteRun({ input: transcript, metadata: { messages: talk.length } })
+    try {
+      const result = await runAgent({
+        chatId: 'memory-sweep',
+        chatType: 'private',
+        member: null,
+        memberName: 'the household',
+        mode: 'sweep',
+        history: false,
+        text:
+          "Nightly memory pass. Yesterday's household talk follows; the Known household facts are in your context.\n\n" +
+          transcript,
+        deadline,
+      })
+      noteRun({ output: result.text, metadata: { outcome: 'done', model: result.model } })
+    } catch (err) {
+      // A failed pass costs nothing; tomorrow re-reads a fresh day.
+      console.error('[tick] memory pass failed:', err)
+      noteRun({ output: describeError(err), metadata: { outcome: 'failed' }, level: 'ERROR' })
+    }
+  })
 }
 
 type Tools = ReturnType<typeof buildTools>
@@ -283,9 +288,11 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
   const fetched = await fetchFor(kind, a, ctx, tools)
   if (fetched.problems.length) {
     await tellAdminQuietly(member, `Watcher **${a.label}** hit a problem:\n\n${fetched.problems.join('\n')}`)
+    noteRun({ metadata: { fetch_problems: fetched.problems.length }, detail: { fetch_problems: fetched.problems }, level: 'WARNING' })
   }
   if (fetched.empty) {
     console.info(`[tick] ${a.label}: nothing new, no model call`)
+    noteRun({ output: 'nothing new', metadata: { outcome: 'nothing new' } })
     // Nothing new is still a look taken, and a first one sets the marker.
     await spentClean(a, ctx.pendingCursors ?? [])
     return
@@ -294,6 +301,7 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
   const watcher = WATCHERS[kind]
   const instruction = watcherInstruction(kind, a.chatId)
   const data = plainData(fetched.data)
+  noteRun({ input: `INSTRUCTION:\n${instruction}\n\nDATA:\n${data}` })
   const result = await counted(a, member, (err) => [...(ctx.pendingCursors ?? []), ...looksBefore(err)], () => runAgent({
     chatId: a.chatId,
     chatType: isGroupChat(a.chatId) ? 'group' : 'private',
@@ -307,18 +315,17 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
     deadline: deadline - REVIEW_RESERVE_MS,
   }))
   const staged = () => [...(ctx.pendingCursors ?? []), ...(result.cursors ?? [])]
-  await counted(a, member, staged, () => deliver(
-    a, member, result,
-    `INSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`,
-    () => spentClean(a, staged()),
-    deadline,
-  ))
+  const evidence = `INSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`
+  // What the checks judge the draft against is what the run was given.
+  noteRun({ input: evidence, metadata: { writer: result.model } })
+  await counted(a, member, staged, () => deliver(a, member, result, evidence, () => spentClean(a, staged()), deadline))
   // Asked once: whatever became of the post, Home keeps the question until it is answered.
   if (fetched.asked?.length) await markQuestionsAsked(fetched.asked)
 }
 
 /** A member's own scheduled instruction: the model decides what to fetch, with read-only tools. */
 async function runCustom(a: Automation, member: Member | undefined, deadline: number): Promise<void> {
+  noteRun({ input: `INSTRUCTION:\n${a.instruction}` })
   const result = await counted(a, member, looksBefore, () => runAgent({
     chatId: a.chatId,
     chatType: isGroupChat(a.chatId) ? 'group' : 'private',
@@ -339,12 +346,9 @@ async function runCustom(a: Automation, member: Member | undefined, deadline: nu
     deadline: deadline - REVIEW_RESERVE_MS,
   }))
   const staged = () => result.cursors ?? []
-  await counted(a, member, staged, () => deliver(
-    a, member, result,
-    `INSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`,
-    () => spentClean(a, staged()),
-    deadline,
-  ))
+  const evidence = `INSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`
+  noteRun({ input: evidence, metadata: { writer: result.model } })
+  await counted(a, member, staged, () => deliver(a, member, result, evidence, () => spentClean(a, staged()), deadline))
 }
 
 /**
@@ -441,6 +445,10 @@ async function cutAndRejudge(
       '[tick] decision',
       JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, verified: false, model: d.model, reason: d.reason ?? null, cut: statement }),
     )
+    noteRun({
+      metadata: { second_decision: d.decision, second_confidence: d.confidence },
+      detail: { judge_cut: statement, ...(d.reason ? { second_reason: d.reason } : {}) },
+    })
     if (d.decision !== 'post') {
       return { why: `; with it cut, the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}` }
     }
@@ -505,6 +513,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
           ? `claims failed the check and could not be cut out (${review.rewriteFailed}): ${review.unsupported.join(' | ')}`
           : `no claim survived the check: ${review.unsupported.join(' | ')}`
       console.warn(`[tick] ${a.label}: held back, ${why}`)
+      noteRun({ metadata: { claims: review.claims.length, unsupported: review.unsupported.length }, detail: { held_because: why } })
       await tellAdminQuietly(member, heldBack(a, why, draft))
       return outOfTime ? UNJUDGED : null
     }
@@ -514,8 +523,13 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
     cut = review.unsupported
     reviewed = review.message
     verified = review.claims.length > 0 && review.unsupported.length === 0
+    noteRun({
+      metadata: { claims: review.claims.length, unsupported: review.unsupported.length, verified },
+      ...(cut.length ? { detail: { check_cut: cut } } : {}),
+    })
   } catch (err) {
     console.error(`[tick] ${a.label}: claim check unavailable, deciding on the raw draft:`, describeError(err))
+    noteRun({ metadata: { claim_check: 'unavailable' } })
   }
   try {
     const d = await decideWatcherPost({ label: a.label, draft: reviewed, evidence, verified, deadline })
@@ -523,6 +537,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
       '[tick] decision',
       JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, verified, model: d.model, reason: d.reason ?? null }),
     )
+    noteRun({ metadata: { decision: d.decision, confidence: d.confidence, judge: d.model }, ...(d.reason ? { detail: { reason: d.reason } } : {}) })
     if (d.decision === 'post') return reviewed
     let why = `the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}`
     // A draft the claim check passed whole, which the judge faults on one
@@ -549,10 +564,12 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
     // the wall clock.
     if (Date.now() >= deadline - 1_000) {
       console.warn(`[tick] ${a.label}: held back, the tick ran out of time for the post decision:`, reason)
+      noteRun({ metadata: { decision: 'out of time' } })
       await tellAdminQuietly(member, heldBack(a, 'the tick ran out of time before the post check could answer', reviewed))
       return UNJUDGED
     }
     console.error(`[tick] ${a.label}: post decision unavailable, posting the draft:`, reason)
+    noteRun({ metadata: { decision: 'unavailable, posted unchecked' }, detail: { decision_error: reason } })
     await tellAdminQuietly(member, `Watcher **${a.label}**: the post decision failed (${reason}), so its draft went out unchecked.`)
     return reviewed
   }
@@ -624,6 +641,8 @@ async function deliver(
 
   const message = parts.join('\n\n').trim()
   if (!message) {
+    const outcome = withheld ? 'held back' : unjudged ? 'held back unjudged' : problems.length ? 'problem' : 'skipped'
+    noteRun({ output: draft.rest || result.text, metadata: { outcome }, ...(outcome === 'skipped' ? {} : { level: 'WARNING' as const }) })
     // Quiet by choice, or held back on purpose, is the run done with what it
     // read. A run that could not do its job (a PROBLEM), or whose draft the
     // tick ran out of time to judge, leaves it for the next.
@@ -643,6 +662,7 @@ async function deliver(
   const log = prune(parseLog(await getSetting(capKey)), now)
   if (!underCap(log)) {
     console.warn(`[tick] ${a.label}: held back, ${log.posts.length} scheduled posts in the last hour for chat ${a.chatId}`)
+    noteRun({ output: message, metadata: { outcome: 'held back by the hourly cap' }, level: 'WARNING' })
     if (shouldWarn(log, now)) {
       await setSetting(capKey, JSON.stringify(markWarned(log, now)))
       await tellAdminQuietly(
@@ -680,6 +700,11 @@ async function deliver(
     posted = err.sent
     broken = err
   }
+  noteRun({
+    output: posted,
+    metadata: { outcome: broken ? 'partly posted' : 'posted', ...(result.cutShort ? { cut_short: true } : {}) },
+    ...(broken || result.cutShort ? { level: 'WARNING' as const } : {}),
+  })
   // Spent the moment it is posted, before the bookkeeping below can fail and
   // bring it round again; unless all that went was the notices beside a draft
   // nobody judged.
@@ -885,91 +910,107 @@ async function runDue(deadline: number): Promise<{ ran: number; skipped: number 
       continue
     }
 
-    // The house rule for a room holds for what is posted into it unasked:
-    // nothing while someone unrecognised is there. The run is claimed all the
-    // same, so a morning brief does not turn up mid-afternoon once they leave.
-    if (isGroupChat(a.chatId) && (await strangersIn(a.chatId)).length > 0) {
-      console.info(`[tick] ${a.label}: someone unrecognised is in chat ${a.chatId}, not posting`)
-      skipped++
-      continue
-    }
-
-    try {
-      // A private chat is one person's. Revoked or removed, they hear nothing
-      // more from the household, whoever set the automation up.
-      if (!isGroupChat(a.chatId) && !(await allowedPerson(a.chatId))) {
-        console.info(`[tick] ${a.label}: chat ${a.chatId} belongs to someone no longer allowed, not posting`)
-        skipped++
-        continue
-      }
-      // And the same test holds for whoever the room cannot see: a group whose
-      // head count is more than the bot and the allowed members in it.
-      if (isGroupChat(a.chatId) && (await heldForHeadcount(a))) {
-        skipped++
-        continue
-      }
-
-      const creator = a.memberId
-        ? (await db().select().from(schema.members).where(eq(schema.members.id, a.memberId)).limit(1))[0]
-        : undefined
-      // A custom automation runs its author's own words with the household's
-      // read tools. With the author revoked, those words are a stranger's, so
-      // it is paused rather than run (deleting a member pauses theirs up front,
-      // before the row that says whose it was goes). A ready-made watcher's
-      // instruction comes from code, and the room keeps it.
-      if (!isWatcherKind(a.kind) && a.memberId && !creator?.allowed) {
-        await setAutomationEnabled(a.id, false)
-        console.info(`[tick] ${a.label}: whoever set it up is no longer allowed, paused`)
-        await tellAdminQuietly(
-          undefined,
-          `Paused **${a.label}**: whoever set it up is no longer allowed, so its instruction is not run. ` +
-            'Resume it from Home if the household still wants it.',
-        )
-        skipped++
-        continue
-      }
-      // Nothing runs as someone who has been revoked: not their mailbox, and
-      // not the first DM when a draft is held back.
-      const member = creator?.allowed ? creator : undefined
-
-      if (isWatcherKind(a.kind)) await runReadyMade(a.kind, a, member, deadline)
-      else await runCustom(a, member, deadline)
-      ran++
-    } catch (err) {
-      console.error(`[tick] automation ${a.id} failed:`, err)
-      const reason = describeError(err)
-      try {
-        const movedTo = migratedTo(err)
-        if (movedTo) {
-          // The room is still there under a new id, where posting works. Its
-          // rows follow it (the webhook moves them too once it hears, and the
-          // second move finds nothing left), and the automation stays on:
-          // paused, it would sit silent in a room it can post in.
-          await moveChat(a.chatId, movedTo)
-          await tellAdminQuietly(
-            undefined,
-            `**${a.label}** was not posted: chat ${a.chatId} has just become a supergroup. It posts there from its next run.`,
-          )
-        } else if (refusedChat(err)) {
-          // Telegram will refuse this chat every hour from now on (the bot was
-          // removed, or the person blocked it), and what the run read stays
-          // unspent, so each hour would fetch, write and fail again. Paused, once.
-          await setAutomationEnabled(a.id, false)
-          await tellAdminQuietly(
-            undefined,
-            `Paused **${a.label}**: Telegram will not let me post in chat ${a.chatId} (${reason}). Resume it from Home once I can post there again.`,
-          )
-        } else {
-          await tellAdminQuietly(undefined, `Watcher **${a.label}** failed: ${reason}`)
-        }
-      } catch (sendErr) {
-        // One broken automation must not stop the rest of the tick.
-        console.error(`[tick] could not report automation ${a.id} failure:`, sendErr)
-      }
-    }
+    const outcome = await traceRun(
+      'hearth.watcher',
+      { sessionId: a.chatId, tags: ['watcher'], metadata: { label: a.label, kind: a.kind ?? 'custom', automation: String(a.id) } },
+      () => runClaimed(a, deadline),
+    )
+    if (outcome === 'ran') ran++
+    else if (outcome === 'skipped') skipped++
   }
 
   return { ran, skipped }
+}
+
+/**
+ * One claimed automation as a trace of its own: why it did not run when it
+ * did not, and otherwise what it posted or held back. A failure is reported
+ * here, and counts as neither run nor skipped.
+ */
+async function runClaimed(a: Automation, deadline: number): Promise<'ran' | 'skipped' | 'failed'> {
+  const notRun = (why: string) => {
+    noteRun({ output: why, metadata: { outcome: 'not run' } })
+    return 'skipped' as const
+  }
+
+  // The house rule for a room holds for what is posted into it unasked:
+  // nothing while someone unrecognised is there. The run is claimed all the
+  // same, so a morning brief does not turn up mid-afternoon once they leave.
+  if (isGroupChat(a.chatId) && (await strangersIn(a.chatId)).length > 0) {
+    console.info(`[tick] ${a.label}: someone unrecognised is in chat ${a.chatId}, not posting`)
+    return notRun('someone unrecognised is in the room')
+  }
+
+  try {
+    // A private chat is one person's. Revoked or removed, they hear nothing
+    // more from the household, whoever set the automation up.
+    if (!isGroupChat(a.chatId) && !(await allowedPerson(a.chatId))) {
+      console.info(`[tick] ${a.label}: chat ${a.chatId} belongs to someone no longer allowed, not posting`)
+      return notRun('the chat belongs to someone no longer allowed')
+    }
+    // And the same test holds for whoever the room cannot see: a group whose
+    // head count is more than the bot and the allowed members in it.
+    if (isGroupChat(a.chatId) && (await heldForHeadcount(a))) return notRun('the room holds people the household cannot account for')
+
+    const creator = a.memberId
+      ? (await db().select().from(schema.members).where(eq(schema.members.id, a.memberId)).limit(1))[0]
+      : undefined
+    // A custom automation runs its author's own words with the household's
+    // read tools. With the author revoked, those words are a stranger's, so
+    // it is paused rather than run (deleting a member pauses theirs up front,
+    // before the row that says whose it was goes). A ready-made watcher's
+    // instruction comes from code, and the room keeps it.
+    if (!isWatcherKind(a.kind) && a.memberId && !creator?.allowed) {
+      await setAutomationEnabled(a.id, false)
+      console.info(`[tick] ${a.label}: whoever set it up is no longer allowed, paused`)
+      await tellAdminQuietly(
+        undefined,
+        `Paused **${a.label}**: whoever set it up is no longer allowed, so its instruction is not run. ` +
+          'Resume it from Home if the household still wants it.',
+      )
+      return notRun('whoever set it up is no longer allowed, so it was paused')
+    }
+    // Nothing runs as someone who has been revoked: not their mailbox, and
+    // not the first DM when a draft is held back.
+    const member = creator?.allowed ? creator : undefined
+
+    if (isWatcherKind(a.kind)) await runReadyMade(a.kind, a, member, deadline)
+    else await runCustom(a, member, deadline)
+    return 'ran'
+  } catch (err) {
+    console.error(`[tick] automation ${a.id} failed:`, err)
+    const reason = describeError(err)
+    noteRun({ output: reason, metadata: { outcome: 'failed' }, level: 'ERROR' })
+    try {
+      const movedTo = migratedTo(err)
+      if (movedTo) {
+        // The room is still there under a new id, where posting works. Its
+        // rows follow it (the webhook moves them too once it hears, and the
+        // second move finds nothing left), and the automation stays on:
+        // paused, it would sit silent in a room it can post in.
+        await moveChat(a.chatId, movedTo)
+        await tellAdminQuietly(
+          undefined,
+          `**${a.label}** was not posted: chat ${a.chatId} has just become a supergroup. It posts there from its next run.`,
+        )
+      } else if (refusedChat(err)) {
+        // Telegram will refuse this chat every hour from now on (the bot was
+        // removed, or the person blocked it), and what the run read stays
+        // unspent, so each hour would fetch, write and fail again. Paused, once.
+        await setAutomationEnabled(a.id, false)
+        await tellAdminQuietly(
+          undefined,
+          `Paused **${a.label}**: Telegram will not let me post in chat ${a.chatId} (${reason}). Resume it from Home once I can post there again.`,
+        )
+      } else {
+        await tellAdminQuietly(undefined, `Watcher **${a.label}** failed: ${reason}`)
+      }
+    } catch (sendErr) {
+      // One broken automation must not stop the rest of the tick.
+      console.error(`[tick] could not report automation ${a.id} failure:`, sendErr)
+    }
+    return 'failed'
+  }
 }
 
 export async function POST(req: Request) {

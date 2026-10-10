@@ -162,6 +162,26 @@ describe('accepting and rejecting', () => {
     expect(r.note).toMatch(/do not say the same thing again.*few hours/i)
   })
 
+  it('announces an accepted event by its whole span, and an all-day one by its dates, never as midnight', async () => {
+    await run('propose_family_event', { ...NOTICE, end: '2026-09-09T10:30' })
+    await run('accept_event_proposal', { proposal_id: 1 })
+    expect(ctx.notices.at(-1)).toBe('Added to the family calendar: **School photo day** — Wed, 9 Sept 2026, 9:00 am to 10:30 am')
+
+    await run('propose_family_event', { title: 'Camp', start: '2026-10-09', end: '2026-10-11', all_day: true, source: 'google:camp' })
+    expect((await run('list_event_proposals', {})).proposals).toEqual([expect.objectContaining({ title: 'Camp', start_local: 'Fri, 9 Oct 2026' })])
+    await run('accept_event_proposal', { proposal_id: 2 })
+    expect(ctx.notices.at(-1)).toBe('Added to the family calendar: **Camp** — Fri, 9 Oct 2026 to Sun, 11 Oct 2026')
+  })
+
+  it('shows an all-day entry already on that day by its date, not as midnight', async () => {
+    await run('propose_family_event', NOTICE)
+    listFamilyEvents.mockResolvedValue([
+      { id: 5, title: 'Pupil-free day', startsAt: new Date('2026-09-08T14:00:00Z'), endsAt: new Date('2026-09-09T14:00:00Z'), allDay: true, cancelled: false, location: null },
+    ] as never)
+    const held = await run('accept_event_proposal', { proposal_id: 1 })
+    expect(held.that_day_already_has).toEqual([expect.objectContaining({ title: 'Pupil-free day', start_local: 'Wed, 9 Sept 2026' })])
+  })
+
   it('cannot add the same proposal twice', async () => {
     await run('propose_family_event', NOTICE)
     await run('accept_event_proposal', { proposal_id: 1 })

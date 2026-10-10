@@ -94,6 +94,13 @@ vi.mock('@/lib/db', () => ({
   }),
   schema: { members: { id: 'id' }, messages: {} },
 }))
+// Each run is a trace of its own in Langfuse, and what it notes there is what
+// a held-back brief is diagnosed from once the logs have gone.
+const { traceRun, noteRun } = vi.hoisted(() => ({
+  traceRun: vi.fn(async (_name: string, _attrs: unknown, fn: () => Promise<unknown>) => fn()),
+  noteRun: vi.fn(),
+}))
+vi.mock('@/lib/telemetry', async (orig) => ({ ...(await orig<typeof import('@/lib/telemetry')>()), traceRun, noteRun }))
 
 const { POST, GET } = await import('@/app/api/tick/route')
 const { PartlySent } = await import('@/lib/telegram')
@@ -1929,6 +1936,84 @@ describe('the corners of a run', () => {
       const call = runAgent.mock.calls.at(-1)![0] as { text: string }
       expect(call.text).toContain('[-1] someone: hello there')
       expect(call.text).toContain('[-1] you: hi, how can I help')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('what each run tells Langfuse', () => {
+  beforeEach(() => {
+    process.env.TICK_SECRET = 'let-me-in'
+  })
+  const authed = () => tick({ 'x-tick-secret': 'let-me-in' })
+  /** Every note the runs made, merged in order, the way Langfuse merges updates to one observation. */
+  const noted = () =>
+    noteRun.mock.calls.reduce<Record<string, unknown>>((all, [n]) => ({ ...all, ...n, metadata: { ...(all.metadata as object), ...n.metadata } }), {})
+
+  it('traces each claimed run on its own, named for what it is, with what it judged against and what it posted', async () => {
+    dueAutomations.mockResolvedValue([automation(), automation({ id: 2, label: 'recycling' })])
+    await authed()
+    expect(traceRun).toHaveBeenCalledTimes(2)
+    expect(traceRun).toHaveBeenCalledWith(
+      'hearth.watcher',
+      { sessionId: '-100999', tags: ['watcher'], metadata: { label: 'bin night', kind: 'custom', automation: '1' } },
+      expect.any(Function),
+    )
+    expect(traceRun.mock.calls[1][1]).toMatchObject({ metadata: { label: 'recycling', automation: '2' } })
+    expect(noteRun).toHaveBeenCalledWith(expect.objectContaining({ input: expect.stringContaining('Remind everyone to put the bins out.') }))
+    expect(noteRun).toHaveBeenCalledWith({ output: 'Bins out tonight.', metadata: { outcome: 'posted' } })
+    expect(noteRun).toHaveBeenCalledWith(expect.objectContaining({ metadata: { decision: 'post', confidence: 0.9, judge: 'primary:test' } }))
+  })
+
+  it('marks a held draft as a warning, the reason kept apart from the shape', async () => {
+    reviewDraft.mockResolvedValue({ claims: ['bins tonight'], unsupported: [], message: 'Bins out tonight.' })
+    decideWatcherPost.mockResolvedValue({ decision: 'skip', confidence: 0.8, model: 'primary:test', reason: 'a time the evidence does not give' })
+    dueAutomations.mockResolvedValue([automation()])
+    await authed()
+    expect(noteRun).toHaveBeenCalledWith({ metadata: { claims: 1, unsupported: 0, verified: true } })
+    // The reason quotes the draft, so it travels as detail, which a household
+    // that keeps content out of Langfuse does not record.
+    expect(noteRun).toHaveBeenCalledWith({ metadata: { decision: 'skip', confidence: 0.8, judge: 'primary:test' }, detail: { reason: 'a time the evidence does not give' } })
+    expect(noteRun).toHaveBeenCalledWith({ output: 'Bins out tonight.', metadata: { outcome: 'held back' }, level: 'WARNING' })
+  })
+
+  it('says why a claimed run never ran', async () => {
+    strangersIn.mockResolvedValue([{ telegramUserId: '555' }] as never)
+    dueAutomations.mockResolvedValue([automation()])
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 0, skipped: 1 })
+    expect(noted()).toMatchObject({ output: 'someone unrecognised is in the room', metadata: { outcome: 'not run' } })
+  })
+
+  it('says a brief found nothing new, and that a failed run failed', async () => {
+    dueAutomations.mockResolvedValue([automation({ kind: 'morning', label: 'Morning brief' })])
+    await authed()
+    expect(noteRun).toHaveBeenCalledWith({ output: 'nothing new', metadata: { outcome: 'nothing new' } })
+
+    noteRun.mockClear()
+    dueAutomations.mockResolvedValue([automation()])
+    runAgent.mockRejectedValueOnce(new Error('model exploded'))
+    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 0, skipped: 0 })
+    expect(noteRun).toHaveBeenCalledWith({ output: 'model exploded', metadata: { outcome: 'failed' }, level: 'ERROR' })
+  })
+
+  it('traces the nightly pass as its own run, with the talk it read and what it did', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-30T18:30:00Z')) // 4:30am in Melbourne
+    try {
+      getSetting.mockImplementation(async () => null)
+      messagesSince.mockResolvedValue([{ chatId: '-100999', authorName: 'Rowan', role: 'user', content: 'Bin night is Monday by the way' }] as never)
+      runAgent.mockResolvedValue({ text: 'SKIP', notices: [], model: 'primary:test' })
+      await authed()
+      expect(traceRun).toHaveBeenCalledWith('hearth.sweep', { sessionId: 'memory-sweep', tags: ['sweep'] }, expect.any(Function))
+      expect(noteRun).toHaveBeenCalledWith({ input: '[-100999] Rowan: Bin night is Monday by the way', metadata: { messages: 1 } })
+      expect(noteRun).toHaveBeenCalledWith({ output: 'SKIP', metadata: { outcome: 'done', model: 'primary:test' } })
+
+      noteRun.mockClear()
+      runAgent.mockRejectedValueOnce(new Error('model down'))
+      getSetting.mockImplementation(async () => null)
+      await authed()
+      expect(noteRun).toHaveBeenCalledWith({ output: 'model down', metadata: { outcome: 'failed' }, level: 'ERROR' })
     } finally {
       vi.useRealTimers()
     }

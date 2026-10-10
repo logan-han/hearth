@@ -526,7 +526,10 @@ model in the chain first; the last one's, or the first one's when no later
 model answers at all, loses its cut-off last line rather than going out
 mid-bullet, still faces the checks, and an admin is told it went out short. A
 reply cut off before a whole line of any length is dropped as the fragment it
-is.
+is. The last model in the chain gets twice the run's allowance, and at least
+4,000 tokens: the allowance counts a thinking model's reasoning, the tail of
+the chain is where those sit, and with no model after it a cut-off turn is a
+lost one.
 
 ## Sweeping email onto the calendar
 
@@ -861,15 +864,27 @@ calls, and an idle endpoint costs nothing.
 With `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` set,
 every model call is traced to Langfuse: the prompt and reply, each tool call
 and its result, tokens, timing, and the watcher post decisions with their
-confidence. Traces are named by what the bot was doing (`hearth.chat`,
-`hearth.watcher`, `hearth.sweep`, `hearth.gate`, `hearth.decision`), grouped
-into a session per chat, and carry the member's Telegram id, so one bad reply
-can be followed back to the exact tool result it misread. Tracing is
-registered once at server start from `instrumentation.ts` and is inert without
-the keys; the OpenTelemetry modules are not even loaded.
+confidence. Each piece of work is a trace of its own, named for what the bot
+was doing: a chat turn is `hearth.chat`, a scheduled run `hearth.watcher`, the
+nightly pass `hearth.sweep`, and the calls inside one (the claim check, the
+post decision) nest under it rather than renaming it. Traces are grouped into a
+session per chat and carry the member's Telegram id, so one bad reply can be
+followed back to the exact tool result it misread. The root of a run says what
+it was given and what came of it: a turn's input is the message and its output
+the reply; a watcher run's input is the instruction, facts, data and tool
+results its checks judged the draft against, its output what was posted or the
+draft held back, and its metadata the outcome (`posted`, `held back`,
+`skipped`, `nothing new`, `not run`, `failed`), the decision and its
+confidence, and how many claims were checked. A held-back or failed run is
+marked as a warning or an error, so it can be found after the platform's logs
+have gone. The ambient gate and the chat summary are traces of their own
+(`hearth.gate`, `hearth.summary`). Tracing is registered once at server start
+from `instrumentation.ts` and is inert without the keys; the OpenTelemetry
+modules are not even loaded.
 
 Two things worth knowing. Traces carry the family's messages and mail; set
-`LANGFUSE_RECORD_CONTENT=off` to keep only the shape of each call. And the
+`LANGFUSE_RECORD_CONTENT=off` to keep only the shape of each call, which also
+keeps a run's input, output and any reason that quotes a draft off its root. And the
 keys are environment variables, not dashboard settings, because the tracer
 starts before the database is read. The integration is built for Langfuse v4:
 ingestion goes over OpenTelemetry through `@langfuse/otel` 5.4 or later, trace
@@ -881,10 +896,14 @@ guards that contract, down to every model call in the code sitting inside
 and what reaches Langfuse with content recording on and off.
 
 Inside Langfuse, an LLM-as-a-judge rule ("Groundedness of watcher posts")
-scores every `hearth.watcher` and `hearth.decision` trace, the draft and the
-final wording of each proactive post, against the evidence in its input. The judge is OpenRouter's
-MiniMax, deliberately not the Gemini family that writes the posts. A trace
-scored *Not grounded* or *Somewhat grounded* is the next case for `evals/`.
+scores watcher runs against their evidence. The root observation of a
+`hearth.watcher` trace is the pair it needs, the evidence as input and the post
+or held draft as output, so the rule targets that root, filtered to runs whose
+`outcome` is `posted` or `held back`; a run that found nothing new has nothing
+to judge. The judge should be a model outside the Gemini family that writes the
+posts, and one that returns structured output reliably: an evaluator that
+cannot shape its answer records no score at all. A trace scored *Not grounded*
+or *Somewhat grounded* is the next case for `evals/`.
 
 ## Safety properties
 

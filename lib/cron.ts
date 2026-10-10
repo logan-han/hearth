@@ -162,3 +162,8 @@ export function formatLocalDate(d: Date, tz: string = timezone()): string {
     timeZone: tz, weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
   }).format(d)
 }
+
+/** A time with no date, for an end on the day its event starts. */
+export function formatLocalTime(d: Date, tz: string = timezone()): string {
+  return new Intl.DateTimeFormat('en-AU', { timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true }).format(d)
+}

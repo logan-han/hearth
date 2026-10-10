@@ -28,6 +28,12 @@ vi.mock('@/lib/agent', async (orig) => ({
   unconfirmedLine: (await orig<typeof import('@/lib/agent')>()).unconfirmedLine,
 }))
 vi.mock('@vercel/functions', () => ({ waitUntil: (p: Promise<unknown>) => p }))
+// A turn is a trace of its own in Langfuse, from what was said to what went back.
+const { traceRun, noteRun } = vi.hoisted(() => ({
+  traceRun: vi.fn(async (_name: string, _attrs: unknown, fn: () => Promise<unknown>) => fn()),
+  noteRun: vi.fn(),
+}))
+vi.mock('@/lib/telemetry', async (orig) => ({ ...(await orig<typeof import('@/lib/telemetry')>()), traceRun, noteRun }))
 
 const { processUpdate } = await import('@/lib/handler')
 
@@ -823,6 +829,33 @@ describe('agent failures', () => {
     runAgent.mockResolvedValueOnce({ text: '', notices: [], model: 'g' })
     await processUpdate(dm('hmm'))
     expect(send).not.toHaveBeenCalled()
+  })
+})
+
+describe('the turn in Langfuse', () => {
+  it('is traced on its own, from what was said to what was sent', async () => {
+    runAgent.mockResolvedValueOnce({ text: 'Done.', notices: ['Added to the family calendar: **Swim**'], model: 'g', wrote: ['add_family_event'] } as never)
+    await processUpdate(dm('add swim at 9'))
+    expect(traceRun).toHaveBeenCalledWith('hearth.chat', { sessionId: '111', userId: '111', tags: ['chat', 'private'] }, expect.any(Function))
+    expect(noteRun).toHaveBeenCalledWith({ input: 'add swim at 9', metadata: { attachments: 0 } })
+    expect(noteRun).toHaveBeenCalledWith({
+      output: 'Done.\n\nAdded to the family calendar: **Swim**',
+      metadata: { model: 'g', wrote: ['add_family_event'] },
+    })
+  })
+
+  it('marks a turn that failed as an error, with what the chat was told', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    runAgent.mockRejectedValueOnce(new Error('model exploded'))
+    await processUpdate(dm('what is the weather'))
+    expect(noteRun).toHaveBeenCalledWith({ output: 'Sorry, that went wrong: model exploded', metadata: { outcome: 'failed' }, level: 'ERROR' })
+  })
+
+  it('marks a reply Telegram did not confirm as a warning', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    send.mockRejectedValueOnce(new Error('telegram down'))
+    await processUpdate(dm('when is swim'))
+    expect(noteRun).toHaveBeenCalledWith({ metadata: { reply: 'not confirmed' }, level: 'WARNING' })
   })
 })
 

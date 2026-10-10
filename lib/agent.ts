@@ -17,6 +17,7 @@ import type { Member } from './db/schema'
 import { timezone, language, units, reasoningLevel } from './env'
 import { traced, callTelemetry } from './telemetry'
 import { formatLocal, localDateKey } from './cron'
+import { spanLabel } from './tools/familycal'
 import { parseIcs, describeIcs } from './ics-parse'
 import { recordModelEvent } from './model-events'
 import { describeError } from './errors'
@@ -118,6 +119,17 @@ const MODE_SETTINGS: Record<AgentMode, { temperature?: number; maxOutputTokens: 
  */
 const TRUNCATED_REPLY_CHARS = 200
 
+/**
+ * The least output allowance the last model in the chain gets, at twice the
+ * mode's when that is more. A cap that stops an earlier slot hands the turn to
+ * the next one; at the last there is no next, and the run is lost. The tail is
+ * where the thinking models sit, and the cap counts their reasoning: on three
+ * nights in September both Gemini models failed, and the nightly memory pass
+ * was lost when OpenRouter's pick reasoned through all 1,200 tokens of the
+ * sweep's allowance without a word of answer.
+ */
+const LAST_SLOT_ALLOWANCE = 4000
+
 function defaultTools(mode: AgentMode): ToolName[] | undefined {
   if (mode === 'sweep') return SWEEP_TOOLS
   if (mode === 'watcher') return CUSTOM_AUTOMATION_TOOLS
@@ -197,7 +209,7 @@ export async function ambientContext(chatId: string, member: Member | null, mode
   }
   if (proposals.length) {
     lines.push('Event proposals awaiting a yes in this chat (settle with accept_event_proposal or reject_event_proposal and the id):')
-    lines.push(...proposals.map((p) => `- proposal_id ${p.id}: "${p.title}" at ${formatLocal(p.startsAt)}`))
+    lines.push(...proposals.map((p) => `- proposal_id ${p.id}: "${p.title}" at ${spanLabel(p.startsAt, p.endsAt, p.allDay)}`))
   }
   if (questions.length) {
     // The nightly pass asked rather than guessed; an answer in passing settles it.
@@ -687,6 +699,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const reasoning = reasoningLevel()
 
   const chain = modelChain()
+  const allowance = input.maxOutputTokens ?? settings.maxOutputTokens
+  const allowanceFor = (slot: ModelSlot) => (slot === chain.at(-1) ? Math.max(2 * allowance, LAST_SLOT_ALLOWANCE) : allowance)
   // The first long post the cap cut off, trimmed, for when no later model
   // answers at all: a brief short of its end beats no brief.
   let shortPost: { text: string; model: string; evidence: string | undefined; cutShort: boolean; looks: StagedCursor[] } | undefined
@@ -716,7 +730,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
               : {}),
             stopWhen: isStepCount(MAX_STEPS),
             timeout: { totalMs: timeLeft(deadline), stepMs: STEP_TIMEOUT_MS },
-            maxOutputTokens: input.maxOutputTokens ?? settings.maxOutputTokens,
+            maxOutputTokens: allowanceFor(slot),
             ...(settings.temperature !== undefined ? { temperature: settings.temperature } : {}),
             ...(reasoning ? { reasoning } : {}),
             telemetry: callTelemetry(`hearth.${mode}`),

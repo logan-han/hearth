@@ -473,6 +473,34 @@ describe('runAgent', () => {
     expect(r.model).toContain('openrouter')
   })
 
+  it('gives the last model in the chain room to think: it has nothing to fall back on', async () => {
+    // Three nights in September the nightly pass reached OpenRouter's pick
+    // after both Gemini models failed, and lost it when that model reasoned
+    // through all 1,200 tokens of the sweep's allowance without answering.
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    process.env.OPENROUTER_MODEL = 'openrouter/auto'
+    generateText.mockRejectedValueOnce(new Error('503 Service Unavailable')).mockResolvedValueOnce(reply('SKIP'))
+    await runAgent({ ...input, mode: 'sweep', history: false })
+    expect(generateText.mock.calls.map((c) => c[0].maxOutputTokens)).toEqual([1200, 4000])
+
+    // Twice the run's own allowance where that is more: the morning brief's.
+    generateText.mockReset()
+    generateText.mockRejectedValueOnce(new Error('503 Service Unavailable')).mockResolvedValueOnce(reply('**Today**\n- Swim at 9'))
+    await runAgent({ ...input, mode: 'watcher', history: false, maxOutputTokens: 2400 })
+    expect(generateText.mock.calls.map((c) => c[0].maxOutputTokens)).toEqual([2400, 4800])
+  })
+
+  it('words a pending proposal in context by its whole span', async () => {
+    await q.addProposal({
+      chatId: '-100', memberId: null, title: 'Camp',
+      startsAt: new Date('2030-10-10T13:00:00Z'), endsAt: new Date('2030-10-13T13:00:00Z'),
+      allDay: true, source: null,
+    })
+    generateText.mockResolvedValue(reply('ok'))
+    await runAgent({ ...input, chatId: '-100' })
+    expect(String(generateText.mock.calls[0][0].system)).toContain('"Camp" at Fri, 11 Oct 2030 to Sun, 13 Oct 2030')
+  })
+
   it('gives every call only what is left of the turn, and tries no model once it is spent', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     generateText.mockResolvedValueOnce(reply('Bins go out Monday.'))

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { telemetryConfigured, recordContent, callTelemetry, traced, flushTelemetry, setupTelemetry } from '@/lib/telemetry'
+import { context, ROOT_CONTEXT } from '@opentelemetry/api'
+import { telemetryConfigured, recordContent, callTelemetry, traced, traceRun, noteRun, flushTelemetry, setupTelemetry } from '@/lib/telemetry'
 
 /** The processor lives on globalThis, where instrumentation.ts and the routes both find it. */
 const slot = globalThis as unknown as { __hearthLangfuse?: { forceFlush: () => Promise<void> } | null }
@@ -21,12 +22,17 @@ vi.mock('@langfuse/otel', () => ({ LangfuseSpanProcessor: otel.LangfuseSpanProce
 vi.mock('@langfuse/vercel-ai-sdk', () => ({ LangfuseVercelAiSdkIntegration: otel.LangfuseVercelAiSdkIntegration }))
 vi.mock('ai', () => ({ registerTelemetry: otel.registerTelemetry }))
 
-// traced() imports these once a processor is live; mocked so a
+// traced() and traceRun() import these once a processor is live; mocked so a
 // test sees what would reach Langfuse, not only that the call came back.
-const tracing = vi.hoisted(() => ({
-  propagateAttributes: vi.fn(async (_attrs: unknown, fn: () => Promise<unknown>) => fn()),
-}))
-vi.mock('@langfuse/tracing', () => ({ propagateAttributes: tracing.propagateAttributes }))
+const tracing = vi.hoisted(() => {
+  const observation = { update: vi.fn() }
+  return {
+    observation,
+    propagateAttributes: vi.fn(async (_attrs: unknown, fn: () => Promise<unknown>) => fn()),
+    startActiveObservation: vi.fn((_name: string, fn: (o: typeof observation) => unknown) => fn(observation)),
+  }
+})
+vi.mock('@langfuse/tracing', () => ({ propagateAttributes: tracing.propagateAttributes, startActiveObservation: tracing.startActiveObservation }))
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -148,5 +154,92 @@ describe('telemetry', () => {
     expect(recordContent()).toBe(false)
     process.env.LANGFUSE_RECORD_CONTENT = 'anything else'
     expect(recordContent()).toBe(true)
+  })
+})
+
+describe('runs', () => {
+  const live = () => {
+    slot.__hearthLangfuse = { forceFlush: async () => {} }
+  }
+
+  it('does the work plainly when tracing is off, and a note then goes nowhere', async () => {
+    const out = await traceRun('hearth.chat', { sessionId: 's1' }, async () => {
+      noteRun({ input: 'hello', output: 'hi' })
+      return 'answered'
+    })
+    expect(out).toBe('answered')
+    expect(tracing.startActiveObservation).not.toHaveBeenCalled()
+    expect(tracing.propagateAttributes).not.toHaveBeenCalled()
+  })
+
+  it('opens a trace of its own, named once, and notes what came of it on its root', async () => {
+    live()
+    const withContext = vi.spyOn(context, 'with')
+    const out = await traceRun('hearth.watcher', { sessionId: '-100', tags: ['watcher'] }, async () => {
+      noteRun({ input: 'DATA', metadata: { writer: 'gemini:flash-lite' } })
+      noteRun({ output: 'Bins out tonight.', metadata: { outcome: 'held back' }, detail: { reason: 'a time' }, level: 'WARNING' })
+      return 7
+    })
+    expect(out).toBe(7)
+    // A root context: the run is not one more part of the request that ran it.
+    expect(withContext.mock.calls[0][0]).toBe(ROOT_CONTEXT)
+    expect(tracing.propagateAttributes).toHaveBeenCalledWith({ sessionId: '-100', tags: ['watcher'], traceName: 'hearth.watcher' }, expect.any(Function))
+    expect(tracing.startActiveObservation).toHaveBeenCalledWith('hearth.watcher', expect.any(Function))
+    expect(tracing.observation.update).toHaveBeenNthCalledWith(1, { metadata: { writer: 'gemini:flash-lite' }, input: 'DATA' })
+    expect(tracing.observation.update).toHaveBeenNthCalledWith(2, {
+      level: 'WARNING', metadata: { outcome: 'held back', reason: 'a time' }, output: 'Bins out tonight.',
+    })
+  })
+
+  it('keeps the family\'s words out of a run when content is off, and its shape in', async () => {
+    live()
+    process.env.LANGFUSE_RECORD_CONTENT = 'off'
+    await traceRun('hearth.chat', {}, async () => {
+      noteRun({ input: 'my payslip', output: 'filed', metadata: { outcome: 'posted' }, detail: { reason: 'quotes the draft' } })
+      noteRun({ input: 'only content' })
+    })
+    expect(tracing.observation.update).toHaveBeenNthCalledWith(1, { metadata: { outcome: 'posted' } })
+    expect(tracing.observation.update).toHaveBeenNthCalledWith(2, {})
+  })
+
+  it('names the trace for the run, whatever a call inside it calls itself', async () => {
+    live()
+    await traceRun('hearth.chat', { sessionId: 's1' }, () => traced({ traceName: 'hearth.claim', sessionId: 's1', tags: ['claim'] }, async () => 'checked'))
+    expect(tracing.propagateAttributes).toHaveBeenLastCalledWith({ traceName: 'hearth.chat', sessionId: 's1', tags: ['claim'] }, expect.any(Function))
+    // Outside a run a call names its own trace, as before.
+    await traced({ traceName: 'hearth.gate' }, async () => 'quiet')
+    expect(tracing.propagateAttributes).toHaveBeenLastCalledWith({ traceName: 'hearth.gate' }, expect.any(Function))
+  })
+
+  it('never lets a note fail the work it describes', async () => {
+    live()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    tracing.observation.update.mockImplementationOnce(() => {
+      throw new Error('span already ended')
+    })
+    await expect(traceRun('hearth.sweep', {}, async () => {
+      noteRun({ output: 'SKIP' })
+      return 'done'
+    })).resolves.toBe('done')
+    expect(warn).toHaveBeenCalledWith('[telemetry] could not note the run:', 'span already ended')
+  })
+
+  it('does the work once, untraced, when the tracing modules will not load', async () => {
+    vi.resetModules()
+    vi.doMock('@opentelemetry/api', () => {
+      throw new Error('cannot load the OpenTelemetry API')
+    })
+    try {
+      const fresh = await import('@/lib/telemetry')
+      live()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const work = vi.fn(async () => 'done')
+      await expect(fresh.traceRun('hearth.chat', {}, work)).resolves.toBe('done')
+      expect(work).toHaveBeenCalledTimes(1)
+      expect(warn).toHaveBeenCalledWith('[telemetry] run not traced:', expect.any(String))
+    } finally {
+      vi.doUnmock('@opentelemetry/api')
+      vi.resetModules()
+    }
   })
 })

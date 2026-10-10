@@ -911,6 +911,33 @@ describe('family calendar tools', () => {
     expect(String(r.note)).toContain('few hours')
   })
 
+  it('says when an event ends as well as when it starts, so nobody asks for an end it already has', async () => {
+    // A school term announced by its first day alone had a member ask for end
+    // dates the calendar held, and the model rewrote every term to oblige.
+    const term = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Term 1', start: '2027-02-02', end: '2027-03-25', all_day: true })
+    expect(ctx.notices.at(-1)).toBe('Added to the family calendar: **Term 1** — Tue, 2 Feb 2027 to Thu, 25 Mar 2027')
+    expect(term).toMatchObject({ start_local: 'Tue, 2 Feb 2027', end_local: 'Thu, 25 Mar 2027', all_day: true })
+
+    await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Pupil-free day', start: '2026-08-31', all_day: true })
+    expect(ctx.notices.at(-1)).toBe('Added to the family calendar: **Pupil-free day** — Mon, 31 Aug 2026')
+
+    const swim = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Swim', start: '2026-08-29T09:00', end: '2026-08-29T10:30', all_day: false })
+    expect(ctx.notices.at(-1)).toBe('Added to the family calendar: **Swim** — Sat, 29 Aug 2026, 9:00 am to 10:30 am')
+    expect(swim).toMatchObject({ start_local: 'Sat, 29 Aug 2026, 9:00 am', end_local: 'Sat, 29 Aug 2026, 10:30 am' })
+
+    await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Sleepover', start: '2026-08-29T19:00', end: '2026-08-30T09:00', all_day: false })
+    expect(ctx.notices.at(-1)).toBe('Added to the family calendar: **Sleepover** — Sat, 29 Aug 2026, 7:00 pm to Sun, 30 Aug 2026, 9:00 am')
+
+    await call(familyCalendarTools(ctx), 'update_family_event', { id: term.id, title: 'Tintern Term 1' })
+    expect(ctx.notices.at(-1)).toBe('Updated on the family calendar: **Tintern Term 1** — Tue, 2 Feb 2027 to Thu, 25 Mar 2027 (was "Term 1")')
+  })
+
+  it('words a span with no length by its start alone', async () => {
+    const { spanLabel } = await import('@/lib/tools/familycal')
+    const at = new Date('2026-08-28T23:00:00Z') // 9am on 29 August in Melbourne
+    expect(spanLabel(at, at, false)).toBe('Sat, 29 Aug 2026, 9:00 am')
+  })
+
   it('gives an all-day event a whole day', async () => {
     await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Trip', start: '2026-08-29', all_day: true })
     const [e] = await q.listFamilyEvents(new Date('2026-01-01'), new Date('2027-01-01'))
@@ -1202,8 +1229,9 @@ describe('import_calendar_file', () => {
     // 9am on 11 Sep in Melbourne is 23:00 UTC the evening before.
     expect(rows[1].startsAt.toISOString()).toBe('2026-09-10T23:00:00.000Z')
     expect(rows[1].location).toBe('Hall')
-    expect(c.notices.at(-1)).toContain('Added to the family calendar from school.ics')
-    expect(c.notices.at(-1)).toContain('**Assembly**')
+    expect(c.notices.at(-1)).toBe(
+      'Added to the family calendar from school.ics:\n· **Athletics carnival** — Thu, 10 Sept 2026\n· **Assembly** — Fri, 11 Sept 2026, 9:00 am to 9:30 am',
+    )
   })
 
   it('says how many events were left out over the limit, apart from unreadable ones', async () => {

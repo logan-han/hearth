@@ -3,7 +3,7 @@ import { z } from 'zod'
 import {
   addFamilyEvent, listFamilyEvents, cancelFamilyEvent, updateFamilyEvent, getFamilyEvent, calendarToken,
 } from '../db/queries'
-import { localToUtc, localDateKey, formatLocal, formatLocalDate, dayAfter, nextLocalMidnight, resolveSpan, rangeEnd, lastDay } from '../cron'
+import { localToUtc, localDateKey, formatLocal, formatLocalDate, formatLocalTime, dayAfter, nextLocalMidnight, resolveSpan, rangeEnd, lastDay } from '../cron'
 import { timezone, appUrl } from '../env'
 import { announce, type ToolContext } from './context'
 
@@ -17,6 +17,27 @@ const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
 /** When an event is, worded for a chat: a date alone for all-day, else date and time. */
 export function whenLabel(startsAt: Date, allDay: boolean): string {
   return allDay ? formatLocalDate(startsAt) : formatLocal(startsAt)
+}
+
+/** When an event ends, worded as whenLabel words its start: an all-day end is the last day it covers. */
+export function endLabel(startsAt: Date, endsAt: Date, allDay: boolean): string {
+  return allDay ? formatLocalDate(localToUtc(lastDay(startsAt, endsAt))) : formatLocal(endsAt)
+}
+
+/**
+ * When an event is, start to end, for a line the chat reads. The end is said
+ * too: a confirmation that gave a school term only its first day had a member
+ * ask for end dates the calendar already held, and the model then rewrote all
+ * four terms with dates of its own. A one-day all-day event is its date alone,
+ * and a timed one that ends the day it starts gives the end as a time.
+ */
+export function spanLabel(startsAt: Date, endsAt: Date, allDay: boolean): string {
+  if (allDay) {
+    const last = lastDay(startsAt, endsAt)
+    return last === localDateKey(startsAt) ? formatLocalDate(startsAt) : `${formatLocalDate(startsAt)} to ${endLabel(startsAt, endsAt, true)}`
+  }
+  if (endsAt.getTime() <= startsAt.getTime()) return formatLocal(startsAt)
+  return `${formatLocal(startsAt)} to ${localDateKey(endsAt) === localDateKey(startsAt) ? formatLocalTime(endsAt) : formatLocal(endsAt)}`
 }
 
 /**
@@ -81,11 +102,12 @@ export function familyCalendarTools(ctx: ToolContext) {
         return {
           id: event.id,
           title: event.title,
-          start_local: formatLocal(startsAt),
+          start_local: whenLabel(startsAt, allDay),
+          end_local: endLabel(startsAt, endsAt, allDay),
           all_day: allDay,
           // Subscribed clients can take hours to re-poll an ICS feed, so the bot
           // announces the event in chat too.
-          ...announce(ctx, `Added to the family calendar: **${title}** — ${whenLabel(startsAt, allDay)}`, FEED_LAG),
+          ...announce(ctx, `Added to the family calendar: **${title}** — ${spanLabel(startsAt, endsAt, allDay)}`, FEED_LAG),
         }
       },
     }),
@@ -171,12 +193,13 @@ export function familyCalendarTools(ctx: ToolContext) {
         return {
           id: row.id,
           title: row.title,
-          start_local: formatLocal(row.startsAt),
+          start_local: whenLabel(row.startsAt, row.allDay),
+          end_local: endLabel(row.startsAt, row.endsAt, row.allDay),
           all_day: row.allDay,
           changed,
           ...announce(
             ctx,
-            `Updated on the family calendar: **${row.title}** — ${whenLabel(row.startsAt, row.allDay)}` +
+            `Updated on the family calendar: **${row.title}** — ${spanLabel(row.startsAt, row.endsAt, row.allDay)}` +
               (existing.title !== row.title ? ` (was "${existing.title}")` : ''),
             'Subscribed calendars pick the change up on their next refresh, which can take hours.',
           ),
@@ -233,7 +256,7 @@ export function familyCalendarTools(ctx: ToolContext) {
               allDay: e.allDay,
               createdBy: ctx.member?.id ?? null,
             })
-            added.push({ id: row.id, title: e.title, when: whenLabel(e.startsAt, e.allDay) })
+            added.push({ id: row.id, title: e.title, when: spanLabel(e.startsAt, e.endsAt, e.allDay) })
           }
         }
         const names = files.map((f) => f.filename).join(', ')
@@ -276,7 +299,7 @@ export function familyCalendarTools(ctx: ToolContext) {
               start_local: whenLabel(e.startsAt, e.allDay),
               // An all-day end is given as its last day, the way the tools
               // take it back: its midnight after would read as a day more.
-              end_local: e.allDay ? formatLocalDate(localToUtc(lastDay(e.startsAt, e.endsAt))) : formatLocal(e.endsAt),
+              end_local: endLabel(e.startsAt, e.endsAt, e.allDay),
               all_day: e.allDay,
               location: e.location,
               ...(e.cancelled ? { cancelled: true } : {}),

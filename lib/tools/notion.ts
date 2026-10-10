@@ -10,6 +10,20 @@ const NOT_CONFIGURED = 'Notion is not configured (NOTION_TOKEN missing).'
 const SHARING_HINT =
   'If something is missing, open it in Notion and add the Hearth integration under the ⋯ menu → Connections.'
 
+/**
+ * A write Notion refuses as not permitted, said as what to change. A page the
+ * integration can find but not add to answers 403, and given only the status a
+ * model asked to file a payslip there drafted an email nobody wanted instead.
+ */
+function describeWriteFailure(e: unknown): string {
+  const said = describeError(e)
+  return /\bNotion API 403\b/.test(said)
+    ? 'Notion refused the write: the Hearth integration can read this page but is not allowed to add to it. ' +
+        'Someone who owns the integration can turn on its Insert content capability at notion.so/my-integrations. ' +
+        'Say that, and do not do something else in its place.'
+    : said
+}
+
 export function notionTools(_ctx: ToolContext) {
   return {
     notion_search: tool({
@@ -82,7 +96,7 @@ export function notionTools(_ctx: ToolContext) {
           const { added } = await notion.appendToPage(id, text)
           return added === 0 ? { error: 'Nothing to add.' } : { added, id }
         } catch (e) {
-          return writeFailure(e)
+          return writeFailure(e, describeWriteFailure)
         }
       },
     }),

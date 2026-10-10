@@ -31,7 +31,7 @@ import {
 import { nextRun, formatLocal } from './cron'
 import { connectLink } from './oauth/state'
 import { WATCHERS, isWatcherKind, watcherInstruction } from './watchers'
-import { flushTelemetry } from './telemetry'
+import { flushTelemetry, traceRun, noteRun } from './telemetry'
 import { maybeSummarise } from './summary'
 import type { Member } from './db/schema'
 import { describeError } from './errors'
@@ -775,40 +775,52 @@ export async function processUpdate(update: Update): Promise<void> {
 
   const turn = await awaitTurn(c.chatId, storedId, deadline - ANSWER_RESERVE_MS)
   await typing(c.chatId)
+  // The turn is a trace of its own, from what was said to what was sent back,
+  // with the claim check and every tool call inside it.
+  const traceAttrs = { sessionId: c.chatId, userId: member.telegramUserId, tags: ['chat', c.chatType] }
   try {
-    const result = await runAgent({
-      chatId: c.chatId,
-      chatType: c.chatType,
-      member,
-      memberName: c.userName,
-      text: said,
-      excludeMessageId: storedId,
-      attachments,
-      deadline,
-    })
-
-    const reply = [result.text, ...unsaid(result.text, result.notices)]
-      .filter(Boolean)
-      .join('\n\n')
-      .trim()
-
-    if (reply) {
+    await traceRun('hearth.chat', traceAttrs, async () => {
+      noteRun({ input: said || `[sent ${attachments.map((a) => a.filename ?? a.kind).join(', ')}]`, metadata: { attachments: attachments.length } })
       try {
-        await send(c.chatId, reply, c.chatType === 'private' ? undefined : c.messageId)
+        const result = await runAgent({
+          chatId: c.chatId,
+          chatType: c.chatType,
+          member,
+          memberName: c.userName,
+          text: said,
+          excludeMessageId: storedId,
+          attachments,
+          deadline,
+        })
+
+        const reply = [result.text, ...unsaid(result.text, result.notices)]
+          .filter(Boolean)
+          .join('\n\n')
+          .trim()
+        noteRun({ output: reply, metadata: { model: result.model, ...(result.wrote?.length ? { wrote: result.wrote } : {}) } })
+
+        if (reply) {
+          try {
+            await send(c.chatId, reply, c.chatType === 'private' ? undefined : c.messageId)
+          } catch (err) {
+            // The turn itself worked, and whatever it wrote stands, so this is not
+            // "that went wrong", which would be asked again and done twice.
+            console.error('[telegram] reply not confirmed:', err)
+            noteRun({ metadata: { reply: 'not confirmed' }, level: 'WARNING' })
+            await sayUnconfirmed(c.chatId, result.wrote, result.unconfirmed)
+            return
+          }
+        }
+        // What the reply reported as new is now seen; a send that failed leaves it new.
+        await commitCursors(result.cursors)
+        if (reply) await recordMessage({ chatId: c.chatId, role: 'assistant', content: reply, model: result.model })
       } catch (err) {
-        // The turn itself worked, and whatever it wrote stands, so this is not
-        // "that went wrong", which would be asked again and done twice.
-        console.error('[telegram] reply not confirmed:', err)
-        await sayUnconfirmed(c.chatId, result.wrote, result.unconfirmed)
-        return
+        console.error('[agent] run failed:', err)
+        const apology = `Sorry, that went wrong: ${describeError(err)}`
+        noteRun({ output: apology, metadata: { outcome: 'failed' }, level: 'ERROR' })
+        await send(c.chatId, apology)
       }
-    }
-    // What the reply reported as new is now seen; a send that failed leaves it new.
-    await commitCursors(result.cursors)
-    if (reply) await recordMessage({ chatId: c.chatId, role: 'assistant', content: reply, model: result.model })
-  } catch (err) {
-    console.error('[agent] run failed:', err)
-    await send(c.chatId, `Sorry, that went wrong: ${describeError(err)}`)
+    })
   } finally {
     await endTurn(c.chatId, turn)
     await housekeeping(c.chatId)
