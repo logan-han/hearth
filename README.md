@@ -877,32 +877,39 @@ draft held back, and its metadata the outcome (`posted`, `held back`,
 `skipped`, `nothing new`, `not run`, `failed`), the decision and its
 confidence, and how many claims were checked. A held-back or failed run is
 marked as a warning or an error, so it can be found after the platform's logs
-have gone. The ambient gate and the chat summary are traces of their own
-(`hearth.gate`, `hearth.summary`). Tracing is registered once at server start
-from `instrumentation.ts` and is inert without the keys; the OpenTelemetry
-modules are not even loaded.
+have gone. The ambient gate and the chat summary are runs of their own too
+(`hearth.gate`, `hearth.summary`), so every trace has one root observation
+holding its overall input and output, which is where Langfuse v4 reads them.
+Tracing is registered once at server start from `instrumentation.ts` and is
+inert without the keys; the OpenTelemetry modules are not even loaded.
 
 Two things worth knowing. Traces carry the family's messages and mail; set
 `LANGFUSE_RECORD_CONTENT=off` to keep only the shape of each call, which also
-keeps a run's input, output and any reason that quotes a draft off its root. And the
-keys are environment variables, not dashboard settings, because the tracer
-starts before the database is read. The integration is built for Langfuse v4:
-ingestion goes over OpenTelemetry through `@langfuse/otel` 5.4 or later, trace
-attributes are propagated before each model call so every child observation
-carries them, and nothing uses the legacy `langfuse` SDK, the old ingestion
-endpoint or trace-level input/output setters. `tests/langfuse-v4.test.ts`
-guards that contract, down to every model call in the code sitting inside
-`traced()`, and `tests/telemetry.test.ts` checks what `traced()` propagates
-and what reaches Langfuse with content recording on and off.
+keeps a run's input, output and any reason that quotes a draft off its root.
+And the keys are environment variables, not dashboard settings, because the
+tracer starts before the database is read. The integration is built for
+Langfuse v4: ingestion goes over OpenTelemetry through `@langfuse/otel` 5.4 or
+later (5.13 installed), a run's session, tags and name are propagated before
+its root observation opens, and its user as soon as it is known, so every
+observation under it carries them, the generations whose cost a session adds
+up included, and a metadata value over Langfuse's 200-character limit is cut
+to fit rather than dropped. Nothing uses the legacy `langfuse` SDK, the old
+ingestion endpoint, trace-level input/output setters or the v1 read endpoints.
+`tests/langfuse-v4.test.ts` guards that contract, down to every model call in
+the code sitting inside `traced()`, and `tests/telemetry.test.ts` checks what
+`traced()` and `traceRun()` propagate and what reaches Langfuse with content
+recording on and off.
 
 Inside Langfuse, an LLM-as-a-judge rule ("Groundedness of watcher posts")
 scores watcher runs against their evidence. The root observation of a
 `hearth.watcher` trace is the pair it needs, the evidence as input and the post
-or held draft as output, so the rule targets that root, filtered to runs whose
-`outcome` is `posted` or `held back`; a run that found nothing new has nothing
-to judge. The judge should be a model outside the Gemini family that writes the
-posts, and one that returns structured output reliably: an evaluator that
-cannot shape its answer records no score at all. A trace scored *Not grounded*
+or held draft as output, so the rule targets that root (trace name
+`hearth.watcher`, root observation) and filters on its metadata `draft` being
+`yes`, which marks a run that wrote a draft and put it to the checks; a run
+that found nothing new, or said SKIP, has nothing to judge. The judge should
+be a model outside the Gemini family that writes the posts, and one that
+returns structured output reliably: an evaluator that cannot shape its answer
+records no score at all. A trace scored *Not grounded*
 or *Somewhat grounded* is the next case for `evals/`.
 
 ## Safety properties

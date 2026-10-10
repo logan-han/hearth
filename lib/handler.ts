@@ -558,6 +558,7 @@ async function shouldRespond(c: TelegramContext, messageId: number): Promise<boo
     text: c.text,
     memberName: c.userName,
     excludeMessageId: messageId,
+    userId: c.userId,
   })
 }
 

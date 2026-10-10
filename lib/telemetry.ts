@@ -70,6 +70,16 @@ type ActiveRun = { name: string; note: (n: RunNote) => void }
 const runSlot = globalThis as unknown as { __hearthRuns?: AsyncLocalStorage<ActiveRun> }
 const runs = (runSlot.__hearthRuns ??= new AsyncLocalStorage<ActiveRun>())
 
+/** Langfuse drops a propagated value longer than this, with only a warning in the log. */
+const PROPAGATED_VALUE_CHARS = 200
+
+/** Trace attributes as Langfuse will keep them: a metadata value it would drop for its length (a long automation label) is cut to fit instead. */
+function propagatable<A extends { metadata?: Record<string, string> }>(attrs: A): A {
+  if (!attrs.metadata) return attrs
+  const metadata = Object.fromEntries(Object.entries(attrs.metadata).map(([key, value]) => [key, value.slice(0, PROPAGATED_VALUE_CHARS)]))
+  return { ...attrs, metadata }
+}
+
 /**
  * Run `fn` with trace attributes attached, or plainly when tracing is off.
  * Inside a run the trace keeps the run's name: each call setting its own
@@ -80,7 +90,7 @@ export async function traced<T>(attrs: PropagateAttributesParams, fn: () => Prom
   if (!processor()) return fn()
   const { propagateAttributes } = await import('@langfuse/tracing')
   const run = runs.getStore()
-  return propagateAttributes(run ? { ...attrs, traceName: run.name } : attrs, fn)
+  return propagateAttributes(propagatable(run ? { ...attrs, traceName: run.name } : attrs), fn)
 }
 
 /**
@@ -102,9 +112,11 @@ export async function traceRun<T>(name: string, attrs: Omit<PropagateAttributesP
     return fn()
   }
   const [{ propagateAttributes, startActiveObservation }, { context, ROOT_CONTEXT }] = modules
-  // A root context, so the run starts a trace rather than joining the request's.
+  // A root context, so the run starts a trace rather than joining the request's,
+  // and its attributes set before the root opens, so the root and every
+  // observation under it (each generation, and so the session's cost) carry them.
   return context.with(ROOT_CONTEXT, () =>
-    propagateAttributes({ ...attrs, traceName: name }, () =>
+    propagateAttributes(propagatable({ ...attrs, traceName: name }), () =>
       startActiveObservation(name, (observation) => {
         const keep = recordContent()
         const note = ({ input, output, metadata, detail, level }: RunNote) => {

@@ -72,7 +72,16 @@ describe('Langfuse v4 readiness', () => {
   })
 
   it('never touches the retired v3 surface', () => {
-    const forbidden = [/from ['"]langfuse['"]/, /api\/public\/ingestion/, /setTraceIO|updateTrace\(/, /experimental_telemetry/]
+    const forbidden = [
+      /from ['"]langfuse['"]/,
+      /api\/public\/ingestion/,
+      // Trace-level input and output: v4 reads them off the root observation,
+      // and the setters are kept only for trace-level judges.
+      /setTraceIO|setActiveTraceIO|updateTrace\(|updateActiveTrace/,
+      /experimental_telemetry/,
+      // The v1 read endpoints go with v3; reads use /api/public/v2/observations and v3 scores.
+      /\/api\/public\/(?:traces|observations|scores|sessions|metrics)\b/,
+    ]
     for (const file of appSources) {
       const text = readFileSync(file, 'utf8')
       for (const pattern of forbidden) expect(text, `${file} matches ${pattern}`).not.toMatch(pattern)

@@ -211,6 +211,15 @@ describe('runs', () => {
     expect(tracing.propagateAttributes).toHaveBeenLastCalledWith({ traceName: 'hearth.gate' }, expect.any(Function))
   })
 
+  it('cuts a metadata value Langfuse would drop for its length, rather than lose it', async () => {
+    live()
+    const label = 'x'.repeat(250)
+    await traced({ traceName: 'hearth.decision', metadata: { label, model: 'g' } }, async () => 'ok')
+    expect(tracing.propagateAttributes).toHaveBeenLastCalledWith({ traceName: 'hearth.decision', metadata: { label: 'x'.repeat(200), model: 'g' } }, expect.any(Function))
+    await traceRun('hearth.watcher', { metadata: { label } }, async () => 'ok')
+    expect(tracing.propagateAttributes).toHaveBeenLastCalledWith({ traceName: 'hearth.watcher', metadata: { label: 'x'.repeat(200) } }, expect.any(Function))
+  })
+
   it('never lets a note fail the work it describes', async () => {
     live()
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})

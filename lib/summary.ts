@@ -1,7 +1,7 @@
 import { generateText } from 'ai'
 import { withModelFallback } from './model'
 import { chatSummary, setChatSummary, messagesAfter, CONTEXT_WINDOW } from './db/queries'
-import { traced, callTelemetry } from './telemetry'
+import { traced, traceRun, noteRun, callTelemetry } from './telemetry'
 import { cleanReply } from './agent'
 
 /**
@@ -38,31 +38,37 @@ export async function maybeSummarise(chatId: string): Promise<boolean> {
     .map((m) => `${m.role === 'assistant' ? 'Hearth' : (m.authorName ?? 'Someone')}: ${m.content.slice(0, MESSAGE_CHARS)}`)
     .join('\n')
 
-  const text = await withModelFallback((slot) =>
-    traced({ traceName: 'hearth.summary', sessionId: chatId, tags: ['summary'], metadata: { model: slot.name } }, () =>
-      generateText({
-        model: slot.model,
-        system: SUMMARY_PROMPT,
-        prompt: `${current.summary ? `RUNNING SUMMARY SO FAR:\n${current.summary}\n\n` : ''}NEW MESSAGES TO FOLD IN:\n${transcript}`,
-        temperature: 0.2,
-        // Room for a thinking model's reasoning as well as the summary: the
-        // cap counts both, and a summary that reaches it is thrown away.
-        maxOutputTokens: 1000,
-        timeout: { stepMs: 30_000 },
-        telemetry: callTelemetry('hearth.summary'),
+  const prompt = `${current.summary ? `RUNNING SUMMARY SO FAR:\n${current.summary}\n\n` : ''}NEW MESSAGES TO FOLD IN:\n${transcript}`
+  // A trace of its own, apart from the turn that set it off: what was folded in, and the summary that came of it.
+  return traceRun('hearth.summary', { sessionId: chatId, tags: ['summary'] }, async () => {
+    noteRun({ input: prompt, metadata: { messages: older.length } })
+    const text = await withModelFallback((slot) =>
+      traced({ traceName: 'hearth.summary', sessionId: chatId, tags: ['summary'], metadata: { model: slot.name } }, () =>
+        generateText({
+          model: slot.model,
+          system: SUMMARY_PROMPT,
+          prompt,
+          temperature: 0.2,
+          // Room for a thinking model's reasoning as well as the summary: the
+          // cap counts both, and a summary that reaches it is thrown away.
+          maxOutputTokens: 1000,
+          timeout: { stepMs: 30_000 },
+          telemetry: callTelemetry('hearth.summary'),
+        }),
+      ).then((r) => {
+        // A summary cut off at the cap would replace the whole running summary
+        // and mark the folded messages done, so whatever it had not got to yet
+        // would be lost for good. The next slot tries instead, and failing that
+        // the old summary stands and the same messages are folded next time.
+        if (r.finishReason === 'length') throw new Error(`${slot.name} ran out of room before the summary was done`)
+        const cleaned = cleanReply(r.text).text
+        if (!cleaned) throw new Error(`${slot.name} returned no summary`)
+        return cleaned
       }),
-    ).then((r) => {
-      // A summary cut off at the cap would replace the whole running summary
-      // and mark the folded messages done, so whatever it had not got to yet
-      // would be lost for good. The next slot tries instead, and failing that
-      // the old summary stands and the same messages are folded next time.
-      if (r.finishReason === 'length') throw new Error(`${slot.name} ran out of room before the summary was done`)
-      const cleaned = cleanReply(r.text).text
-      if (!cleaned) throw new Error(`${slot.name} returned no summary`)
-      return cleaned
-    }),
-  )
+    )
 
-  await setChatSummary(chatId, text, older[older.length - 1].id)
-  return true
+    noteRun({ output: text })
+    await setChatSummary(chatId, text, older[older.length - 1].id)
+    return true
+  })
 }

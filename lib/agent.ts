@@ -15,7 +15,7 @@ import type { StagedCursor } from './tools/cursor'
 import { recentMessages, listMemories, openQuestions, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals, chatSummary } from './db/queries'
 import type { Member } from './db/schema'
 import { timezone, language, units, reasoningLevel } from './env'
-import { traced, callTelemetry } from './telemetry'
+import { traced, traceRun, noteRun, callTelemetry } from './telemetry'
 import { formatLocal, localDateKey } from './cron'
 import { spanLabel } from './tools/familycal'
 import { parseIcs, describeIcs } from './ics-parse'
@@ -1233,25 +1233,34 @@ export async function shouldChimeIn(input: {
   text: string
   memberName: string
   excludeMessageId?: number
+  /** The speaker's Telegram id, for the trace. */
+  userId?: string
 }): Promise<boolean> {
   const history = (await historyMessages(input.chatId, input.excludeMessageId)).slice(-6)
-  try {
-    return await withModelFallback(
-      async (slot) => {
-        const first = await askGate(slot, history, input, 'reply')
-        if (first !== 'reply') return false
-        const second = await askGate(slot, history, input, 'silence')
-        return second === 'reply'
-      },
-      // Gate on one model only; falling through the whole chain would spend
-      // the day's quota on a coin flip. It is the first slot that has been
-      // returning choices, not merely the first configured.
-      [await gateModel()],
-      'hearth.gate',
-    )
-  } catch {
-    return false
-  }
+  // Its own trace, both questions under one root that says what was asked and what the gate made of it.
+  return traceRun('hearth.gate', { sessionId: input.chatId, ...(input.userId ? { userId: input.userId } : {}), tags: ['gate'] }, async () => {
+    noteRun({ input: `${input.memberName}: ${input.text}` })
+    let reply = false
+    try {
+      reply = await withModelFallback(
+        async (slot) => {
+          const first = await askGate(slot, history, input, 'reply')
+          if (first !== 'reply') return false
+          const second = await askGate(slot, history, input, 'silence')
+          return second === 'reply'
+        },
+        // Gate on one model only; falling through the whole chain would spend
+        // the day's quota on a coin flip. It is the first slot that has been
+        // returning choices, not merely the first configured.
+        [await gateModel()],
+        'hearth.gate',
+      )
+    } catch {
+      noteRun({ metadata: { gate: 'failed, so silent' } })
+    }
+    noteRun({ output: reply ? 'reply' : 'stay silent' })
+    return reply
+  })
 }
 
 async function gateModel(): Promise<ModelSlot> {

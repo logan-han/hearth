@@ -21,7 +21,7 @@ import { unaccountedIn } from '@/lib/headcount'
 import { commitCursors, type StagedCursor } from '@/lib/tools/cursor'
 import { send, PartlySent } from '@/lib/telegram'
 import { hydrateSecrets, recheckSecrets } from '@/lib/settings'
-import { flushTelemetry, traceRun, noteRun } from '@/lib/telemetry'
+import { flushTelemetry, traced, traceRun, noteRun } from '@/lib/telemetry'
 import { pruneModelEvents } from '@/lib/model-events'
 import { parseLog, prune, underCap, recordPost, shouldWarn, markWarned, PROACTIVE_POSTS_PER_HOUR } from '@/lib/rate-cap'
 import type { Automation, Member } from '@/lib/db/schema'
@@ -631,6 +631,8 @@ async function deliver(
   // Held back with nobody's ruling on it: what it read has reached nobody.
   let unjudged = false
   if (!draft.skip && draft.rest) {
+    // What a groundedness evaluator filters on: this run wrote a draft and put it to the checks.
+    noteRun({ metadata: { draft: 'yes' } })
     const approved = await approve(a, member, draft.rest, evidence, deadline)
     if (approved === UNJUDGED) unjudged = true
     else if (approved) parts.push(approved)
@@ -974,8 +976,10 @@ async function runClaimed(a: Automation, deadline: number): Promise<'ran' | 'ski
     // not the first DM when a draft is held back.
     const member = creator?.allowed ? creator : undefined
 
-    if (isWatcherKind(a.kind)) await runReadyMade(a.kind, a, member, deadline)
-    else await runCustom(a, member, deadline)
+    const run = () => (isWatcherKind(a.kind) ? runReadyMade(a.kind, a, member, deadline) : runCustom(a, member, deadline))
+    // Whoever set it up is the run's user on every call in it, the checks
+    // included, not on the writer's alone.
+    await (member ? traced({ userId: member.telegramUserId }, run) : run())
     return 'ran'
   } catch (err) {
     console.error(`[tick] automation ${a.id} failed:`, err)

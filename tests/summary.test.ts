@@ -5,6 +5,12 @@ import * as q from '@/lib/db/queries'
 
 const generateText = vi.hoisted(() => vi.fn())
 vi.mock('ai', async (orig) => ({ ...(await orig<typeof import('ai')>()), generateText }))
+// A summary is a trace of its own, apart from the turn that set it off.
+const { traceRun, noteRun } = vi.hoisted(() => ({
+  traceRun: vi.fn(async (_name: string, _attrs: unknown, fn: () => Promise<unknown>) => fn()),
+  noteRun: vi.fn(),
+}))
+vi.mock('@/lib/telemetry', async (orig) => ({ ...(await orig<typeof import('@/lib/telemetry')>()), traceRun, noteRun }))
 
 const { maybeSummarise, SUMMARISE_BATCH } = await import('@/lib/summary')
 const { runAgent } = await import('@/lib/agent')
@@ -36,6 +42,19 @@ describe('maybeSummarise', () => {
     await talk(q.CONTEXT_WINDOW + SUMMARISE_BATCH - 1)
     expect(await maybeSummarise('-100')).toBe(false)
     expect(generateText).not.toHaveBeenCalled()
+  })
+
+  it('is a trace of its own, with what it folded in and the summary that came of it, and none when there is too little', async () => {
+    await talk(q.CONTEXT_WINDOW + SUMMARISE_BATCH - 1)
+    await maybeSummarise('-100')
+    expect(traceRun).not.toHaveBeenCalled()
+
+    await talk(1, q.CONTEXT_WINDOW + SUMMARISE_BATCH)
+    generateText.mockResolvedValue(reply('Rowan and Sam talked about messages 1 to 6.'))
+    await maybeSummarise('-100')
+    expect(traceRun).toHaveBeenCalledWith('hearth.summary', { sessionId: '-100', tags: ['summary'] }, expect.any(Function))
+    expect(noteRun).toHaveBeenCalledWith({ input: expect.stringContaining('NEW MESSAGES TO FOLD IN:\nRowan: message 1'), metadata: { messages: SUMMARISE_BATCH } })
+    expect(noteRun).toHaveBeenCalledWith({ output: 'Rowan and Sam talked about messages 1 to 6.' })
   })
 
   it('summarises only what the raw window no longer holds, and remembers how far it got', async () => {

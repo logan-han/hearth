@@ -11,6 +11,12 @@ vi.mock('ai', async (orig) => ({ ...(await orig<typeof import('ai')>()), generat
 // Nobody Telegram is asked about is in the room: a group turn that reaches
 // that question has been let past the shared-room rule, which is the point.
 vi.mock('@/lib/headcount', () => ({ presentIn: vi.fn(async () => []), unaccountedIn: vi.fn(async () => 0) }))
+// The gate is a trace of its own; what it notes there is what Langfuse shows.
+const { traceRun, noteRun } = vi.hoisted(() => ({
+  traceRun: vi.fn(async (_name: string, _attrs: unknown, fn: () => Promise<unknown>) => fn()),
+  noteRun: vi.fn(),
+}))
+vi.mock('@/lib/telemetry', async (orig) => ({ ...(await orig<typeof import('@/lib/telemetry')>()), traceRun, noteRun }))
 
 const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, cutFromDraft, isStructuredOutputError, unconfirmedLine } = await import('@/lib/agent')
 const { generateText: sdkGenerateText } = await vi.importActual<typeof import('ai')>('ai')
@@ -1115,6 +1121,21 @@ describe('shouldChimeIn', () => {
     expect(await shouldChimeIn(input)).toBe(false)
     generateText.mockImplementation(modelSays('', 'length'))
     expect(await shouldChimeIn(input)).toBe(false)
+  })
+
+  it('is a trace of its own, with what was said and what the gate made of it', async () => {
+    generateText.mockResolvedValue({ ...reply(''), output: 'reply' })
+    await shouldChimeIn({ ...input, userId: '111' })
+    expect(traceRun).toHaveBeenCalledWith('hearth.gate', { sessionId: '-100', userId: '111', tags: ['gate'] }, expect.any(Function))
+    expect(noteRun).toHaveBeenCalledWith({ input: 'Ada: anyone know the wifi password?' })
+    expect(noteRun).toHaveBeenLastCalledWith({ output: 'reply' })
+
+    noteRun.mockClear()
+    generateText.mockRejectedValue(new Error('down'))
+    await shouldChimeIn(input)
+    expect(traceRun).toHaveBeenLastCalledWith('hearth.gate', { sessionId: '-100', tags: ['gate'] }, expect.any(Function))
+    expect(noteRun).toHaveBeenCalledWith({ metadata: { gate: 'failed, so silent' } })
+    expect(noteRun).toHaveBeenLastCalledWith({ output: 'stay silent' })
   })
 
   it('spends only one call, on the head of the chain', async () => {

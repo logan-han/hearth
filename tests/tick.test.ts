@@ -96,11 +96,12 @@ vi.mock('@/lib/db', () => ({
 }))
 // Each run is a trace of its own in Langfuse, and what it notes there is what
 // a held-back brief is diagnosed from once the logs have gone.
-const { traceRun, noteRun } = vi.hoisted(() => ({
+const { traceRun, noteRun, traced } = vi.hoisted(() => ({
   traceRun: vi.fn(async (_name: string, _attrs: unknown, fn: () => Promise<unknown>) => fn()),
   noteRun: vi.fn(),
+  traced: vi.fn(async (_attrs: unknown, fn: () => Promise<unknown>) => fn()),
 }))
-vi.mock('@/lib/telemetry', async (orig) => ({ ...(await orig<typeof import('@/lib/telemetry')>()), traceRun, noteRun }))
+vi.mock('@/lib/telemetry', async (orig) => ({ ...(await orig<typeof import('@/lib/telemetry')>()), traceRun, noteRun, traced }))
 
 const { POST, GET } = await import('@/app/api/tick/route')
 const { PartlySent } = await import('@/lib/telegram')
@@ -1995,6 +1996,33 @@ describe('what each run tells Langfuse', () => {
     runAgent.mockRejectedValueOnce(new Error('model exploded'))
     await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 0, skipped: 0 })
     expect(noteRun).toHaveBeenCalledWith({ output: 'model exploded', metadata: { outcome: 'failed' }, level: 'ERROR' })
+  })
+
+  it('marks a run that put a draft to the checks, which a groundedness evaluator filters on, and only that', async () => {
+    dueAutomations.mockResolvedValue([automation()])
+    await authed()
+    expect(noteRun).toHaveBeenCalledWith({ metadata: { draft: 'yes' } })
+
+    noteRun.mockClear()
+    runAgent.mockResolvedValue({ text: 'SKIP', notices: [], model: 'primary:test' })
+    await authed()
+    expect(noteRun).not.toHaveBeenCalledWith({ metadata: { draft: 'yes' } })
+    expect(noteRun).toHaveBeenCalledWith({ output: 'SKIP', metadata: { outcome: 'skipped' } })
+  })
+
+  it('makes whoever set a run up its user on every call in it, the checks included', async () => {
+    creatorRows.mockResolvedValue([{ id: 9, telegramUserId: '222', name: 'Rowan', allowed: true, isAdmin: false }])
+    dueAutomations.mockResolvedValue([automation({ memberId: 9 })])
+    await authed()
+    expect(traced).toHaveBeenCalledWith({ userId: '222' }, expect.any(Function))
+    expect(decideWatcherPost).toHaveBeenCalled()
+    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
+
+    traced.mockClear()
+    creatorRows.mockResolvedValue([])
+    dueAutomations.mockResolvedValue([automation()])
+    await authed()
+    expect(traced).not.toHaveBeenCalled()
   })
 
   it('traces the nightly pass as its own run, with the talk it read and what it did', async () => {
