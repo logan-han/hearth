@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterAll } from 'vitest'
 import { withRecorded, called, liveChainConfigured } from './harness'
 import { figuresGrounded, noLeak, TRIP_TALK, judgeGroundedness, record, printSummary, strict } from './scorers'
+import { localDateKey, dayAfter, localToUtc, formatLocal, formatLocalDate, clockLine } from '@/lib/cron'
 
 const calls = vi.hoisted(() => [] as { tool: string; input: unknown }[])
 const { STUBS, BODIES, TRIAGE, DAYS } = vi.hoisted(() => {
@@ -276,6 +277,8 @@ describe.skipIf(!liveChainConfigured())('money watcher', () => {
 
 const PROMO = { id: 'm2', from: 'deals@bigretailer.example', subject: '48 hours only: 30% off everything', snippet: 'Shop the sale', date: '2026-09-16T07:00:00+10:00' }
 const briefInstruction = watcherInstruction('morning', base.chatId)
+// The tick heads every piece of evidence with the household's clock, so the checks can tell today from tomorrow.
+const clock = clockLine(new Date())
 const mailbox = (messages: object[]) => ({ accounts: [{ member: 'Rowan', mailbox: "Rowan's Gmail", provider: 'google', first_check: false, messages }] })
 
 describe.skipIf(!liveChainConfigured())('morning brief, the mail half', () => {
@@ -326,7 +329,7 @@ const briefDraft = [
   '**To do**',
   "- Rowan's Gmail: the parents' association trivia night is Friday 23 October 2026 from 7pm in the college hall. Tickets $20 each; book by Friday 16 October.",
 ].join('\n')
-const briefEvidence = `INSTRUCTION:\n${briefInstruction}\n\nDATA:\n${briefData}\n\nTOOL RESULTS:\n(none)`
+const briefEvidence = `${clock}\n\nINSTRUCTION:\n${briefInstruction}\n\nDATA:\n${briefData}\n\nTOOL RESULTS:\n(none)`
 
 describe.skipIf(!liveChainConfigured())('morning brief, the post check', () => {
   it('keeps a ticket email from a bulk sender and drops the promotion', async () => {
@@ -370,7 +373,7 @@ describe.skipIf(!liveChainConfigured())('morning brief, the post check', () => {
       "- In Rowan's Gmail, Northbank Broadband says the connection at 12 Elm Street is active and the plan has started.",
       `- In Rowan's Gmail, Surplus Bites says the Mystery Box from Corner Bakery Hillside is ready for collection on ${DAYS.stale} between 6:00 pm and 6:30 pm at 18 Station Street, Hillside.`,
     ].join('\n')
-    const d = await decideWatcherPost({ label: 'Morning brief', draft, evidence: `INSTRUCTION:\n${briefInstruction}\n\nDATA:\n${data}\n\nTOOL RESULTS:\n(none)` })
+    const d = await decideWatcherPost({ label: 'Morning brief', draft, evidence: `${clock}\n\nINSTRUCTION:\n${briefInstruction}\n\nDATA:\n${data}\n\nTOOL RESULTS:\n(none)` })
     const hard = d.decision === 'post'
     record({ case: 'decision: a stale collection is no reason to skip', hard: hard ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}${d.reason ? ` ${d.reason}` : ''}` })
     expect(d.decision).toBe('post')
@@ -398,7 +401,7 @@ const FORM_DONE = {
   date: new Date(Date.now() - 86_400_000 - 3600_000).toISOString(),
 }
 const answeredData = plainData({ events: { timezone: 'Australia/Melbourne', events: [] }, mail: mailbox([FORM_DONE, TRIAGE[1], FORM]) })
-const answeredEvidence = `INSTRUCTION:\n${briefInstruction}\n\nDATA:\n${answeredData}\n\nTOOL RESULTS:\n(none)`
+const answeredEvidence = `${clock}\n\nINSTRUCTION:\n${briefInstruction}\n\nDATA:\n${answeredData}\n\nTOOL RESULTS:\n(none)`
 const staleDraft = [
   '**To do**',
   `- In Rowan's Gmail, Riverbend College asks for a response to the Year 1 Swimming Program online form for Juno by ${DAYS.due}.`,
@@ -483,5 +486,127 @@ describe.skipIf(!liveChainConfigured())('morning brief, the mail triage', () => 
     expect(noQuotedSubject).toBe(true)
     expect(noLeak(text)).toBe(true)
     if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
+  })
+})
+
+/*
+ * The brief read as a mail digest: the family calendar is nearly always
+ * empty, and nobody's own calendar was read. It now carries each member's own
+ * calendar for today, what starts tomorrow, the board's due-today items, the
+ * reminders set for later in the day and the proposals waiting on a yes, each
+ * in a part of its own. And the claim check once cut the day's one event,
+ * "scheduled for Today", for want of a date in the evidence; the evidence now
+ * opens with the clock. These hold the writer and the checks to both.
+ */
+const today = localDateKey(new Date())
+const next = dayAfter(today)
+const weekAhead = localDateKey(new Date(Date.now() + 7 * 86_400_000))
+const at = (day: string, time: string) => formatLocal(localToUtc(`${day}T${time}`))
+const iso = (day: string, time: string) => localToUtc(`${day}T${time}`).toISOString()
+const DAY = {
+  events: {
+    timezone: 'Australia/Melbourne',
+    events: [{ id: 50, title: 'After School Care', start_local: at(today, '15:00'), end_local: at(today, '18:00'), all_day: false, location: 'Riverbend College, Hillside' }],
+  },
+  calendars: {
+    timezone: 'Australia/Melbourne',
+    accounts: [
+      {
+        member: 'Sam', calendar: "Sam's Outlook Calendar", provider: 'microsoft',
+        events: [{ id: 'e1', title: 'Dentist', start: iso(today, '09:00'), end: iso(today, '10:00'), allDay: false, location: 'Hillside Dental', start_local: at(today, '09:00'), end_local: at(today, '10:00') }],
+      },
+      { member: 'Rowan', calendar: "Rowan's Google Calendar", provider: 'google', events: [] },
+    ],
+  },
+  tomorrow: {
+    date: formatLocalDate(localToUtc(next)),
+    calendars: [
+      {
+        member: 'Sam', calendar: "Sam's Outlook Calendar", provider: 'microsoft',
+        events: [{ id: 'e2', title: 'Flight to Sydney', start: iso(next, '06:10'), end: iso(next, '07:40'), allDay: false, start_local: at(next, '06:10'), end_local: at(next, '07:40') }],
+      },
+    ],
+  },
+  mail: mailbox([]),
+  board: { project: 'HTL', open: 2, by_status: [{ status: 'To Do', count: 2 }], overdue: [], due_today: [{ key: 'HTL-351', summary: 'Pay the excursion', due: today }], due_next: [] },
+  reminders: [{ label: 'bins out', at: '7:00 pm' }],
+  proposals: [{ id: 3, title: 'Athletics carnival', start_local: formatLocalDate(localToUtc(weekAhead)), all_day: true, location: 'the oval' }],
+  weather: {
+    place: 'Melbourne, Victoria, AU', units: 'metric',
+    now: { description: 'light rain', temp: 12, rain_last_hour_mm: 1.2 },
+    days: [{ day: today, min: 9, max: 17, condition: 'Rain', rain_mm: 8 }],
+  },
+}
+const dayData = plainData(DAY)
+const dayEvidence = `${clock}\n\nINSTRUCTION:\n${briefInstruction}\n\nDATA:\n${dayData}\n\nTOOL RESULTS:\n(none)`
+
+/** The brief by its **bold** parts, each heading in lower case with the lines under it. */
+function parts(text: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  let current = ''
+  for (const line of text.split('\n')) {
+    const m = /^\s*\*\*([^*]+?)\*\*:?\s*(.*)$/.exec(line)
+    if (m) {
+      current = m[1].trim().toLowerCase()
+      out[current] = `${out[current] ?? ''}${m[2]}\n`
+    } else if (current) {
+      out[current] += `${line}\n`
+    }
+  }
+  return out
+}
+const part = (all: Record<string, string>, name: RegExp) => Object.entries(all).find(([heading]) => name.test(heading))?.[1] ?? ''
+
+describe.skipIf(!liveChainConfigured())('morning brief, the day half', () => {
+  it("puts everyone's day under Today by name, the flight under Tomorrow, and the board, reminders and proposals in parts of their own", async () => {
+    calls.length = 0
+    const r = await runAgent({ ...base, tools: WATCHERS.morning.tools, text: `Scheduled check "Morning brief".\n\n${briefInstruction}\n\nDATA (fetched just now):\n${dayData}` })
+    const text = r.text
+    if (process.env.EVAL_PRINT) console.log(`\n----- day brief -----\n${text}\n-----`)
+    const all = parts(text)
+    const todayPart = part(all, /^today\b/)
+    const tomorrowPart = part(all, /^tomorrow\b/)
+    const todayRight = /dentist/i.test(todayPart) && /after school care/i.test(todayPart) && /\bsam\b/i.test(todayPart) && !/flight/i.test(todayPart)
+    const tomorrowRight = /flight/i.test(tomorrowPart) && /6:10/.test(tomorrowPart)
+    const dueRight = /HTL-351|excursion/i.test(part(all, /due today/))
+    const reminderRight = /bins/i.test(part(all, /later today/)) && /7:00 pm/i.test(part(all, /later today/))
+    const waitingRight = /athletics carnival/i.test(part(all, /waiting on a yes/))
+    const byName = !/\((?:microsoft|google)\)/i.test(text)
+    const hard = todayRight && tomorrowRight && dueRight && reminderRight && waitingRight && byName && noLeak(text)
+    const g = await judgeGroundedness({ answer: text, context: dayData })
+    record({ case: "brief: everyone's day, tomorrow, due today, reminders, waiting", hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: text.slice(0, 80) })
+    expect(todayRight).toBe(true)
+    expect(tomorrowRight).toBe(true)
+    expect(dueRight).toBe(true)
+    expect(reminderRight).toBe(true)
+    expect(waitingRight).toBe(true)
+    expect(byName).toBe(true)
+    expect(noLeak(text)).toBe(true)
+    if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
+  })
+
+  it('keeps a Today line through the claim check and the post decision, now the evidence says what day it is', async () => {
+    const label = 'Morning brief'
+    const draft = [
+      '**Today**',
+      "- Sam's Outlook Calendar: Dentist, 9:00 am to 10:00 am, at Hillside Dental.",
+      '- After School Care, 3:00 pm to 6:00 pm, Riverbend College, Hillside.',
+      '**Tomorrow**',
+      "- Sam's Outlook Calendar: Flight to Sydney, 6:10 am.",
+    ].join('\n')
+    const review = await reviewDraft({ label, draft, evidence: dayEvidence })
+    const kept = review.message !== null && /dentist/i.test(review.message) && /after school care/i.test(review.message)
+    const verified = review.claims.length > 0 && review.unsupported.length === 0
+    const d = await decideWatcherPost({ label, draft: review.message ?? draft, evidence: dayEvidence, verified })
+    const hard = kept && review.unsupported.length === 0 && d.decision === 'post'
+    record({
+      case: 'check: a Today line survives with the clock in the evidence',
+      hard: hard ? 'pass' : 'fail',
+      model: d.model,
+      note: `check: ${review.unsupported.length}/${review.claims.length} cut${review.unsupported.length ? ` (${review.unsupported.join(' | ')})` : ''} | ${d.decision}@${d.confidence}${d.reason ? ` ${d.reason}` : ''}`,
+    })
+    expect(review.unsupported).toEqual([])
+    expect(kept).toBe(true)
+    expect(d.decision).toBe('post')
   })
 })
