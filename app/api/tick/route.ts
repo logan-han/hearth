@@ -5,9 +5,9 @@ import { Receiver } from '@upstash/qstash'
 import {
   dueAutomations, claimAutomation, allowedMembers, recordMessage, strangersIn,
   messagesSince, getSetting, setSetting, retireStaleProposals, recordTick,
-  unaskedQuestions, markQuestionsAsked, memberByTelegramId, setAutomationEnabled, moveChat,
+  unaskedQuestions, markQuestionsAsked, memberByTelegramId, setAutomationEnabled, moveChat, listAutomations,
 } from '@/lib/db/queries'
-import { localDateKey, tzOffsetMs, nextRun, formatLocal } from '@/lib/cron'
+import { localDateKey, tzOffsetMs, nextRun, formatLocal, formatLocalDate, formatLocalTime, localToUtc, dayAfter, clockLine } from '@/lib/cron'
 import { retryTickAt } from '@/lib/scheduler'
 import { timezone, idSet } from '@/lib/env'
 import { db, schema } from '@/lib/db'
@@ -156,8 +156,54 @@ async function runTool(tools: Tools, name: ToolName, args: unknown): Promise<Rec
 const errorOf = (r: Record<string, unknown>): string | null => (typeof r.error === 'string' ? r.error : null)
 /** Optional integrations answer "not configured"; that is a setting, not a fault. */
 const isUnconfigured = (err: string | null) => Boolean(err && /not configured/i.test(err))
-/** Nobody having linked a mailbox yet is a setting too; a mailbox that will not answer is a fault. */
-const isUnlinked = (err: string | null) => Boolean(err && /linked a mailbox|no email account linked/i.test(err))
+/** Nobody having linked a mailbox or calendar yet is a setting too; one that will not answer is a fault. */
+const isUnlinked = (err: string | null) => Boolean(err && /linked a (?:mailbox|calendar)|no (?:email account|calendar) linked/i.test(err))
+
+/** The local day an event as list_calendar shows it starts on: its date for an all-day one, its instant's day for a timed one. */
+function startDay(e: Record<string, unknown>): string | null {
+  const start = typeof e.start === 'string' ? e.start : ''
+  if (/^\d{4}-\d{2}-\d{2}$/.test(start)) return start
+  const at = new Date(start)
+  return start && !Number.isNaN(at.getTime()) ? localDateKey(at) : null
+}
+
+/**
+ * The calendars read for today and tomorrow in one look, split: an account's
+ * events that start on `next` are its tomorrow, and the rest are on today,
+ * whatever began earlier and runs on included. An account that answered with
+ * an error is kept as it came, so the brief sees that it could not be read.
+ */
+function splitCalendars(r: Record<string, unknown>, next: string) {
+  const accounts = Array.isArray(r.accounts) ? (r.accounts as Record<string, unknown>[]) : []
+  const today: Record<string, unknown>[] = []
+  const tomorrow: Record<string, unknown>[] = []
+  let onToday = 0
+  for (const acct of accounts) {
+    if (!Array.isArray(acct.events)) {
+      today.push(acct)
+      continue
+    }
+    const events = acct.events as Record<string, unknown>[]
+    const starting = events.filter((e) => startDay(e) === next)
+    const on = events.filter((e) => startDay(e) !== next)
+    onToday += on.length
+    today.push({ ...acct, events: on })
+    if (starting.length) tomorrow.push({ ...acct, events: starting })
+  }
+  return { accounts, today, tomorrow, onToday }
+}
+
+/**
+ * The reminders a member set in this chat that go off later today, for the
+ * brief to mention. The ready-made watchers have a kind and speak for
+ * themselves; a member's own instruction has none.
+ */
+async function remindersOn(chatId: string, now: Date): Promise<{ label: string; at: string }[]> {
+  const day = localDateKey(now)
+  return (await listAutomations(chatId))
+    .filter((r) => r.enabled && r.kind === null && r.nextRunAt > now && localDateKey(r.nextRunAt) === day)
+    .map((r) => ({ label: r.label, at: formatLocalTime(r.nextRunAt) }))
+}
 
 type Fetched = {
   data: Record<string, unknown>
@@ -185,23 +231,41 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
     }
     case 'morning': {
       const day = localDateKey(ctx.now)
-      // In a group the brief sweeps every linked mailbox, each on its own
-      // cursor; in a DM only the owner's. The cursor is the chat's, so the
-      // brief picks up where the retired inbox sweep left off.
+      const next = dayAfter(day)
+      const everyone = isGroupChat(a.chatId)
+      // In a group the brief sweeps the mailbox and the calendar of every
+      // member Telegram says is in the room, each mailbox on its own cursor;
+      // in a DM only the owner's. The cursor is the chat's, so the brief
+      // picks up where the retired inbox sweep left off.
       // The nightly pass asks rather than guesses; the brief is where its
       // questions reach the family, once each. Home carries them after that.
-      const [events, mail, board, weather, questions] = await Promise.all([
+      const [events, tomorrowEvents, calendars, mail, board, weather, questions, proposals, reminders] = await Promise.all([
         // The whole day, and anything on during it: day three of a camp is news too.
         runTool(tools, 'list_family_events', { from: day, to: day, include_cancelled: false }),
+        runTool(tools, 'list_family_events', { from: next, to: next, include_cancelled: false }),
+        // Both days in one look, split below, so Telegram is asked who is in the room once.
+        runTool(tools, 'list_calendar', { from: day, to: next, everyone }),
         // A day's mail, not an hour's: the brief runs once a morning. What
         // does not fit is counted in the brief rather than dropped.
-        runTool(tools, 'new_mail', { limit: 20, everyone: isGroupChat(a.chatId) }),
+        runTool(tools, 'new_mail', { limit: 20, everyone }),
         runTool(tools, 'jira_board_summary', {}),
         runTool(tools, 'weather', {}),
-        isGroupChat(a.chatId) ? unaskedQuestions().catch(() => []) : Promise.resolve([]),
+        everyone ? unaskedQuestions().catch(() => []) : Promise.resolve([]),
+        // Context for the brief, never the reason for one: a lookup that fails leaves it out.
+        runTool(tools, 'list_event_proposals', {}).catch((): Record<string, unknown> => ({})),
+        remindersOn(a.chatId, ctx.now).catch(() => []),
       ])
       const eventsErr = errorOf(events)
       if (eventsErr) problems.push(`list_family_events: ${eventsErr}`)
+      const tomorrowErr = errorOf(tomorrowEvents)
+      if (tomorrowErr && tomorrowErr !== eventsErr) problems.push(`list_family_events (tomorrow): ${tomorrowErr}`)
+      const calendarsErr = errorOf(calendars)
+      if (calendarsErr && !isUnlinked(calendarsErr)) problems.push(`list_calendar: ${calendarsErr}`)
+      const days = splitCalendars(calendars, next)
+      for (const acct of days.accounts) {
+        const e = errorOf(acct)
+        if (e) problems.push(`list_calendar (${String(acct.calendar ?? acct.provider)}): ${e}`)
+      }
       const mailErr = errorOf(mail)
       if (mailErr && !isUnlinked(mailErr)) problems.push(`new_mail: ${mailErr}`)
       const accounts = Array.isArray(mail.accounts) ? (mail.accounts as Record<string, unknown>[]) : []
@@ -215,18 +279,38 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
         const e = errorOf(r)
         if (e && !isUnconfigured(e)) problems.push(`${name}: ${e}`)
       }
-      const todays = Array.isArray(events.events) ? events.events : []
+      const todays = Array.isArray(events.events) ? (events.events as Record<string, unknown>[]) : []
+      // Tomorrow is what starts then: a camp on both days is already under today.
+      const onToday = new Set(todays.map((e) => e.id))
+      const startsTomorrow = (Array.isArray(tomorrowEvents.events) ? (tomorrowEvents.events as Record<string, unknown>[]) : []).filter(
+        (e) => !onToday.has(e.id),
+      )
       const overdue = Array.isArray(board.overdue) ? board.overdue : []
+      const dueToday = Array.isArray(board.due_today) ? board.due_today : []
+      const waiting = Array.isArray(proposals.proposals) ? proposals.proposals : []
       const data: Record<string, unknown> = { events }
+      if (!calendarsErr) data.calendars = { ...calendars, accounts: days.today }
+      if (startsTomorrow.length || days.tomorrow.length) {
+        data.tomorrow = {
+          date: formatLocalDate(localToUtc(next)),
+          ...(startsTomorrow.length ? { events: startsTomorrow } : {}),
+          ...(days.tomorrow.length ? { calendars: days.tomorrow } : {}),
+        }
+      }
       if (!mailErr) data.mail = mail
       if (!errorOf(board)) data.board = board
+      if (reminders.length) data.reminders = reminders
+      if (waiting.length) data.proposals = waiting
       if (!errorOf(weather)) data.weather = weather
       if (questions.length) data.questions = questions.map((qn) => ({ id: qn.id, question: qn.question }))
-      // A day with nothing on, no new mail, nothing due and nothing to ask
-      // gets no brief; weather alone is not news the household needs pushed at it.
+      // A day with nothing on anyone's calendar, no new mail, nothing due and
+      // nothing to ask gets no brief. The weather, tomorrow, a reminder that
+      // will speak for itself and a proposal Home already lists are context
+      // for a brief, not news to wake the household for.
       return {
         data,
-        empty: todays.length === 0 && arrived === 0 && overdue.length === 0 && questions.length === 0,
+        empty:
+          todays.length === 0 && days.onToday === 0 && arrived === 0 && overdue.length === 0 && dueToday.length === 0 && questions.length === 0,
         problems,
         asked: questions.map((qn) => qn.id),
       }
@@ -315,7 +399,9 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
     deadline: deadline - REVIEW_RESERVE_MS,
   }))
   const staged = () => [...(ctx.pendingCursors ?? []), ...(result.cursors ?? [])]
-  const evidence = `INSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`
+  // The checks judge the draft against this, so it says what day it is: a
+  // claim that something is on today is checkable only with the date beside it.
+  const evidence = `${clockLine(now)}\n\nINSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`
   // What the checks judge the draft against is what the run was given.
   noteRun({ input: evidence, metadata: { writer: result.model } })
   await counted(a, member, staged, () => deliver(a, member, result, evidence, () => spentClean(a, staged()), deadline))
@@ -346,7 +432,7 @@ async function runCustom(a: Automation, member: Member | undefined, deadline: nu
     deadline: deadline - REVIEW_RESERVE_MS,
   }))
   const staged = () => result.cursors ?? []
-  const evidence = `INSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`
+  const evidence = `${clockLine(new Date())}\n\nINSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`
   noteRun({ input: evidence, metadata: { writer: result.model } })
   await counted(a, member, staged, () => deliver(a, member, result, evidence, () => spentClean(a, staged()), deadline))
 }

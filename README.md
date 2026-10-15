@@ -438,18 +438,25 @@ in every household group without anyone asking — each an ordinary automation
 underneath that checks on a schedule and posts **only when there is something
 worth saying**:
 
-- **Morning brief**, daily at 7am: today's family calendar; the mail that has
-  arrived since the last brief and is worth knowing about (appointments,
-  notices, bills, deliveries), with calendar-worthy dates proposed for the
-  family calendar; anything overdue on the board; and the weather. In the
-  group it sweeps the linked mailbox of every member Telegram says is in
-  it, each on its own cursor via
-  `new_mail`, and says whose each item was by name (Sam's Outlook), never by
-  provider. It reads exactly what arrived since the last brief, up to 20 a
-  mailbox, and says how many more there were rather than dropping them without
-  a word. "Today" means anything on during the day, so the third day of a
-  camp is on it too. A day with nothing on, no new mail and nothing due gets
-  no brief; weather alone is not news.
+- **Morning brief**, daily at 7am: what is on today, on the family calendar
+  and on each member's own (Google or Outlook), and what starts tomorrow, so
+  tonight's preparation is no surprise; the mail that has arrived since the
+  last brief and is worth knowing about (appointments, notices, bills,
+  deliveries), sorted into what still asks for something and what only
+  informs, with calendar-worthy dates proposed for the family calendar;
+  anything overdue or due today on the board; the reminders set to go off
+  later in the day; the events proposed but still waiting on a yes; and the
+  weather. In the group it sweeps the linked mailbox and calendar of every
+  member Telegram says is in it, each mailbox on its own cursor via
+  `new_mail`, and says whose each item was by name (Sam's Outlook, Sam's
+  Google Calendar), never by provider. It reads exactly what arrived since
+  the last brief, up to 20 a mailbox, and says how many more there were
+  rather than dropping them without a word. "Today" means anything on during
+  the day, so the third day of a camp is on it too; tomorrow is only what
+  starts then. A day with nothing on anyone's calendar, no new mail and
+  nothing due gets no brief: the weather, tomorrow, a reminder that will
+  speak for itself and a proposal Home already lists are context for a
+  brief, never the reason for one.
 - **Money snapshot**, Sunday at 6pm: the week's spending and the month so far,
   with the budget's pacing and the categories over it where PocketSmith is
   connected, or the totals from the raw Up feed where it is not. Spend is
@@ -482,7 +489,7 @@ parents' group for one question does not start a morning brief there.
 
 **/watch** adds the rest, or switches a paused one back on:
 
-- `/watch morning` — the brief, in a DM as well, where it reads your own mailbox.
+- `/watch morning` — the brief, in a DM as well, where it reads your own mailbox and calendar.
 - `/watch snapshot` — the money snapshot.
 - `/watch money` — new 2Up transactions, checked hourly 9am–10pm. Cursor-disciplined,
   so a transaction is never posted twice, and one that never reached the chat
@@ -496,6 +503,8 @@ context tools: a transaction arrives as payee, amount and date, with a purpose
 only when a household fact, calendar entry or email names one, and "purpose not
 recorded" otherwise. Then post or skip is decided against the evidence, on
 grounding alone, with a confidence, by a second, tool-free call to the chain.
+The evidence opens with the household's clock, so a claim that something is
+on today is checked against the date rather than cut for want of one.
 The judge draws its own line (0.7 of its own confidence, in `lib/agent.ts`)
 and the tick posts what comes back as decided. A draft held
 back is logged and sent to an admin with the reason. The commands are registered with

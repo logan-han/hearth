@@ -18,7 +18,7 @@ const { traceRun, noteRun } = vi.hoisted(() => ({
 }))
 vi.mock('@/lib/telemetry', async (orig) => ({ ...(await orig<typeof import('@/lib/telemetry')>()), traceRun, noteRun }))
 
-const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, cutFromDraft, isStructuredOutputError, unconfirmedLine } = await import('@/lib/agent')
+const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, cutFromDraft, dropEmptiedHeadings, isStructuredOutputError, unconfirmedLine } = await import('@/lib/agent')
 const { generateText: sdkGenerateText } = await vi.importActual<typeof import('ai')>('ai')
 const { MockLanguageModelV4 } = await import('ai/test')
 
@@ -1585,6 +1585,18 @@ describe('reviewDraft', () => {
     expect(rewrite).toContain('SUPPORTED, keep as written:\n- $389.60 to FARESAVER')
   })
 
+  it("posts no heading over nothing once the rewrite has cut a part's only bullet", async () => {
+    const draft = '**Today**\n- After School Care, 3:00 pm – 6:00 pm\n\n**Heads up**\n- A payslip arrived.'
+    generateText
+      .mockResolvedValueOnce(out({ claims: ['After School Care is on today', 'a payslip arrived'] }))
+      .mockResolvedValueOnce(out({ supported: false }))
+      .mockResolvedValueOnce(out({ supported: true }))
+      .mockResolvedValueOnce(out({ message: '**Today**\n\n**Heads up**\n- A payslip arrived.' }))
+    const r = await reviewDraft({ label: 'Morning brief', draft, evidence: 'DATA ...' })
+    expect(r.unsupported).toEqual(['After School Care is on today'])
+    expect(r.message).toBe('**Heads up**\n- A payslip arrived.')
+  })
+
   it('still edits when every listed claim fails, and is silent only when nothing is left', async () => {
     generateText
       .mockResolvedValueOnce(out({ claims: ['a trip to Lisbon was booked'] }))
@@ -1646,6 +1658,20 @@ describe('reviewDraft', () => {
       'Timed out before any model was asked',
     )
     expect(generateText).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('dropEmptiedHeadings', () => {
+  it('drops a heading the rewrite left over nothing, and keeps a title above the first part', () => {
+    const draft = '**Morning brief**\n**Today**\n- After School Care, 3:00 pm – 6:00 pm\n\n**Heads up**\n- A payslip arrived.'
+    const rewritten = '**Morning brief**\n**Today**\n\n**Heads up**\n- A payslip arrived.'
+    expect(dropEmptiedHeadings(rewritten, draft)).toBe('**Morning brief**\n**Heads up**\n- A payslip arrived.')
+  })
+
+  it('drops an emptied last part too, and leaves a draft the rewrite did not empty alone', () => {
+    const draft = '**Today**\n- Swimming, 9:00 am\n\n**Overdue**\n- HTL-344 Pay rates'
+    expect(dropEmptiedHeadings('**Today**\n- Swimming, 9:00 am\n\n**Overdue**', draft)).toBe('**Today**\n- Swimming, 9:00 am')
+    expect(dropEmptiedHeadings(draft, draft)).toBe(draft)
   })
 })
 

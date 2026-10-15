@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Automation } from '@/lib/db/schema'
+import { dayAfter, localToUtc } from '@/lib/cron'
 
 const dueAutomations = vi.fn<(now: Date) => Promise<Automation[]>>()
 const claimAutomation = vi.fn<(id: number, expected: Date, next: Date | null) => Promise<boolean>>()
@@ -11,6 +12,9 @@ const cutFromDraft = vi.fn()
 const newTransactions = vi.fn()
 const newMail = vi.fn()
 const listEvents = vi.fn()
+const listCalendar = vi.fn()
+const listProposals = vi.fn()
+const listAutomations = vi.fn<(chatId?: string) => Promise<Automation[]>>()
 const boardSummary = vi.fn()
 const weatherTool = vi.fn()
 const spendingSummary = vi.fn()
@@ -30,6 +34,8 @@ const buildTools = vi.fn(
       new_transactions: { execute: newTransactions },
       new_mail: { execute: newMail },
       list_family_events: { execute: listEvents },
+      list_calendar: { execute: listCalendar },
+      list_event_proposals: { execute: listProposals },
       jira_board_summary: { execute: boardSummary },
       weather: { execute: weatherTool },
       spending_summary: { execute: spendingSummary },
@@ -78,6 +84,7 @@ vi.mock('@/lib/db/queries', () => ({
   memberByTelegramId,
   setAutomationEnabled,
   moveChat,
+  listAutomations,
 }))
 vi.mock('@/lib/builtins', () => ({ installBuiltins }))
 vi.mock('@/lib/agent', async (orig) => ({
@@ -151,6 +158,9 @@ beforeEach(() => {
   newTransactions.mockResolvedValue({ account: '2Up', count: 0, transactions: [] })
   newMail.mockResolvedValue({ accounts: [] })
   listEvents.mockResolvedValue({ events: [] })
+  listCalendar.mockResolvedValue({ accounts: [] })
+  listProposals.mockResolvedValue({ proposals: [] })
+  listAutomations.mockResolvedValue([])
   boardSummary.mockResolvedValue({ error: 'Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).' })
   weatherTool.mockResolvedValue({ error: 'Weather is not configured (OPENWEATHER_API_KEY missing).' })
   spendingSummary.mockResolvedValue({ error: 'PocketSmith is not configured.' })
@@ -1225,6 +1235,8 @@ describe('ready-made watchers', () => {
         },
       },
       list_family_events: { execute: listEvents },
+      list_calendar: { execute: listCalendar },
+      list_event_proposals: { execute: listProposals },
       jira_board_summary: { execute: boardSummary },
       weather: { execute: weatherTool },
       spending_summary: { execute: spendingSummary },
@@ -1734,6 +1746,129 @@ describe('ready-made watchers', () => {
     await authed()
     expect(runAgent).toHaveBeenCalled()
     expect(markQuestionsAsked).not.toHaveBeenCalled()
+  })
+
+  /** Today as the household's calendar has it, the way the route reads it. */
+  const todayKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Melbourne' }).format(new Date())
+
+  it("reads every present member's own calendar into the group brief and only the owner's into a DM, both days in one look", async () => {
+    dueAutomations.mockResolvedValue([brief({ id: 1, chatId: '-100999' }), brief({ id: 2, chatId: '111' })])
+    await authed()
+    const day = todayKey()
+    expect(listCalendar).toHaveBeenNthCalledWith(1, expect.objectContaining({ from: day, to: dayAfter(day), everyone: true }), expect.anything())
+    expect(listCalendar).toHaveBeenNthCalledWith(2, expect.objectContaining({ from: day, to: dayAfter(day), everyone: false }), expect.anything())
+    expect(listEvents).toHaveBeenCalledWith(expect.objectContaining({ from: dayAfter(day), to: dayAfter(day) }), expect.anything())
+    expect(runAgent).not.toHaveBeenCalled()
+  })
+
+  it("briefs the day on a member's own calendar alone, and asks whose calendar each item is from in a group", async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    listCalendar.mockResolvedValue({
+      timezone: 'Australia/Melbourne',
+      accounts: [{ member: 'Sam', calendar: "Sam's Outlook Calendar", provider: 'microsoft', events: [
+        { id: 'e1', title: 'Dentist', start: `${todayKey()}T09:00:00+10:00`, end: '', allDay: false, start_local: 'today, 9:00 am', end_local: 'today, 10:00 am' },
+      ] }],
+    })
+    runAgent.mockResolvedValue({ text: "**Today**\n- Sam's Outlook Calendar: Dentist, 9:00 am to 10:00 am.", notices: [], model: 'primary:test' })
+    await authed()
+    const call = runAgent.mock.calls[0][0] as { text: string }
+    expect(call.text).toContain("calendar: Sam's Outlook Calendar")
+    expect(call.text).toContain('title: Dentist')
+    expect(call.text).toContain('whose mailbox or calendar')
+    expect(call.text).not.toContain('tomorrow:')
+    expect(send).toHaveBeenCalledWith('-100999', expect.stringContaining('Dentist'))
+  })
+
+  it('puts what starts tomorrow under tomorrow, and does not wake the household for it alone', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    const next = dayAfter(todayKey())
+    listCalendar.mockResolvedValue({ accounts: [{ member: 'Sam', calendar: "Sam's Google Calendar", provider: 'google', events: [
+      { id: 'e2', title: 'Flight to Sydney', start: `${next}T06:10:00+11:00`, end: '', allDay: false, start_local: 'tomorrow, 6:10 am', end_local: '' },
+      { id: 'e3', title: 'Pupil-free day', start: next, end: next, allDay: true, start_local: 'tomorrow', end_local: 'tomorrow' },
+    ] }] })
+    const familyOn = (today: object[]) => async ({ from }: { from: string }) =>
+      from === next ? { events: [{ id: 7, title: 'Swimming carnival', start_local: 'tomorrow, 9:00 am' }] } : { events: today }
+    listEvents.mockImplementation(familyOn([]))
+    await authed()
+    expect(runAgent).not.toHaveBeenCalled()
+
+    // With something on today, tomorrow rides along as a block of its own.
+    listEvents.mockImplementation(familyOn([{ id: 6, title: 'Piano', start_local: 'today, 4:00 pm' }]))
+    await authed()
+    const call = runAgent.mock.calls[0][0] as { text: string }
+    expect(call.text).toContain('tomorrow:')
+    for (const title of ['Swimming carnival', 'Flight to Sydney', 'Pupil-free day']) {
+      expect(call.text.indexOf(title)).toBeGreaterThan(call.text.indexOf('tomorrow:'))
+    }
+    expect(call.text.indexOf('Piano')).toBeLessThan(call.text.indexOf('tomorrow:'))
+  })
+
+  it('lists a family event that runs over both days under today only', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    listEvents.mockResolvedValue({ events: [{ id: 9, title: 'School camp', start_local: 'Tue, 13 Oct 2026', end_local: 'Thu, 15 Oct 2026', all_day: true }] })
+    await authed()
+    const call = runAgent.mock.calls[0][0] as { text: string }
+    expect(call.text).toContain('School camp')
+    expect(call.text).not.toContain('tomorrow:')
+  })
+
+  it('briefs on a board item due today, as it does on an overdue one', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    boardSummary.mockResolvedValue({ project: 'HTL', open: 3, overdue: [], due_today: [{ key: 'HTL-351', summary: 'Pay the excursion', due: todayKey() }], due_next: [] })
+    await authed()
+    expect(runAgent).toHaveBeenCalled()
+    expect((runAgent.mock.calls[0][0] as { text: string }).text).toContain('HTL-351')
+  })
+
+  it("mentions the day's reminders and the proposals waiting on a yes, without waking the household for them alone", async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    const at = localToUtc(`${todayKey()}T23:59`)
+    listAutomations.mockResolvedValue([
+      automation({ id: 4, label: 'bins out', kind: null, nextRunAt: at, enabled: true }),
+      automation({ id: 5, label: 'paused one', kind: null, nextRunAt: at, enabled: false }),
+      automation({ id: 6, label: '2Up transactions', kind: 'money', nextRunAt: at, enabled: true }),
+      automation({ id: 7, label: 'next week', kind: null, nextRunAt: new Date(at.getTime() + 7 * 86_400_000), enabled: true }),
+    ])
+    listProposals.mockResolvedValue({ timezone: 'Australia/Melbourne', proposals: [{ id: 3, title: 'Athletics carnival', start_local: 'Thu, 22 Oct 2026', all_day: true, location: 'the oval' }] })
+    await authed()
+    expect(runAgent).not.toHaveBeenCalled()
+
+    newMail.mockResolvedValue(mailWaiting)
+    await authed()
+    const call = runAgent.mock.calls[0][0] as { text: string }
+    expect(listAutomations).toHaveBeenCalledWith('-100999')
+    expect(call.text).toContain('reminders:')
+    expect(call.text).toContain('label: bins out')
+    expect(call.text).toContain('at: 11:59 pm')
+    for (const left of ['paused one', '2Up transactions', 'next week']) expect(call.text).not.toContain(left)
+    expect(call.text).toContain('proposals:')
+    expect(call.text).toContain('Athletics carnival')
+  })
+
+  it('tells the checks what day it is, at the head of the evidence, for the brief and for a custom run alike', async () => {
+    dueAutomations.mockResolvedValue([brief(), automation({ id: 2 })])
+    newMail.mockResolvedValue(mailWaiting)
+    await authed()
+    const clock = new RegExp(`^NOW: .+ \\(Australia/Melbourne\\)\\. TODAY: ${todayKey()}\\.\\n\\nINSTRUCTION:`)
+    expect(decideWatcherPost).toHaveBeenCalledTimes(2)
+    for (const [input] of decideWatcherPost.mock.calls as [{ evidence: string }][]) expect(input.evidence).toMatch(clock)
+    expect((reviewDraft.mock.calls[0][0] as { evidence: string }).evidence).toMatch(clock)
+  })
+
+  it('treats a calendar nobody has linked as a setting, and a link that will not answer as a fault', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    listCalendar.mockResolvedValue({ error: 'Nobody in this chat has linked a calendar yet. Send /connect to link one.' })
+    await authed()
+    expect(send).not.toHaveBeenCalled()
+
+    listCalendar.mockResolvedValue({ accounts: [
+      { member: 'Sam', calendar: "Sam's Outlook Calendar", provider: 'microsoft', error: 'The microsoft link has expired or been revoked. Send /connect to link it again.' },
+      { member: 'Rowan', calendar: "Rowan's Google Calendar", provider: 'google', events: [{ id: 'e1', title: 'Gym', start: `${todayKey()}T07:00:00+10:00`, end: '', allDay: false, start_local: 'today, 7:00 am', end_local: '' }] },
+    ] })
+    await authed()
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining("list_calendar (Sam's Outlook Calendar): The microsoft link has expired"))
+    expect(runAgent).toHaveBeenCalled()
+    expect((runAgent.mock.calls[0][0] as { text: string }).text).toContain('Gym')
   })
 
   it('posts the money snapshot from PocketSmith, the week and the month so far with the budget', async () => {

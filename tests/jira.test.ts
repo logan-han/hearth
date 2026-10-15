@@ -208,6 +208,22 @@ describe('jira_board_summary', () => {
     expect((r.due_next as { key: string }[]).map((o) => o.key)).toEqual(['HTL-2'])
   })
 
+  it('puts what is due today in a list of its own, and keeps due_next to what comes after', async () => {
+    fetchMock.mockResolvedValue(
+      json({
+        issues: [
+          issue('HTL-1', 'In Progress', 'Overdue thing', '2026-08-01'),
+          issue('HTL-4', 'To Do', 'Today thing', '2026-08-27'),
+          issue('HTL-2', 'In Progress', 'Due later', '2026-11-30'),
+        ],
+      }),
+    )
+    const r = await call('jira_board_summary', {})
+    expect((r.overdue as { key: string }[]).map((o) => o.key)).toEqual(['HTL-1'])
+    expect((r.due_today as { key: string }[]).map((o) => o.key)).toEqual(['HTL-4'])
+    expect((r.due_next as { key: string }[]).map((o) => o.key)).toEqual(['HTL-2'])
+  })
+
   it('leaves undated issues out of both lists', async () => {
     const r = await call('jira_board_summary', {})
     const listed = [...(r.overdue as { key: string }[]), ...(r.due_next as { key: string }[])].map((i) => i.key)

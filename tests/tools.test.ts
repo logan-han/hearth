@@ -903,6 +903,79 @@ describe('calendar tools', () => {
   })
 })
 
+describe('list_calendar across the family', () => {
+  const window = { from: '2026-08-27', to: '2026-08-28' }
+  const event = (id: string, title: string) => ({ id, title, start: '2026-08-27T23:00:00Z', end: '2026-08-28T00:00:00Z', allDay: false })
+
+  it("reads every present member's calendar with everyone set, and says whose each is", async () => {
+    await q.upsertMember('222', 'Ada', { allowed: true })
+    listEvents.mockResolvedValue({ events: [event('e1', 'Dentist')], more: false })
+    const r = await call(calendarTools(ctx), 'list_calendar', { ...window, everyone: true })
+    const accounts = r.accounts as { member: string; calendar: string; events: { title: string }[] }[]
+    expect(accounts.map((a) => a.member).sort()).toEqual(['Ada', 'Rowan'])
+    expect(accounts.map((a) => a.calendar).sort()).toEqual(["Ada's Google Calendar", "Rowan's Google Calendar"])
+    expect(accounts.every((a) => a.events[0].title === 'Dentist')).toBe(true)
+  })
+
+  it('reads only the calendars of those Telegram says are in the room', async () => {
+    await q.upsertMember('222', 'Ada', { allowed: true })
+    presentIn.mockImplementationOnce(async (_chatId, people) => people.filter((p) => p.name === 'Ada'))
+    listEvents.mockResolvedValue({ events: [], more: false })
+    const r = await call(calendarTools(ctx), 'list_calendar', { ...window, everyone: true })
+    expect((r.accounts as { member: string }[]).map((a) => a.member)).toEqual(['Ada'])
+  })
+
+  it("names nobody on the asker's own calendar", async () => {
+    listEvents.mockResolvedValue({ events: [], more: false })
+    const r = await call(calendarTools(ctx), 'list_calendar', window)
+    expect((r.accounts as object[])[0]).toEqual({ provider: 'google', events: [] })
+  })
+
+  it('refuses a family-wide look anywhere but a room the family shares', async () => {
+    await q.upsertMember('222', 'Ada', { allowed: true })
+    for (const own of [{ ...ctx, chatId: '111', shared: false }, { ...ctx, shared: undefined, cursorScope: 'mcp:1' }]) {
+      const r = await call(calendarTools(own), 'list_calendar', { ...window, everyone: true })
+      expect(String(r.error)).toContain('only for the family group')
+    }
+    expect(listEvents).not.toHaveBeenCalled()
+  })
+
+  it('refuses a family-wide look while a stranger is in the room', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    await q.noteStranger('-100', { id: '9', name: 'Guest' })
+    const r = await call(calendarTools(ctx), 'list_calendar', { ...window, everyone: true })
+    expect(String(r.error)).toContain('unrecognised')
+    expect(listEvents).not.toHaveBeenCalled()
+  })
+
+  it('fails a family-wide look as its own result, not a throw, when Telegram hiccups over who is in the room', async () => {
+    const { GrammyError } = await import('grammy')
+    presentIn.mockRejectedValueOnce(
+      new GrammyError("Call to 'getChatMember' failed! (429: Too Many Requests: retry after 5)", { ok: false, error_code: 429, description: 'Too Many Requests: retry after 5' }, 'getChatMember', {}),
+    )
+    const r = await call(calendarTools(ctx), 'list_calendar', { ...window, everyone: true })
+    expect(String(r.error)).toMatch(/^Could not check who is in this chat: .*429/)
+    expect(listEvents).not.toHaveBeenCalled()
+  })
+
+  it('says when nobody in the room has linked a calendar', async () => {
+    presentIn.mockResolvedValueOnce([])
+    const r = await call(calendarTools(ctx), 'list_calendar', { ...window, everyone: true })
+    expect(String(r.error)).toContain('Nobody in this chat has linked a calendar')
+  })
+
+  it('reports a link that will not answer per account, and still reads the rest', async () => {
+    await q.upsertMember('222', 'Ada', { allowed: true })
+    const { ReconnectNeededError } = await import('@/lib/providers/token')
+    listEvents.mockRejectedValueOnce(new ReconnectNeededError('google')).mockResolvedValueOnce({ events: [], more: false })
+    const r = await call(calendarTools(ctx), 'list_calendar', { ...window, everyone: true })
+    const accounts = r.accounts as { calendar: string; error?: string; events?: unknown[] }[]
+    expect(accounts.filter((a) => a.error)).toHaveLength(1)
+    expect(accounts.filter((a) => a.events)).toHaveLength(1)
+    expect(String(accounts.find((a) => a.error)?.error)).toContain('/connect')
+  })
+})
+
 describe('family calendar tools', () => {
   it('adds an event and announces it, because feeds refresh slowly', async () => {
     const r = await call(familyCalendarTools(ctx), 'add_family_event', { title: 'Soccer', start: '2026-08-29T09:00', all_day: false })

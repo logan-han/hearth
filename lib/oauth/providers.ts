@@ -8,6 +8,8 @@ export type ProviderConfig = {
   label: string
   /** How the family names a mailbox there: "Rowan's Gmail", never "google". */
   mailbox: string
+  /** And a calendar there: "Rowan's Google Calendar". */
+  calendar: string
   authUrl: string
   tokenUrl: string
   scopes: string[]
@@ -29,6 +31,7 @@ export const GOOGLE: ProviderConfig = {
   id: 'google',
   label: 'Google',
   mailbox: 'Gmail',
+  calendar: 'Google Calendar',
   authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
   tokenUrl: 'https://oauth2.googleapis.com/token',
   scopes: [
@@ -54,6 +57,7 @@ export const MICROSOFT: ProviderConfig = {
   id: 'microsoft',
   label: 'Microsoft',
   mailbox: 'Outlook',
+  calendar: 'Outlook Calendar',
   // /common so both personal Microsoft accounts and work/school tenants work.
   authUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
   tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',

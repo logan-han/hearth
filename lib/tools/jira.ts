@@ -63,7 +63,7 @@ export function jiraTools(ctx: ToolContext) {
 
     jira_board_summary: tool({
       description:
-        'How the household board stands: how many issues sit in each status, and what is overdue.',
+        'How the household board stands: how many issues sit in each status, what is overdue, what is due today, and what comes due next.',
       inputSchema: z.object({}),
       execute: async () => {
         if (!jira.jiraConfigured()) return { error: NOT_CONFIGURED }
@@ -78,6 +78,7 @@ export function jiraTools(ctx: ToolContext) {
           const byStatus = new Map<string, number>()
           for (const i of issues) byStatus.set(i.status, (byStatus.get(i.status) ?? 0) + 1)
           const overdue = issues.filter((i) => i.dueDate && i.dueDate < today)
+          const dueToday = issues.filter((i) => i.dueDate === today)
 
           return {
             project: defaultProject(),
@@ -85,8 +86,9 @@ export function jiraTools(ctx: ToolContext) {
             ...(found.length > BOARD_MAX ? { open_is_at_least: true } : {}),
             by_status: [...byStatus].map(([status, count]) => ({ status, count })),
             overdue: overdue.map((i) => ({ key: i.key, summary: i.summary, due: i.dueDate })),
+            due_today: dueToday.map((i) => ({ key: i.key, summary: i.summary, due: i.dueDate })),
             due_next: issues
-              .filter((i) => i.dueDate && i.dueDate >= today)
+              .filter((i) => i.dueDate && i.dueDate > today)
               .slice(0, 5)
               .map((i) => ({ key: i.key, summary: i.summary, due: i.dueDate })),
           }

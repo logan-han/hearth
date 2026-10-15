@@ -3,6 +3,10 @@ import { z } from 'zod'
 import { clientFor, clientsFor, MAX_EVENTS } from '../providers'
 import { NotConnectedError, ReconnectNeededError } from '../providers/token'
 import type { CalendarEvent } from '../providers/types'
+import type { Member } from '../db/schema'
+import { allowedMembers, strangersIn } from '../db/queries'
+import { presentIn } from '../headcount'
+import { providerConfig, type Provider } from '../oauth/providers'
 import { localToUtc, formatLocal, formatLocalDate, resolveSpan, rangeEnd, lastDay } from '../cron'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
@@ -16,30 +20,62 @@ const LOCAL_DATETIME = z
   .string()
   .describe(`Local ${timezone()} time as YYYY-MM-DDTHH:mm (or YYYY-MM-DD for all-day)`)
 
+/** A calendar as the family names it, owner first, the way a mailbox is named. */
+const calendarName = (owner: string, provider: Provider) => `${owner}'s ${providerConfig(provider).calendar}`
 
 export function calendarTools(ctx: ToolContext) {
   return {
     list_calendar: tool({
       description:
-        "List events from the asker's own linked calendar(s) in a date range. Use this for 'what's on today/tomorrow/this week'.",
+        "List events from the asker's own linked calendar(s) in a date range. Use this for 'what's on today/tomorrow/this week'. " +
+        "Set everyone to read every linked member's calendar in this chat at once, for a shared chat; each account then says whose it is.",
       inputSchema: z.object({
         from: LOCAL_DATETIME,
         to: LOCAL_DATETIME,
         provider: providerEnum.optional(),
+        everyone: z
+          .boolean()
+          .default(false)
+          .describe("Every family member with a linked calendar, for a shared chat; off for the asker's own"),
       }),
-      execute: async ({ from, to, provider }) => {
-        const member = requireMember(ctx)
-        const clients = provider ? [clientFor(member.id, provider)] : await clientsFor(member.id)
-        if (clients.length === 0) return { error: 'No calendar linked. Send /connect to link one.' }
+      execute: async ({ from, to, provider, everyone }) => {
+        // Several people's days read into one room follow the mail sweep's
+        // house rules: only a room the family shares, not in front of
+        // strangers, and only the calendars of those there to see it asked for.
+        if (everyone && !ctx.shared) {
+          return { error: 'A family-wide look is only for the family group. Here, leave everyone off for your own calendar.' }
+        }
+        if (everyone && (await strangersIn(ctx.chatId)).length > 0) {
+          return { error: 'Not while someone unrecognised is in this chat. An admin can vouch for them with /allow.' }
+        }
+        let members: Member[]
+        try {
+          members = everyone ? await presentIn(ctx.chatId, await allowedMembers()) : [requireMember(ctx)]
+        } catch (e) {
+          // As for mail: Telegram hiccuping over who is here fails this look
+          // and nothing else a brief fetches beside it.
+          if (!everyone) throw e
+          return { error: `Could not check who is in this chat: ${describe(e)}` }
+        }
 
         const start = localToUtc(from)
         // A date alone as `to` is the whole of that day, not its first minute.
         const end = rangeEnd(to)
-        const accounts = await Promise.all(
-          clients.map(async (c) => {
+        const accounts: object[] = []
+        for (const member of members) {
+          // A provider the asker names is their own account; a sweep reads what each member linked.
+          const clients = everyone
+            ? (await clientsFor(member.id)).filter((c) => !provider || c.provider === provider)
+            : provider
+              ? [clientFor(member.id, provider)]
+              : await clientsFor(member.id)
+          for (const c of clients) {
+            // Whose it is, said only when several are read together, the way a mailbox is named.
+            const whose = everyone ? { member: member.name, calendar: calendarName(member.name, c.provider) } : {}
             try {
               const { events, more } = await c.listEvents(start, end)
-              return {
+              accounts.push({
+                ...whose,
                 provider: c.provider,
                 events: events.map(asShown),
                 ...(more
@@ -48,12 +84,15 @@ export function calendarTools(ctx: ToolContext) {
                       note: `This range holds more than the ${MAX_EVENTS} events listed. List again from the last one's start for the rest; the time after it is not free.`,
                     }
                   : {}),
-              }
+              })
             } catch (e) {
-              return { provider: c.provider, error: describe(e) }
+              accounts.push({ ...whose, provider: c.provider, error: describe(e) })
             }
-          }),
-        )
+          }
+        }
+        if (accounts.length === 0) {
+          return { error: everyone ? 'Nobody in this chat has linked a calendar yet. Send /connect to link one.' : 'No calendar linked. Send /connect to link one.' }
+        }
         return { timezone: timezone(), accounts }
       },
     }),

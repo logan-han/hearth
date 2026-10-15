@@ -16,7 +16,7 @@ import { recentMessages, listMemories, openQuestions, connectionsFor, allMembers
 import type { Member } from './db/schema'
 import { timezone, language, units, reasoningLevel } from './env'
 import { traced, traceRun, noteRun, callTelemetry } from './telemetry'
-import { formatLocal, localDateKey } from './cron'
+import { clockLine } from './cron'
 import { spanLabel } from './tools/familycal'
 import { parseIcs, describeIcs } from './ics-parse'
 import { recordModelEvent } from './model-events'
@@ -305,7 +305,7 @@ export function systemPrompt(input: {
   const tz = timezone()
   const head = [
     'You are Hearth, the household assistant for one family, on Telegram.',
-    `NOW: ${formatLocal(input.now)} (${tz}). TODAY: ${localDateKey(input.now)}.`,
+    clockLine(input.now),
   ]
   const body = mode === 'sweep' ? sweepPrompt() : mode === 'watcher' ? watcherPrompt(tz) : chatPrompt(input, tz)
   return [...head, ...body, input.context ? `\nContext:\n${input.context}` : '']
@@ -1035,6 +1035,45 @@ const REWRITE_PROMPT = [
   'Return an empty message when what remains says nothing worth posting.',
 ].join(' ')
 
+const HEADING = /^\s*\*\*[^*\n]+\*\*:?\s*$/
+
+/** The heading lines in `text` that have a line of their own under them. */
+function headingsWithBody(text: string): Set<string> {
+  const out = new Set<string>()
+  let current: string | null = null
+  for (const line of text.split('\n')) {
+    if (HEADING.test(line)) current = line.trim()
+    else if (current !== null && line.trim() !== '') out.add(current)
+  }
+  return out
+}
+
+/**
+ * A part's heading left over nothing once the rewrite has cut the part's only
+ * bullet. The rewrite is told to change nothing else, and keeps the heading:
+ * a brief once posted "**Today**" over a blank line, the day's one event
+ * having failed the check. Only a heading that had something under it in the
+ * draft is dropped, so a title line that sits straight above the first part
+ * stays as written.
+ */
+export function dropEmptiedHeadings(rewritten: string, draft: string): string {
+  const had = headingsWithBody(draft)
+  const lines = rewritten.split('\n')
+  const kept: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    if (HEADING.test(lines[i]) && had.has(lines[i].trim())) {
+      let j = i + 1
+      while (j < lines.length && lines[j].trim() === '') j++
+      if (j >= lines.length || HEADING.test(lines[j])) {
+        i = j - 1
+        continue
+      }
+    }
+    kept.push(lines[i])
+  }
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
 export type DraftReview = {
   claims: string[]
   unsupported: string[]
@@ -1152,7 +1191,7 @@ async function rewriteWithout(
           timeout: within(30_000, input.deadline),
           telemetry: callTelemetry('hearth.verify'),
         }),
-      ).then((r) => r.output.message.trim()),
+      ).then((r) => dropEmptiedHeadings(r.output.message.trim(), input.draft)),
     chain,
     'hearth.verify',
     input.deadline,

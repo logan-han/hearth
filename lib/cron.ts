@@ -167,3 +167,13 @@ export function formatLocalDate(d: Date, tz: string = timezone()): string {
 export function formatLocalTime(d: Date, tz: string = timezone()): string {
   return new Intl.DateTimeFormat('en-AU', { timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true }).format(d)
 }
+
+/**
+ * The household's clock, worded the same in every prompt and at the head of
+ * the evidence a draft is checked against. A checker shown an event and the
+ * statement that it is on today cannot say so without knowing the date, and
+ * once cut a day's one event out of the brief for want of it.
+ */
+export function clockLine(now: Date, tz: string = timezone()): string {
+  return `NOW: ${formatLocal(now, tz)} (${tz}). TODAY: ${localDateKey(now, tz)}.`
+}
