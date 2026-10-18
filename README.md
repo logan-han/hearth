@@ -59,7 +59,7 @@ decision that clock cuts short is held back for an admin, not posted unchecked,
 with what it read left new for the next run; and the nightly memory pass waits
 for a tick with a whole turn left.
 
-A chat turn does not see all 55 tools. The 23 in the core are always in reach
+A chat turn does not see all 54 tools. The 23 in the core are always in reach
 (search, weather, lists, the shared calendar and its proposals, memory); mail,
 personal calendar, money, Notion, Jira and automations are switched on by cues
 in the message, and the model can unlock any group itself with `more_tools`.
@@ -443,7 +443,9 @@ worth saying**:
   tonight's preparation is no surprise; the mail that has arrived since the
   last brief and is worth knowing about (appointments, notices, bills,
   deliveries), sorted into what still asks for something and what only
-  informs, with calendar-worthy dates proposed for the family calendar;
+  informs (mail written to someone else, with the household only copied in,
+  asks it nothing and says whom it was to), with calendar-worthy dates
+  proposed for the family calendar;
   anything overdue or due today on the board; the reminders set to go off
   later in the day; the events proposed but still waiting on a yes; and the
   weather. In the group it sweeps the linked mailbox and calendar of every
@@ -457,10 +459,9 @@ worth saying**:
   nothing due gets no brief: the weather, tomorrow, a reminder that will
   speak for itself and a proposal Home already lists are context for a
   brief, never the reason for one.
-- **Money snapshot**, Sunday at 6pm: the week's spending and the month so far,
-  with the budget's pacing and the categories over it where PocketSmith is
-  connected, or the totals from the raw Up feed where it is not. Spend is
-  reckoned the way PocketSmith reckons it, by the side of the ledger each
+- **Money snapshot**, Sunday at 6pm: the week's spending and the month so far
+  from PocketSmith, with the budget's pacing and the categories over it. Spend
+  is reckoned the way PocketSmith reckons it, by the side of the ledger each
   category keeps: a payment filed under an income category (a tax payment,
   say) is a deduction from income, reported as one and never as spend, and a
   rebate filed under the expense it refunds comes off that spend. The post is
@@ -487,21 +488,18 @@ them. A head count the household cannot account for holds the post, and an
 admin is told once, with how to vouch for them. Adding the bot to the school
 parents' group for one question does not start a morning brief there.
 
-**/watch** adds the rest, or switches a paused one back on:
+**/watch** adds one to a DM, or switches a paused one back on:
 
 - `/watch morning` — the brief, in a DM as well, where it reads your own mailbox and calendar.
 - `/watch snapshot` — the money snapshot.
-- `/watch money` — new 2Up transactions, checked hourly 9am–10pm. Cursor-disciplined,
-  so a transaction is never posted twice, and one that never reached the chat
-  is not counted as seen.
 - `/watch list` — what this chat is already watching.
 
 Watchers are grounded before they are clever. Each ready-made watcher fetches
 its data in code first, so an hour with nothing new never reaches a model at
 all. When there is something, the model only phrases it, with a handful of
-context tools: a transaction arrives as payee, amount and date, with a purpose
-only when a household fact, calendar entry or email names one, and "purpose not
-recorded" otherwise. Then post or skip is decided against the evidence, on
+context tools: a payment arrives as payee, amount and category, with what it
+was for only when its note or a household fact says, and nothing about its
+purpose otherwise. Then post or skip is decided against the evidence, on
 grounding alone, with a confidence, by a second, tool-free call to the chain.
 The evidence opens with the household's clock, so a claim that something is
 on today is checked against the date rather than cut for want of one.
@@ -517,28 +515,34 @@ problems and held-back drafts go to its author first.
 
 What a watcher read counts as seen only once it has reached someone. A run that
 fails, reports a PROBLEM, has its post refused or runs out of time for the post
-decision leaves the mail and the transactions new, so the next run tries them
-again; one that wrote something it cannot take back on the strength of them (a
-list item, a reminder) spends them whatever else happened, or the next run
-would write it twice, and a post the hourly cap then holds back goes to an
-admin as a draft. A failure that is the same every time would otherwise hold
-every later run on the same items for good, so a mailbox or account held at the
-same place for three runs and at least twelve hours is moved past what the
-first of those runs saw (anything newer keeps its chance), and an admin is told
-once which source and which span were skipped. Only a failure about what was
-sent counts towards that (a request the model rejects as it stands, a post
-Telegram cannot parse, a PROBLEM about the mail itself): a model chain, service
-or network that is down, rate limited, out of credit or refusing its key says
-nothing about the items, and a count left untouched for eight days is
-forgotten. A post longer than the model's output allowance goes to the next
-model in the chain first; the last one's, or the first one's when no later
-model answers at all, loses its cut-off last line rather than going out
-mid-bullet, still faces the checks, and an admin is told it went out short. A
-reply cut off before a whole line of any length is dropped as the fragment it
-is. The last model in the chain gets twice the run's allowance, and at least
-4,000 tokens: the allowance counts a thinking model's reasoning, the tail of
-the chain is where those sit, and with no model after it a cut-off turn is a
-lost one.
+decision leaves the mail new, so the next run tries it again; one that wrote
+something it cannot take back on the strength of it (a list item, a reminder)
+spends it whatever else happened, or the next run would write it twice, and a
+post the hourly cap then holds back goes to an admin as a draft. A failure that
+is the same every time would otherwise hold every later run on the same items
+for good, so a mailbox held at the same place for three runs and at least twelve
+hours is moved past what the first of those runs saw (anything newer keeps its
+chance), and an admin is told once which source and which span were skipped.
+Only a failure about what was sent counts towards that (a request the model
+rejects as it stands, a post Telegram cannot parse, a PROBLEM about the mail
+itself): a model chain, service or network that is down, rate limited, out of
+credit or refusing its key says nothing about the items, and a count left
+untouched for eight days is forgotten. A post longer than the model's output
+allowance goes to the next model in the chain first; the last one's, or the
+first one's when no later model answers at all, loses its cut-off last line
+rather than going out mid-bullet, still faces the checks, and an admin is told
+it went out short. A reply cut off before a whole line of any length is dropped
+as the fragment it is. The last model in the chain gets twice the run's
+allowance, and at least 4,000 tokens: the allowance counts a thinking model's
+reasoning, the tail of the chain is where those sit, and with no model after it
+a cut-off turn is a lost one.
+
+A post long enough to go in parts that fails after the first counts as posted,
+since posting it again would repeat what the chat already has, and an admin is
+told the rest did not go. A chat Telegram refuses outright (the bot removed,
+blocked or muted in the group) pauses its automation rather than failing every
+hour; a group made a supergroup while a run was posting is followed to its new
+id instead, and stays on.
 
 ## Sweeping email onto the calendar
 
@@ -597,47 +601,27 @@ otherwise, which is the usual tidy-up after a shop.
 
 ## Money
 
-Two optional integrations, both read-only and both household-wide rather than
-per member, since one token covers the household's accounts:
-
-- **Up Bank** (`UP_API_TOKEN`) is the live account feed. Accounts marked `JOINT`
-  are the shared 2Up ones, and each 2Up transaction names which partner made it.
-- **PocketSmith** (`POCKETSMITH_DEVELOPER_KEY`) is the categorised view across
-  every account connected there, plus budgets.
+One optional integration, read-only and household-wide rather than per member,
+since one key covers the household's accounts: **PocketSmith**
+(`POCKETSMITH_DEVELOPER_KEY`), the categorised view across every account
+connected there, plus budgets. It is the only bank feed. An Up Bank feed once
+sat beside it, listing the same transactions a second way with none of the
+notes, and the model kept answering from the wrong one; it went, and the hourly
+2Up watcher with it (the tick removes one left over).
 
 > how much have we spent this month?
-> what's on the 2Up account?
-> post any new 2Up transactions in this chat
+> what did we buy on the 16th?
+> what do the ones with "Ada" in the note come to this month?
 
-Spending summaries default to PocketSmith because it has categories, and they
+`list_transactions` lists them one by one, each with what the household wrote
+on it in PocketSmith (its note, memo and labels), and a search finds a word in
+any of those as well as in the payee, category or account. Its totals sum every
+match, transfers included, so whether a set of transactions nets to nothing is
+read from the tool rather than added up by the model. Spending summaries
 **exclude transfers**: money moved between your own accounts is not spending,
-and counting it would roughly double every total. Up names the account on the
-other side of such a move (a saver, a Round Up, a top-up of 2Up), so an
-Up-sourced summary leaves those out too. A summary follows every page of the
-range, up to 5,000 transactions from PocketSmith and 2,000 from Up; a range
-holding more is summed short and says so, rather than passing part of it off
-as the whole.
-
-The third example is a scheduled announcement, and `new_transactions` is built
-for it. Each chat keeps its own marker of what it has already seen, so however
-often the automation runs nothing is posted twice. The marker moves only once
-what was found has reached someone, or was held back on purpose: a scheduled
-post that fails, one the hourly cap holds back, a run that reports a PROBLEM,
-a reply Telegram refuses or a model that gives out leaves it where it was, so
-the next run reports the same transactions (and the same mail) rather than
-skipping them unseen, short of runs stuck on the same ones for half a day
-(see Keeping watch). A post long enough to go in parts that fails after the
-first counts as posted, since posting it again would repeat what the chat
-already has, and an admin is told the rest did not go. A chat Telegram
-refuses outright (the bot removed, blocked or muted in the group) pauses its
-automation rather than failing every hour; a group made a supergroup while a
-run was posting is followed to its new id instead, and stays on. The first run
-looks back only 24 hours, so switching it on does not dump months of history
-into the chat.
-
-Ask for it once and it keeps happening:
-
-> every hour, post any new 2Up transactions here
+and counting it would roughly double every total. Either follows every page of
+the range, up to 5,000 transactions; a range holding more is summed short and
+says so, rather than passing part of it off as the whole.
 
 Financial answers are subject to the same group rule as everything else: a room
 holding anyone unrecognised gets no reply at all.
@@ -839,7 +823,7 @@ A key travels as a header, which is what Claude Code, Claude Desktop, Cursor and
 anything driven by `mcp-remote` take. Custom connectors on claude.ai want OAuth
 and cannot be given a header, so that one is not a way in.
 
-A client is handed 53 of the 55 tools at once rather than the routed subset a
+A client is handed 52 of the 54 tools at once rather than the routed subset a
 chat turn sees: `more_tools` exists so a small model can start from the 23 in
 the core and widen, and a capable client picks well from a long list. The two
 that mean nothing down this pipe are left out — `more_tools` itself, and the
@@ -853,8 +837,8 @@ open questions with the ids the other tools want.
 Nothing changes about how the household hears of it. A tool that announces
 itself still says so in the family chat, so an event added through Claude turns
 up in the group and not only on the calendar, and mail still waits for a yes.
-What an MCP client has seen is its own: `new_mail` and `new_transactions` keep
-a marker per member's client, so asking Claude "any new mail?" never spends
+What an MCP client has seen is its own: `new_mail` keeps a marker per member's
+client, so asking Claude "any new mail?" never spends
 what the morning brief was going to tell the family. Nobody in the group asked
 for a posted line, so it is held to the watchers' rule:
 while Telegram's head count there includes people the household cannot account

@@ -6,14 +6,22 @@ import { figuresGrounded, noLeak, TRIP_TALK, CLOCK_TIME, judgeGroundedness, judg
 const calls = vi.hoisted(() => [] as { tool: string; input: unknown }[])
 const STUBS = vi.hoisted(() => ({
   list_transactions: () => ({
-    account: '2Up',
+    from: '2026-08-01', to: '2026-08-27', matched: 2, total_in: '$0.00', total_out: '$475.75', net: '-$475.75',
     transactions: [
-      { description: 'FARESAVER LISBON', amount: '$389.60', when: 'Tue 26 Aug 2026, 14:02', status: 'SETTLED', by: 'Rowan' },
-      { description: 'FRESHMART 3061 HILLSIDE', amount: '$86.15', when: 'Mon 25 Aug 2026, 18:40', status: 'SETTLED', by: 'Sam' },
+      { date: '2026-08-26', payee: 'FARESAVER LISBON', amount: '-$389.60', category: 'Uncategorised', account: '2Up Spending' },
+      { date: '2026-08-25', payee: 'FRESHMART 3061 HILLSIDE', amount: '-$86.15', category: 'Groceries', account: '2Up Spending' },
     ],
   }),
-  list_bank_accounts: () => ({ up: [{ name: '2Up', type: 'TRANSACTIONAL', ownership: 'JOINT', balance: '$1,204.55', shared: true }] }),
-  spending_summary: () => ({ error: 'PocketSmith is not configured.' }),
+  list_bank_accounts: () => ({ accounts: [{ name: '2Up Spending', type: 'bank', balance: '$1,204.55', as_at: '2026-08-27' }] }),
+  spending_summary: () => ({
+    source: 'pocketsmith', from: '2026-08-01', to: '2026-08-31', transactions: 2, spent: '$475.75', received: '$0.00', net: '-$475.75',
+    by_category: [{ category: 'Uncategorised', amount: '$389.60', share_of_spend: '82%' }, { category: 'Groceries', amount: '$86.15', share_of_spend: '18%' }],
+    largest: [
+      { payee: 'FARESAVER LISBON', amount: '$389.60', category: 'Uncategorised', date: '2026-08-26', note: null },
+      { payee: 'FRESHMART 3061 HILLSIDE', amount: '$86.15', category: 'Groceries', date: '2026-08-25', note: null },
+    ],
+    largest_credits: [],
+  }),
   list_calendar: () => ({ events: [] }),
   list_family_events: () => ({ timezone: 'Australia/Melbourne', events: [] }),
   list_email: () => ({

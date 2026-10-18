@@ -177,7 +177,7 @@ describe('listSettings', () => {
     const by = (k: string) => all.find((s) => s.key === k)!
     expect(by('NOTION_TOKEN').origin).toBe('dashboard')
     expect(by('TAVILY_API_KEY').origin).toBe('environment')
-    expect(by('UP_API_TOKEN').origin).toBeNull()
+    expect(by('POCKETSMITH_DEVELOPER_KEY').origin).toBeNull()
   })
 
   it('lists every managed key, set or not', async () => {

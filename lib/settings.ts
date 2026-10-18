@@ -24,7 +24,6 @@ export const MANAGED_KEYS = [
   'LLM_MODEL',
   'TAVILY_API_KEY',
   'OPENWEATHER_API_KEY',
-  'UP_API_TOKEN',
   'POCKETSMITH_DEVELOPER_KEY',
   'NOTION_TOKEN',
   'JIRA_BASE_URL',
@@ -55,7 +54,6 @@ const CREDENTIALS = new Set<string>([
   'LLM_API_KEY',
   'TAVILY_API_KEY',
   'OPENWEATHER_API_KEY',
-  'UP_API_TOKEN',
   'POCKETSMITH_DEVELOPER_KEY',
   'NOTION_TOKEN',
   'JIRA_API_TOKEN',
@@ -310,14 +308,9 @@ export const SETTING_META: Record<
     help: 'Powers weather questions and the morning brief. The free tier is plenty.',
     link: { href: 'https://home.openweathermap.org/api_keys', text: 'openweathermap.org' },
   },
-  UP_API_TOKEN: {
-    group: 'Money', label: 'Up Bank token',
-    help: 'Read-only. Covers joint 2Up accounts.',
-    link: { href: 'https://api.up.com.au/getting_started', text: 'Up developer portal' },
-  },
   POCKETSMITH_DEVELOPER_KEY: {
     group: 'Money', label: 'PocketSmith key',
-    help: 'Categorised spending and budgets.',
+    help: 'Transactions, categorised spending and budgets.',
     link: { href: 'https://my.pocketsmith.com/security', text: 'PocketSmith security' },
   },
   NOTION_TOKEN: {

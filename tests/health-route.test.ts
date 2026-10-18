@@ -35,7 +35,7 @@ beforeEach(async () => {
   jar.store.clear()
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
   process.env.ADMIN_EMAILS = 'a@b.com'
-  for (const k of ['UP_API_TOKEN', 'POCKETSMITH_DEVELOPER_KEY', 'NOTION_TOKEN', 'JIRA_BASE_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN', 'OPENWEATHER_API_KEY']) {
+  for (const k of ['POCKETSMITH_DEVELOPER_KEY', 'NOTION_TOKEN', 'JIRA_BASE_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN', 'OPENWEATHER_API_KEY']) {
     delete process.env[k]
   }
   vi.stubGlobal('fetch', fetchMock)
@@ -53,11 +53,11 @@ describe('the health probe', () => {
 
   it('probes only what is configured, and tells validity from presence', async () => {
     await createSession({ email: 'a@b.com', name: 'A', provider: 'google', role: 'admin' })
-    process.env.UP_API_TOKEN = 'dead-token'
+    process.env.POCKETSMITH_DEVELOPER_KEY = 'dead-key'
     process.env.OPENWEATHER_API_KEY = 'good-key'
     fetchMock.mockImplementation(async (u: unknown) => {
       const url = String(u)
-      if (url.includes('up.com.au')) return { ok: false, status: 401, text: async () => 'Not Authorized' }
+      if (url.includes('pocketsmith.com')) return { ok: false, status: 401, text: async () => 'Not Authorized' }
       if (url.includes('openweathermap')) return { ok: true, status: 200, json: async () => [{ name: 'Melbourne', lat: 1, lon: 2 }], text: async () => '' }
       throw new Error(`unexpected probe: ${url}`)
     })
@@ -65,8 +65,8 @@ describe('the health probe', () => {
     const { items } = await (await GET()).json()
     expect(items).toHaveLength(2)
     const by = (n: string) => items.find((i: { name: string }) => i.name === n)
-    expect(by('Up Bank').ok).toBe(false)
-    expect(String(by('Up Bank').error)).toContain('401')
+    expect(by('PocketSmith').ok).toBe(false)
+    expect(String(by('PocketSmith').error)).toContain('401')
     expect(by('OpenWeatherMap').ok).toBe(true)
     expect(by('Notion')).toBeUndefined()
   })
@@ -96,7 +96,7 @@ describe('the health probe', () => {
 
   it('reports a probe that never answers as a timeout, without waiting six seconds for it', async () => {
     await createSession({ email: 'a@b.com', name: 'A', provider: 'google', role: 'admin' })
-    process.env.UP_API_TOKEN = 'dead-token'
+    process.env.POCKETSMITH_DEVELOPER_KEY = 'dead-key'
     fetchMock.mockImplementation(() => new Promise(() => {}))
     vi.useFakeTimers()
     try {
@@ -105,7 +105,7 @@ describe('the health probe', () => {
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
       await vi.advanceTimersByTimeAsync(6000)
       const { items } = await (await res).json()
-      expect(items).toEqual([{ name: 'Up Bank', ok: false, error: 'No answer within 6s.' }])
+      expect(items).toEqual([{ name: 'PocketSmith', ok: false, error: 'No answer within 6s.' }])
     } finally {
       vi.useRealTimers()
     }

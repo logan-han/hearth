@@ -542,26 +542,25 @@ describe('a group made a supergroup', () => {
 describe('/watch', () => {
   it('offers the ready-made watchers when called bare', async () => {
     await processUpdate(dm('/watch'))
-    expect(lastSent()).toContain('/watch money')
     expect(lastSent()).toContain('/watch snapshot')
     expect(lastSent()).toContain('/watch morning')
     expect(lastSent()).not.toContain('/watch inbox')
+    expect(lastSent()).not.toContain('/watch money')
   })
 
   it('switches a watcher on as an ordinary automation', async () => {
-    await processUpdate(dm('/watch money'))
+    await processUpdate(dm('/watch snapshot'))
     expect(lastSent()).toContain('Watching')
     const [a] = await q.listAutomations('111')
-    expect(a.label).toBe('2Up transactions')
-    expect(a.cronExpr).toBe('0 9-22 * * *')
-    expect(a.kind).toBe('money')
-    expect(a.instruction).toContain('purpose not recorded')
-    expect(a.instruction).not.toContain('likely is')
+    expect(a.label).toBe('Money snapshot')
+    expect(a.cronExpr).toBe('0 18 * * 0')
+    expect(a.kind).toBe('snapshot')
+    expect(a.instruction).toContain('no arithmetic of your own')
   })
 
   it('refuses to watch the same thing twice', async () => {
-    await processUpdate(dm('/watch money'))
-    await processUpdate(dm('/watch money'))
+    await processUpdate(dm('/watch snapshot'))
+    await processUpdate(dm('/watch snapshot'))
     expect(lastSent()).toContain('Already watching')
     expect(await q.listAutomations('111')).toHaveLength(1)
   })
@@ -605,7 +604,7 @@ describe('/watch', () => {
   })
 
   it('keeps each chat separate', async () => {
-    await processUpdate(dm('/watch money'))
+    await processUpdate(dm('/watch snapshot'))
     expect(await q.listAutomations('-100')).toHaveLength(0)
   })
 

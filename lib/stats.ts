@@ -1,7 +1,6 @@
 import { sql } from 'drizzle-orm'
 import { db } from './db'
 import { formatLocal, formatLocalDate, localDateKey, dayAfter, timezone } from './cron'
-import * as up from './providers/up'
 import * as ps from './providers/pocketsmith'
 import * as notion from './providers/notion'
 import * as jira from './providers/jira'
@@ -147,8 +146,7 @@ export async function gatherStats(month?: string) {
       {
         group: 'Money',
         items: [
-          { name: 'Up Bank', on: up.upConfigured(), note: 'accounts and transactions' },
-          { name: 'PocketSmith', on: ps.pocketsmithConfigured(), note: 'categorised spending and budgets' },
+          { name: 'PocketSmith', on: ps.pocketsmithConfigured(), note: 'transactions, spending and budgets' },
         ],
       },
       {

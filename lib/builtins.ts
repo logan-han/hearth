@@ -22,6 +22,8 @@ export type BuiltinReport = { installed: string[]; converted: number; retired: n
  * inbox row becomes its brief, owner and all, unless the chat already has one,
  * in which case it simply goes. The mail cursor is keyed by chat, so the brief
  * carries on from where the sweep left off rather than replaying the inbox.
+ * The 2Up watcher went with the Up feed it read, and its rows go with it:
+ * left in place, one would run as a member's own instruction, with no feed.
  */
 export async function installBuiltins(
   now: Date = new Date(),
@@ -49,8 +51,12 @@ export async function installBuiltins(
     Object.assign(legacy, patch)
     report.converted++
   }
-  // What is left after the legacy pass: converted rows now read as briefs, deleted ones still say inbox.
-  const live = all.filter((a) => a.kind !== 'inbox')
+  for (const legacy of all.filter((a) => a.kind === 'money')) {
+    await deleteAutomation(legacy.id)
+    report.retired++
+  }
+  // What is left after the legacy pass: converted rows now read as briefs, deleted ones still say inbox or money.
+  const live = all.filter((a) => a.kind !== 'inbox' && a.kind !== 'money')
 
   for (const room of rooms) {
     if (room.strangers.length > 0) continue

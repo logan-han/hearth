@@ -1,6 +1,6 @@
 import { tool } from 'ai'
 import { z } from 'zod'
-import { clientFor, clientsFor, type MailFile } from '../providers'
+import { clientFor, clientsFor, type MailFile, type MailSummary } from '../providers'
 import { NotConnectedError, ReconnectNeededError } from '../providers/token'
 import type { Member } from '../db/schema'
 import { parseIcs, describeIcs } from '../ics-parse'
@@ -132,6 +132,8 @@ export function mailTools(ctx: ToolContext) {
         const accounts: object[] = []
         for (const member of members) {
           const clients = await clientsFor(member.id)
+          // The address each of their mailboxes is, so mail that only copies them in says so.
+          const own = new Map((await connectionsFor(member.id)).map((conn) => [conn.provider, conn.email]))
           for (const c of clients) {
             try {
               const key = `mail_cursor:${ctx.cursorScope ?? ctx.chatId}:${member.id}:${c.provider}`
@@ -172,7 +174,7 @@ export function mailTools(ctx: ToolContext) {
                 mailbox: mailboxName(member.name, c.provider),
                 provider: c.provider,
                 first_check: !cursor,
-                messages: shown.map(({ id, from, subject, snippet, date }) => ({ id, from, subject, snippet, date })),
+                messages: shown.map((m) => arrival(m, own.get(c.provider))),
                 ...(unshown > 0
                   ? { more_not_shown: unshown, ...(found.length >= MAIL_WINDOW ? { more_not_shown_is_at_least: true } : {}) }
                   : {}),
@@ -383,6 +385,49 @@ export const describeMailError = describe
 
 /** How much new mail one look reads per mailbox; the most a provider hands back in one page. */
 const MAIL_WINDOW = 50
+
+/** The recipients in one address header, each name kept with its address. */
+const recipients = (list: string) =>
+  list
+    .split(/(?<=>|@[^\s,;<>]+)\s*[,;]\s*/)
+    .map((r) => r.trim())
+    .filter(Boolean)
+
+/** The bare addresses in one, lower-cased for comparing. */
+const addressesIn = (list: string) => (list.match(/[^\s<>,;"]+@[^\s<>,;"]+/g) ?? []).map((a) => a.toLowerCase())
+
+/** A recipient list kept short: mail to a whole class names its first few and counts the rest. */
+function fewOf(list: string, max = 3): string {
+  const all = recipients(list)
+  return all.length > max ? `${all.slice(0, max).join(', ')} and ${all.length - max} more` : all.join(', ')
+}
+
+/**
+ * Whether mail came to its mailbox only as a copy: the owner on its Cc and not
+ * its To. What it asks, it asks of whoever it was to. A brief once told the
+ * household it had been asked to come in, when the email had asked a teacher
+ * that with a parent copied in; it was handed the sender and never the
+ * recipients, so nothing it read said whom the email was for.
+ */
+function copiedIn(m: Pick<MailSummary, 'to' | 'cc'>, owner: string | null | undefined): boolean {
+  const me = owner?.trim().toLowerCase()
+  if (!me) return false
+  return addressesIn(m.cc).includes(me) && !addressesIn(m.to).includes(me)
+}
+
+/** New mail as a sweep lists it: who sent it, to whom, and whether its mailbox was only copied in. */
+function arrival(m: MailSummary, owner: string | null | undefined) {
+  return {
+    id: m.id,
+    from: m.from,
+    ...(m.to ? { to: fewOf(m.to) } : {}),
+    ...(m.cc ? { cc: fewOf(m.cc) } : {}),
+    ...(copiedIn(m, owner) ? { copied_in: true } : {}),
+    subject: m.subject,
+    snippet: m.snippet,
+    date: m.date,
+  }
+}
 
 /** Telegram's own cap on what the bot can fetch is 20 MB; an email attachment gets half that. */
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024

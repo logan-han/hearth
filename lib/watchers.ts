@@ -10,9 +10,10 @@ import type { ToolName } from './tools'
  * The built-in ones are part of the product rather than something a member
  * has to ask for: the tick installs them in every household group chat and
  * keeps them in step with the definitions here, and Home offers a pause
- * rather than a delete. The rest are switched on with /watch.
+ * rather than a delete. /watch adds them to a private chat, or switches a
+ * paused one back on.
  */
-export type WatcherKind = 'money' | 'morning' | 'snapshot'
+export type WatcherKind = 'morning' | 'snapshot'
 
 export type Watcher = {
   kind: WatcherKind
@@ -41,7 +42,8 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
       'Mail: first set aside what gets no bullet: newsletters and promotions, the mail with nothing in it to attend, book, pay or reply to; mail whose moment has passed by NOW, however recently it arrived: a collection, a booking or an event timed earlier than NOW, an order already delivered; and a request that is done, which is one a later email from the same sender answers: a thank-you for the response to that form, a receipt for that payment, a confirmation of that booking or reply. Look for that later email for every request before sorting, whichever of the two the list shows first; a done request gets no To do, only a Heads up line that it was done, if that. Then sort the rest into two parts.',
       '**To do**: mail asking the household for something still open, with no later email saying it was done: a payment, a signature, a reply, a form, a booking to make, an appointment or a deadline still ahead, whoever sent it and however many people it went to.',
       '**Heads up**: mail that only tells the household something worth knowing: an order or a connection confirmed, a delivery on its way, a change to an account or a service.',
-      'One bullet per email, in your own words: who sent it and what it says or asks, with every date, time, amount and place exactly as given. Never paste the subject line or put it in quotes. Open an email with read_email when its snippet is not enough. Propose any calendar-worthy date still ahead with propose_family_event.',
+      'Mail marked copied_in was written to the people under its to, with the household only copied in: whatever it asks, it asks of them, never of the household, so it is a Heads up at most.',
+      'One bullet per email, in your own words: who sent it, whom it was to when it is marked copied_in, and what it says or asks, with every date, time, amount and place exactly as given. Never paste the subject line or put it in quotes. Open an email with read_email when its snippet is not enough. Propose any calendar-worthy date still ahead with propose_family_event.',
       'A mailbox with more_not_shown had more new mail than fits: end its mail with one line saying how many more arrived in it (with "at least" when more_not_shown_is_at_least is set), so nobody thinks they have seen it all.',
       '**Overdue**: anything overdue on the board, as given. **Due today**: anything on the board due today, as given.',
       '**Later today**: the reminders set to go off today, each with its time as given.',
@@ -71,28 +73,13 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
     ].join(' '),
     tools: ['recall'],
   },
-  money: {
-    kind: 'money',
-    label: '2Up transactions',
-    cron: '0 9-22 * * *',
-    builtin: false,
-    instruction: [
-      'New 2Up transactions are listed under DATA. Post one line per transaction: payee as shown, amount, date.',
-      'If DATA has more_not_shown, end with one line saying how many more transactions came in than are listed (with "at least" when more_not_shown_is_at_least is set).',
-      'Add a purpose only if a Known household fact, a family calendar event or an email you fetch names that payee, and say which in brackets.',
-      'If nothing names it, write "purpose not recorded".',
-      'Each transaction carries flags worked out from the feed: new_payee, unusually_large, possible_duplicate, money_in. Mention a flag in plain words only when it is there; an empty list means nothing stood out.',
-      'A payee string is a trading name and a registered city, never a place the household went or a trip they booked.',
-    ].join(' '),
-    tools: ['recall', 'list_family_events', 'list_email'],
-  },
 }
 
 /** The watchers every household group gets, in the order Home lists them. */
 export const BUILTIN_WATCHERS: Watcher[] = Object.values(WATCHERS).filter((w) => w.builtin)
 
 export function isWatcherKind(value: string | null | undefined): value is WatcherKind {
-  return value === 'money' || value === 'morning' || value === 'snapshot'
+  return value === 'morning' || value === 'snapshot'
 }
 
 export function isBuiltinKind(value: string | null | undefined): boolean {

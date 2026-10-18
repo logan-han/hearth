@@ -91,6 +91,7 @@ function toSummary(msg: GmailMessage): MailSummary {
     id: msg.id,
     from: bareNames(header(msg, 'From')),
     to: bareNames(header(msg, 'To')),
+    cc: bareNames(header(msg, 'Cc')),
     subject: header(msg, 'Subject') || '(no subject)',
     snippet: msg.snippet ?? '',
     date: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : header(msg, 'Date'),
@@ -175,7 +176,7 @@ export function googleClient(memberId: number): AccountClient {
             ids.slice(i, i + 10).map((id) =>
               api<GmailMessage>(
                 t,
-                `${GMAIL}/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`,
+                `${GMAIL}/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject&metadataHeaders=Date`,
               ),
             ),
           )),

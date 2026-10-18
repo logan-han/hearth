@@ -12,7 +12,7 @@ import type { ToolName } from './index'
 export const TOOL_GROUPS = {
   mail: ['list_email', 'new_mail', 'read_email', 'read_attachment', 'draft_email', 'send_email', 'cancel_draft'],
   personal_calendar: ['list_calendar', 'create_calendar_event'],
-  money: ['list_bank_accounts', 'list_transactions', 'spending_summary', 'new_transactions', 'budget_summary'],
+  money: ['list_bank_accounts', 'list_transactions', 'spending_summary', 'budget_summary'],
   notion: ['notion_search', 'notion_read_page', 'notion_query_database', 'notion_append_to_page'],
   jira: ['jira_search', 'jira_board_summary', 'jira_read_issue', 'jira_create_issue', 'jira_update_issue', 'jira_move_issue', 'jira_comment', 'jira_attach_email_file'],
   automations: ['create_automation', 'list_automations', 'delete_automation', 'pause_automation'],
@@ -24,7 +24,7 @@ export const GROUP_NAMES = Object.keys(TOOL_GROUPS) as ToolGroup[]
 const GROUP_HELP: Record<ToolGroup, string> = {
   mail: 'read, search, draft and send email',
   personal_calendar: "a member's own calendar, as opposed to the shared family one",
-  money: 'the bank feed, spending and budgets',
+  money: 'transactions, spending and budgets, from PocketSmith',
   notion: 'Notion pages and databases',
   jira: 'the household board of jobs',
   automations: 'reminders and watchers on a schedule',

@@ -1,11 +1,8 @@
 import { tool } from 'ai'
 import { z } from 'zod'
-import * as up from '../providers/up'
 import * as ps from '../providers/pocketsmith'
 import type { PsCategoryBudget, PsTransaction } from '../providers/pocketsmith'
-import { currentCursor, stageCursor } from './cursor'
-import { flagTransactions, HISTORY_DAYS, type TransactionFlag } from '../money-flags'
-import { localToUtc, formatLocal, localDateKey } from '../cron'
+import { localDateKey } from '../cron'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
 import { describeError } from '../errors'
@@ -47,9 +44,6 @@ function currentMonth(now: Date): { start: string; end: string } {
   return { start: `${key.slice(0, 7)}-01`, end: `${key.slice(0, 7)}-${String(lastDay).padStart(2, '0')}` }
 }
 
-/** How far past the limit one look reads, so what does not fit can at least be counted. */
-const TRANSACTION_SLACK = 50
-
 /**
  * Beside a summary whose read stopped at the provider's bound: the range
  * can hold more than was summed, and a total given as the whole would be short.
@@ -57,69 +51,86 @@ const TRANSACTION_SLACK = 50
 const readShort = (read: number) =>
   `the read stopped at the most one summary takes (${read} transactions), so the range may hold more than these figures count; a shorter range counts them all`
 
+/**
+ * Everything a search looks in. "The ones marked with a name" means what the
+ * household wrote on them, in a note or a label, which a summary showed only
+ * for its six largest; and PocketSmith's own search skips the memo, so the
+ * match is made here, on every field, ignoring case.
+ */
+const searchable = (t: PsTransaction) =>
+  [t.payee, t.originalPayee, t.note, t.memo, ...t.labels, t.category, t.account].filter(Boolean).join('\n').toLowerCase()
+
 export function moneyTools(ctx: ToolContext) {
   return {
     list_bank_accounts: tool({
-      description:
-        'Show the household bank accounts and their balances. Up Bank accounts marked JOINT are the shared 2Up ones.',
+      description: 'Show the household bank accounts connected to PocketSmith and their balances.',
       inputSchema: z.object({}),
       execute: async () => {
-        const out: Record<string, unknown> = {}
-        if (up.upConfigured()) {
-          try {
-            out.up = (await up.listAccounts()).map((a) => ({
-              name: a.name, type: a.type, ownership: a.ownership,
-              balance: money(a.balance, a.currency), shared: a.ownership === 'JOINT',
-            }))
-          } catch (e) {
-            out.up = { error: describeError(e) }
-          }
-        }
-        if (ps.pocketsmithConfigured()) {
-          try {
-            out.pocketsmith = (await ps.listAccounts()).map((a) => ({
+        if (!ps.pocketsmithConfigured()) return { error: 'PocketSmith is not configured.' }
+        try {
+          return {
+            accounts: (await ps.listAccounts()).map((a) => ({
               name: a.name, type: a.type,
               balance: a.balance === null ? null : money(a.balance, a.currency.toUpperCase()),
               as_at: a.balanceDate,
-            }))
-          } catch (e) {
-            out.pocketsmith = { error: describeError(e) }
+            })),
           }
+        } catch (e) {
+          return { error: describeError(e) }
         }
-        return Object.keys(out).length ? out : { error: 'No bank integration is configured.' }
       },
     }),
 
     list_transactions: tool({
       description:
-        'List recent Up Bank transactions, optionally for one account. Use this for "what did we buy", "show the last few transactions on 2Up".',
+        'List PocketSmith transactions one by one, across every account connected there: payee, amount, date, category, account, and the note, memo and labels written on each. ' +
+        'Use this for "what did we buy on the 16th", "show the ones with <name> in the note", "did that charge go through". ' +
+        'search keeps only those whose payee, note, memo, labels, category or account contain it. total_in, total_out and net sum every match, transfers included, so what a set of transactions comes to is read from them, not added up.',
       inputSchema: z.object({
-        account: z.string().optional().describe('Account name or "2up" for the shared account'),
-        from: DATE.optional(),
-        to: DATE.optional(),
-        limit: z.number().int().min(1).max(100).default(20),
+        from: DATE.optional().describe('Defaults to the first of this month'),
+        to: DATE.optional().describe('Defaults to today'),
+        search: z.string().optional().describe('A word or name to look for, such as one written in the notes; case is ignored'),
+        account: z.string().optional().describe('Only the accounts whose name contains this'),
+        limit: z.number().int().min(1).max(100).default(50).describe('How many to list; the totals count every match'),
       }),
-      execute: async ({ account, from, to, limit }) => {
-        if (!up.upConfigured()) return { error: 'Up Bank is not configured.' }
+      execute: async ({ from, to, search, account, limit }) => {
+        if (!ps.pocketsmithConfigured()) return { error: 'PocketSmith is not configured.' }
+        // A range given only its end starts that month, not this one, which may come after it.
+        const start = from ?? (to ? `${to.slice(0, 7)}-01` : currentMonth(ctx.now).start)
+        const end = to ?? localDateKey(ctx.now)
         try {
-          const acct = account ? await up.findAccount(account) : undefined
-          if (account && !acct) return { error: `No Up account matching "${account}".` }
-
-          const txns = await up.listTransactions({
-            accountId: acct?.id,
-            since: from ? localToUtc(from) : undefined,
-            until: to ? localToUtc(`${to}T23:59:59`) : undefined,
-            limit,
-          })
+          const txns = await ps.listTransactions({ startDate: start, endDate: end, limit: ps.MAX_TRANSACTIONS })
+          const where = account?.trim().toLowerCase()
+          const inAccount = where ? txns.filter((t) => (t.account ?? '').toLowerCase().includes(where)) : txns
+          if (where && inAccount.length === 0) {
+            const names = [...new Set(txns.map((t) => t.account).filter(Boolean))]
+            return { error: `No transactions from ${start} to ${end} in an account matching "${account}". Accounts with transactions then: ${names.join(', ') || 'none'}.` }
+          }
+          const needle = search?.trim().toLowerCase()
+          const matched = (needle ? inAccount.filter((t) => searchable(t).includes(needle)) : inAccount).sort((a, b) =>
+            b.date.localeCompare(a.date),
+          )
+          const totalIn = matched.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0)
+          const totalOut = matched.filter((t) => t.amount < 0).reduce((s, t) => s - t.amount, 0)
+          const shown = matched.slice(0, limit)
           return {
-            account: acct?.name ?? 'all accounts',
-            transactions: txns.map((t) => ({
-              description: t.description,
-              amount: money(t.amount, t.currency),
-              when: formatLocal(new Date(t.createdAt)),
-              status: t.status,
-              by: t.performedBy,
-              message: t.message,
+            from: start, to: end,
+            ...(search ? { search } : {}),
+            ...(account ? { account } : {}),
+            matched: matched.length,
+            ...(txns.length >= ps.MAX_TRANSACTIONS ? { incomplete: readShort(txns.length) } : {}),
+            total_in: money(totalIn), total_out: money(totalOut), net: money(totalIn - totalOut),
+            ...(shown.length < matched.length ? { more_not_shown: matched.length - shown.length } : {}),
+            transactions: shown.map((t) => ({
+              date: t.date,
+              payee: t.payee,
+              amount: money(t.amount),
+              category: t.category ?? 'Uncategorised',
+              account: t.account,
+              ...(t.note ? { note: t.note } : {}),
+              ...(t.memo ? { memo: t.memo } : {}),
+              ...(t.labels.length ? { labels: t.labels } : {}),
+              ...(t.isTransfer || t.categoryIsTransfer ? { transfer: true } : {}),
             })),
           }
         } catch (e) {
@@ -130,53 +141,19 @@ export function moneyTools(ctx: ToolContext) {
 
     spending_summary: tool({
       description:
-        'Total money in and out over a period, broken down by category. Defaults to the current month. Use this for "how much have we spent this month". ' +
+        'Total money in and out over a period, broken down by category, from PocketSmith. Defaults to the current month. Use this for "how much have we spent this month"; for the transactions themselves, list_transactions. ' +
         'Spend is what left the expense categories, net of refunds. A debit filed under an income category (a tax payment, a levy) is a deduction from income, not spend: it is reported under deductions and never in the category breakdown.',
       inputSchema: z.object({
         from: DATE.optional().describe('Defaults to the first of this month'),
         to: DATE.optional().describe('Defaults to the last day of this month'),
-        source: z
-          .enum(['pocketsmith', 'up'])
-          .default('pocketsmith')
-          .describe('PocketSmith has categories; Up is the raw account feed'),
       }),
-      execute: async ({ from, to, source }) => {
+      execute: async ({ from, to }) => {
+        if (!ps.pocketsmithConfigured()) return { error: 'PocketSmith is not configured.' }
         const month = currentMonth(ctx.now)
         const start = from ?? month.start
         const end = to ?? month.end
 
         try {
-          if (source === 'up') {
-            if (!up.upConfigured()) return { error: 'Up Bank is not configured.' }
-            const txns = await up.listTransactions({
-              since: localToUtc(start),
-              until: localToUtc(`${end}T23:59:59`),
-              limit: up.MAX_TRANSACTIONS,
-            })
-            // A move to a saver or into 2Up is spent from one account and
-            // received into another; Up names the account on the other side,
-            // and counting it would inflate both totals.
-            const real = txns.filter((t) => !t.transferAccountId)
-            const spent = real.filter((t) => t.amount < 0).reduce((s, t) => s + t.amount, 0)
-            const received = real.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0)
-            return {
-              source: 'up', from: start, to: end, transactions: real.length,
-              ...(txns.length >= up.MAX_TRANSACTIONS ? { incomplete: readShort(txns.length) } : {}),
-              spent: money(Math.abs(spent)), received: money(received),
-              net: money(received + spent),
-              largest: [...real]
-                .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))
-                .slice(0, 6)
-                .map((t) => ({
-                  description: t.description,
-                  amount: money(Math.abs(t.amount)),
-                  direction: t.amount < 0 ? 'out' : 'in',
-                  when: formatLocal(new Date(t.createdAt)),
-                })),
-            }
-          }
-
-          if (!ps.pocketsmithConfigured()) return { error: 'PocketSmith is not configured.' }
           const txns = await ps.listTransactions({ startDate: start, endDate: end, limit: ps.MAX_TRANSACTIONS })
           // Transfers move money between our own accounts (or square up a
           // reimbursement); counting them would double the total and make
@@ -247,90 +224,6 @@ export function moneyTools(ctx: ToolContext) {
                 note: t.note ?? t.memo,
                 ...(sideOf(t) === 'expense' ? { counts_as: 'a refund, taken off the spend in its category' } : {}),
               })),
-          }
-        } catch (e) {
-          return { error: describeError(e) }
-        }
-      },
-    }),
-
-    new_transactions: tool({
-      description:
-        'Up Bank transactions that have appeared since the last time this chat checked. Built for scheduled announcements: it advances its own marker, so nothing is ever posted twice. Returns an empty list when there is nothing new. ' +
-        `Each transaction carries flags worked out from the last ${HISTORY_DAYS} days of the feed (new_payee, unusually_large, possible_duplicate, money_in); an empty list means nothing stood out.`,
-      inputSchema: z.object({
-        account: z.string().default('2up').describe('Account name, or "2up" for the shared account'),
-        limit: z.number().int().min(1).max(50).default(20),
-      }),
-      execute: async ({ account, limit }) => {
-        if (!up.upConfigured()) return { error: 'Up Bank is not configured.' }
-        try {
-          const acct = await up.findAccount(account)
-          if (!acct) return { error: `No Up account matching "${account}".` }
-
-          const key = `up_cursor:${ctx.cursorScope ?? ctx.chatId}:${acct.id}`
-          const cursor = await currentCursor(ctx, key)
-          // First run has no marker. Look back only a little, so switching this
-          // on does not dump months of history into the chat.
-          const since = cursor ? new Date(cursor.at) : new Date(ctx.now.getTime() - 24 * 3600_000)
-
-          const found = await up.listTransactions({ accountId: acct.id, since, limit: limit + TRANSACTION_SLACK })
-          // `since` is inclusive, so a transaction at exactly the marker comes
-          // back again; the remembered ids are what actually stop a repost.
-          const seen = new Set(cursor?.ids ?? [])
-          const all = found.filter((t) => !seen.has(t.id) && new Date(t.createdAt) >= since)
-          // Newest first. After a pause there can be more than a post should
-          // list; those are counted rather than dropped without a word.
-          const fresh = all.slice(0, limit)
-          const unshown = all.length - fresh.length
-
-          // What counts as new or unusual comes from the feed itself, so the
-          // model has a flag to repeat rather than a hunch to voice. A failed
-          // history read costs the flags, never the transactions.
-          let flags = new Map<string, TransactionFlag[]>()
-          let typicalDebit: number | null = null
-          if (fresh.length > 0) {
-            try {
-              const history = await up.listTransactions({
-                accountId: acct.id,
-                since: new Date(ctx.now.getTime() - HISTORY_DAYS * 24 * 3600_000),
-                limit: up.MAX_TRANSACTIONS,
-              })
-              const report = flagTransactions(fresh, history)
-              flags = report.flags
-              typicalDebit = report.typicalDebit
-            } catch (e) {
-              console.warn('[money] could not read history for flags:', describeError(e))
-            }
-          }
-
-          // Staged, not written: the move is made once this result reaches someone.
-          if (all.length > 0) {
-            const newest = all.reduce((a, b) => (new Date(a.createdAt) > new Date(b.createdAt) ? a : b))
-            stageCursor(ctx, key, newest.createdAt, all.map((t) => t.id), cursor)
-          } else if (!cursor) {
-            // Nothing to report, but remember we looked, so the next run is
-            // incremental rather than another 24-hour sweep.
-            stageCursor(ctx, key, ctx.now.toISOString(), [], null)
-          }
-
-          return {
-            account: acct.name,
-            first_check: !cursor,
-            count: fresh.length,
-            ...(unshown > 0
-              ? { more_not_shown: unshown, ...(found.length >= limit + TRANSACTION_SLACK ? { more_not_shown_is_at_least: true } : {}) }
-              : {}),
-            ...(typicalDebit !== null ? { typical_debit: money(typicalDebit, acct.currency), history_days: HISTORY_DAYS } : {}),
-            transactions: fresh.map((t) => ({
-              description: t.description,
-              amount: money(t.amount, t.currency),
-              when: formatLocal(new Date(t.createdAt)),
-              status: t.status,
-              by: t.performedBy,
-              message: t.message,
-              flags: flags.get(t.id) ?? [],
-            })),
           }
         } catch (e) {
           return { error: describeError(e) }

@@ -889,7 +889,7 @@ describe('settings and the calendar token', () => {
     const m = await q.upsertMember('222', 'Nanny', { allowed: true })
     const at = new Date('2026-09-20T00:00:00Z')
     const own = await q.addAutomation({ chatId: '-100', memberId: m.id, label: 'mine', cronExpr: '0 9 * * *', instruction: 'x', nextRunAt: at })
-    const watcher = await q.addAutomation({ chatId: '222', memberId: m.id, label: '2Up', cronExpr: '0 9 * * *', instruction: 'y', kind: 'money', nextRunAt: at })
+    const watcher = await q.addAutomation({ chatId: '222', memberId: m.id, label: 'Morning brief', cronExpr: '0 7 * * *', instruction: 'y', kind: 'morning', nextRunAt: at })
     const theirs = await q.addAutomation({ chatId: '-100', memberId: null, label: 'household', cronExpr: '0 9 * * *', instruction: 'z', nextRunAt: at })
     expect(await q.deleteMember('222')).toBe(true)
     const rows = await q.listAutomations()

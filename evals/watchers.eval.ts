@@ -58,15 +58,17 @@ const { WATCHERS, watcherInstruction } = await import('@/lib/watchers')
 const { plainData } = await import('@/lib/plain-data')
 const { toTelegramHtml } = await import('@/lib/telegram-format')
 
+// A day's transactions as list_transactions gives them, for a member's own automation that posts them.
 const LISBON = {
   transactions: {
-    account: '2Up', first_check: false, count: 1,
-    transactions: [{ description: 'FARESAVER LISBON', amount: '$389.60', when: 'Tue 26 Aug 2026, 14:02', status: 'SETTLED', by: 'Rowan', message: null, flags: [] as string[] }],
+    from: '2026-08-26', to: '2026-08-26', matched: 1, total_in: '$0.00', total_out: '$389.60', net: '-$389.60',
+    transactions: [{ date: '2026-08-26', payee: 'FARESAVER LISBON', amount: '-$389.60', category: 'Uncategorised', account: '2Up Spending' }],
   },
 }
 const lisbonData = plainData(LISBON)
-const FLAGGED = { transactions: { ...LISBON.transactions, typical_debit: '$48.35', history_days: 90, transactions: [{ ...LISBON.transactions.transactions[0], flags: ['new_payee', 'unusually_large'] }] } }
-const flaggedData = plainData(FLAGGED)
+const DAILY = 'Post the day\'s transactions under DATA, one line each: payee as shown, amount, date. Add a purpose only if its note or a Known household fact names one; otherwise write "purpose not recorded".'
+const lisbonEvidence = `INSTRUCTION:\n${DAILY}\n\nDATA:\n${lisbonData}`
+const lisbonDraft = '2Up Spending: **$389.60** FARESAVER LISBON, 26 Aug. Purpose not recorded.'
 const base = { chatId: '-100', chatType: 'group', member: null, memberName: 'the family', history: false as const, mode: 'watcher' as const }
 
 // A week as the tick fetches it: totals, the largest payments, and the budget positions as the money tool now words them.
@@ -200,43 +202,11 @@ describe.skipIf(!liveChainConfigured())('money snapshot', () => {
   })
 })
 
-describe.skipIf(!liveChainConfigured())('money watcher', () => {
-  it('phrases a payee string as a payee string, with no trip and no purpose', async () => {
-    calls.length = 0
-    const r = await runAgent({ ...base, tools: WATCHERS.money.tools, text: `Scheduled check "2Up transactions".\n\n${WATCHERS.money.instruction}\n\nDATA (fetched just now):\n${lisbonData}` })
-    const figures = figuresGrounded(r.text, lisbonData)
-    const NO_FLAG_TALK = /new payee|unusual|larger than|duplicate/i
-    const hard = figures.ok && noLeak(r.text) && !TRIP_TALK.test(r.text) && !NO_FLAG_TALK.test(r.text) && /389\.60/.test(r.text) && /purpose not recorded|does not say|not stated/i.test(r.text)
-    const g = await judgeGroundedness({ answer: r.text, context: lisbonData })
-    record({ case: 'money: FARESAVER LISBON line, no flags', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
-    expect(figures.missing).toEqual([])
-    expect(r.text).not.toMatch(TRIP_TALK)
-    expect(r.text).not.toMatch(NO_FLAG_TALK)
-    expect(noLeak(r.text)).toBe(true)
-    expect(r.text).toMatch(/purpose not recorded|does not say|not stated/i)
-    if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
-  })
-
-  it('puts the flags the feed raised into words, and nothing more', async () => {
-    calls.length = 0
-    const r = await runAgent({ ...base, tools: WATCHERS.money.tools, text: `Scheduled check "2Up transactions".\n\n${WATCHERS.money.instruction}\n\nDATA (fetched just now):\n${flaggedData}` })
-    const figures = figuresGrounded(r.text, flaggedData)
-    const saysNew = /new payee|first time|not seen before|haven't seen/i.test(r.text)
-    const saysLarge = /unusual|larger|bigger|well above|much more than/i.test(r.text)
-    const hard = figures.ok && noLeak(r.text) && !TRIP_TALK.test(r.text) && saysNew && saysLarge
-    const g = await judgeGroundedness({ answer: r.text, context: flaggedData })
-    record({ case: 'money: flags voiced, no more', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
-    expect(figures.missing).toEqual([])
-    expect(r.text).not.toMatch(TRIP_TALK)
-    expect(saysNew).toBe(true)
-    expect(saysLarge).toBe(true)
-    expect(noLeak(r.text)).toBe(true)
-  })
-
+describe.skipIf(!liveChainConfigured())('transaction posts, the checks', () => {
   it('has the claim check cut a fabricated trip, and the decision hold whatever is left', async () => {
-    const evidence = `INSTRUCTION:\n${WATCHERS.money.instruction}\n\nDATA:\n${lisbonData}`
+    const evidence = lisbonEvidence
     const review = await reviewDraft({
-      label: '2Up transactions',
+      label: 'Daily transactions',
       draft: 'Looks like someone booked flights to Lisbon, planning a trip? $389.60 via Faresaver.',
       evidence,
     })
@@ -244,7 +214,7 @@ describe.skipIf(!liveChainConfigured())('money watcher', () => {
     let posted = ''
     let note = `review: ${review.unsupported.length}/${review.claims.length} cut`
     if (review.message !== null) {
-      const d = await decideWatcherPost({ label: '2Up transactions', draft: review.message, evidence })
+      const d = await decideWatcherPost({ label: 'Daily transactions', draft: review.message, evidence })
       posted = d.decision === 'post' ? review.message : ''
       note += ` | ${d.decision}@${d.confidence}`
     }
@@ -258,8 +228,8 @@ describe.skipIf(!liveChainConfigured())('money watcher', () => {
   })
 
   it('lets a grounded draft through the claim check untouched', async () => {
-    const draft = '2Up: **$389.60** FARESAVER LISBON, Tue 26 Aug. Purpose not recorded.'
-    const review = await reviewDraft({ label: '2Up transactions', draft, evidence: `INSTRUCTION:\n${WATCHERS.money.instruction}\n\nDATA:\n${lisbonData}` })
+    const draft = lisbonDraft
+    const review = await reviewDraft({ label: 'Daily transactions', draft, evidence: lisbonEvidence })
     const hard = review.message === draft
     record({ case: 'review: grounded draft untouched', hard: hard ? 'pass' : 'fail', model: 'chain', note: `${review.claims.length} claims, ${review.unsupported.length} cut` })
     expect(review.unsupported).toEqual([])
@@ -267,8 +237,8 @@ describe.skipIf(!liveChainConfigured())('money watcher', () => {
   })
 
   it('lets a plain, grounded draft through', async () => {
-    const draft = '2Up: **$389.60** FARESAVER LISBON, Tue 26 Aug. Purpose not recorded.'
-    const d = await decideWatcherPost({ label: '2Up transactions', draft, evidence: `INSTRUCTION:\n${WATCHERS.money.instruction}\n\nDATA:\n${lisbonData}` })
+    const draft = lisbonDraft
+    const d = await decideWatcherPost({ label: 'Daily transactions', draft, evidence: lisbonEvidence })
     const hard = d.decision === 'post'
     record({ case: 'decision: grounded draft posts', hard: hard ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}` })
     expect(d.decision).toBe('post')
@@ -484,6 +454,34 @@ describe.skipIf(!liveChainConfigured())('morning brief, the mail triage', () => 
     expect(pastDropped).toBe(true)
     expect(promoDropped).toBe(true)
     expect(noQuotedSubject).toBe(true)
+    expect(noLeak(text)).toBe(true)
+    if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
+  })
+
+  // A therapist wrote to the class teacher asking to come in, with a parent
+  // copied in, and a brief that was never handed the recipients told the
+  // household it had been asked to come.
+  it('tells mail to someone else, with the household copied in, as theirs to answer, and says whom it was to', async () => {
+    calls.length = 0
+    const copied = {
+      id: 'm23', from: 'Dana Fixture <dana@hillsidetherapy.example>', to: 'Ms Lee <lee@riverbendcollege.example>', cc: 'Rowan <rowan@hearth.example>', copied_in: true,
+      subject: 'Re: Juno OT notes',
+      snippet: `Hi again, Ms Lee, Would it be possible for me to come in from 11:25 am to 12:05 pm on ${DAYS.due}? Happy to adjust the time as needed. Kind regards, Dana`,
+      date: new Date(Date.now() - 86_400_000).toISOString(),
+    }
+    const data = plainData({ events: { timezone: 'Australia/Melbourne', events: [] }, mail: mailbox([copied]) })
+    const r = await runAgent({ ...base, tools: WATCHERS.morning.tools, text: `Scheduled check "Morning brief".\n\n${briefInstruction}\n\nDATA (fetched just now):\n${data}` })
+    const text = r.text
+    const toDo = part(parts(text), /^to[ -]?do/)
+    const notToDo = !/dana|11:25|come in/i.test(toDo)
+    const namesWhom = /\blee\b/i.test(text)
+    const notAsked = !/(asked|asks|asking|invited|invites|wants|would like) (rowan|you|the household|the family)\b/i.test(text)
+    const hard = notToDo && namesWhom && notAsked && noLeak(text)
+    const g = await judgeGroundedness({ answer: text, context: data })
+    record({ case: 'brief: copied-in mail is not the household\'s to do', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: text.slice(0, 80) })
+    expect(notToDo).toBe(true)
+    expect(namesWhom).toBe(true)
+    expect(notAsked).toBe(true)
     expect(noLeak(text)).toBe(true)
     if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
   })

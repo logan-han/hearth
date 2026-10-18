@@ -9,7 +9,6 @@ const looksBefore = vi.fn((_err?: unknown) => [] as unknown[])
 const decideWatcherPost = vi.fn()
 const reviewDraft = vi.fn()
 const cutFromDraft = vi.fn()
-const newTransactions = vi.fn()
 const newMail = vi.fn()
 const listEvents = vi.fn()
 const listCalendar = vi.fn()
@@ -31,7 +30,6 @@ const insertValues = vi.fn()
 const buildTools = vi.fn(
   () =>
     ({
-      new_transactions: { execute: newTransactions },
       new_mail: { execute: newMail },
       list_family_events: { execute: listEvents },
       list_calendar: { execute: listCalendar },
@@ -139,6 +137,12 @@ function tick(headers: Record<string, string> = {}) {
   return POST(new Request('https://hearth.test/api/tick', { method: 'POST', headers, body: '' }))
 }
 
+/** A week in which money moved: enough for the snapshot to have something to post. */
+const moneyMoved = () => {
+  spendingSummary.mockResolvedValue({ source: 'pocketsmith', transactions: 3, spent: '$42.00' })
+  budgetSummary.mockResolvedValue({ expenses: { used: '40%' } })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -155,7 +159,6 @@ beforeEach(() => {
   decideWatcherPost.mockResolvedValue({ decision: 'post', confidence: 0.9, model: 'primary:test' })
   reviewDraft.mockImplementation(async ({ draft }: { draft: string }) => ({ claims: [], unsupported: [], message: draft }))
   cutFromDraft.mockResolvedValue(null)
-  newTransactions.mockResolvedValue({ account: '2Up', count: 0, transactions: [] })
   newMail.mockResolvedValue({ accounts: [] })
   listEvents.mockResolvedValue({ events: [] })
   listCalendar.mockResolvedValue({ accounts: [] })
@@ -356,8 +359,8 @@ describe('running due automations', () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     try {
       const start = Date.now()
-      dueAutomations.mockResolvedValue([automation({ id: 1 }), automation({ id: 2, kind: 'money', label: '2Up transactions' })])
-      newTransactions.mockResolvedValue({ account: '2Up', count: 1, transactions: [{ description: 'CAFE', amount: '$4.50', when: 'Mon', status: 'SETTLED' }] })
+      dueAutomations.mockResolvedValue([automation({ id: 1 }), automation({ id: 2, kind: 'snapshot', label: 'Money snapshot' })])
+      moneyMoved()
       await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 2, skipped: 0 })
       // A custom automation and a ready-made watcher alike.
       expect(runAgent.mock.calls.map(([input]) => input.deadline)).toEqual([start + 220_000, start + 220_000])
@@ -407,11 +410,11 @@ describe('running due automations', () => {
   })
 
   it('posts nothing into the DM of someone who is no longer allowed', async () => {
-    dueAutomations.mockResolvedValue([automation({ chatId: '222', kind: 'money', label: '2Up transactions' })])
+    dueAutomations.mockResolvedValue([automation({ chatId: '222', kind: 'snapshot', label: 'Money snapshot' })])
     memberByTelegramId.mockResolvedValue({ allowed: false })
     await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 0, skipped: 1 })
     expect(claimAutomation).toHaveBeenCalledTimes(1)
-    expect(newTransactions).not.toHaveBeenCalled()
+    expect(spendingSummary).not.toHaveBeenCalled()
     expect(send).not.toHaveBeenCalled()
 
     // Deleted outright is the same: nobody left to post to.
@@ -518,16 +521,16 @@ describe('running due automations', () => {
   })
 
   it('spends what a custom automation read once its post has gone, and not when the model fails', async () => {
-    const staged = [{ key: 'up_cursor:-100999:joint', at: '2026-09-24T01:00:00.000Z', ids: ['t1'], prev: null }]
+    const staged = [{ key: 'mail_cursor:-100999:1:google', at: '2026-09-24T01:00:00.000Z', ids: ['m1'], prev: null }]
     dueAutomations.mockResolvedValue([automation()])
-    runAgent.mockResolvedValueOnce({ text: 'CAFE $4.50', notices: [], model: 'primary:test', cursors: staged })
+    runAgent.mockResolvedValueOnce({ text: 'School: excursion form due Friday.', notices: [], model: 'primary:test', cursors: staged })
     await authed()
-    expect(setSetting).toHaveBeenCalledWith('up_cursor:-100999:joint', expect.stringContaining('t1'))
+    expect(setSetting).toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.stringContaining('m1'))
 
     setSetting.mockClear()
     runAgent.mockRejectedValueOnce(new Error('429 quota'))
     await authed()
-    expect(setSetting).not.toHaveBeenCalledWith('up_cursor:-100999:joint', expect.anything())
+    expect(setSetting).not.toHaveBeenCalledWith('mail_cursor:-100999:1:google', expect.anything())
   })
 
   it('spends what a custom automation wrote on when its post cannot be sent at all, and gives an admin the draft', async () => {
@@ -663,7 +666,7 @@ describe('running due automations', () => {
   it('routes a marked problem attached to SKIP to the admins, not the chat', async () => {
     dueAutomations.mockResolvedValue([automation()])
     runAgent.mockResolvedValue({
-      text: 'PROBLEM: the Up API is returning a 401 (auth failure).\n\nSKIP',
+      text: 'PROBLEM: the PocketSmith API is returning a 401 (auth failure).\n\nSKIP',
       notices: [],
       model: 'primary:test',
     })
@@ -1176,46 +1179,6 @@ describe('ready-made watchers', () => {
     process.env.TICK_SECRET = 'let-me-in'
   })
   const authed = () => tick({ 'x-tick-secret': 'let-me-in' })
-  const money = (over: Partial<Automation> = {}) => automation({ kind: 'money', label: '2Up transactions', ...over })
-
-  it('skips a money check in code when nothing is new, with no model call', async () => {
-    dueAutomations.mockResolvedValue([money()])
-    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
-    expect(newTransactions).toHaveBeenCalledWith(expect.objectContaining({ account: '2up' }), expect.anything())
-    expect(runAgent).not.toHaveBeenCalled()
-    expect(decideWatcherPost).not.toHaveBeenCalled()
-    expect(send).not.toHaveBeenCalled()
-  })
-
-  it('hands new transactions to the model as data, with only the context tools, then posts once approved', async () => {
-    dueAutomations.mockResolvedValue([money()])
-    newTransactions.mockResolvedValue({
-      account: '2Up', count: 1,
-      transactions: [{ description: 'FARESAVER LISBON', amount: '$389.60', when: 'Tue 26 Aug 2026, 14:02', status: 'SETTLED', by: 'Rowan' }],
-    })
-    runAgent.mockResolvedValue({ text: '2Up: **$389.60** FARESAVER LISBON, Tue 26 Aug. Purpose not recorded.', notices: [], model: 'primary:test' })
-    await authed()
-    const call = runAgent.mock.calls[0][0] as { mode: string; tools: string[]; text: string; chatType: string }
-    expect(call.mode).toBe('watcher')
-    expect(call.tools).toEqual(['recall', 'list_family_events', 'list_email'])
-    expect(call.chatType).toBe('group')
-    expect(call.text).toContain('FARESAVER LISBON')
-    expect(call.text).toContain('purpose not recorded')
-    expect(call.text).not.toContain('likely is')
-    const decision = decideWatcherPost.mock.calls[0][0] as { evidence: string }
-    expect(decision.evidence).toContain('$389.60')
-    expect(send).toHaveBeenCalledWith('-100999', '2Up: **$389.60** FARESAVER LISBON, Tue 26 Aug. Purpose not recorded.')
-  })
-
-  it('tells an admin when the money fetch errors, and leaves the chat alone', async () => {
-    dueAutomations.mockResolvedValue([money()])
-    newTransactions.mockResolvedValue({ error: 'Up Bank is not configured.' })
-    await authed()
-    expect(send).toHaveBeenCalledTimes(1)
-    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('Up Bank is not configured'))
-    expect(runAgent).not.toHaveBeenCalled()
-  })
-
   const brief = (over: Partial<Automation> = {}) => automation({ kind: 'morning', label: 'Morning brief', ...over })
   const snapshot = (over: Partial<Automation> = {}) => automation({ kind: 'snapshot', label: 'Money snapshot', ...over })
 
@@ -1227,7 +1190,6 @@ describe('ready-made watchers', () => {
   })
   const stagingMail = () =>
     buildTools.mockImplementationOnce(((ctx: { pendingCursors?: unknown[] }) => ({
-      new_transactions: { execute: newTransactions },
       new_mail: {
         execute: async (...a: unknown[]) => {
           ctx.pendingCursors = [{ key: 'mail_cursor:-100999:1:google', at: '2026-09-24T01:00:00.000Z', ids: ['m1'], prev: stagedFrom ? { at: stagedFrom, ids: [] } : null }]
@@ -1826,7 +1788,7 @@ describe('ready-made watchers', () => {
     listAutomations.mockResolvedValue([
       automation({ id: 4, label: 'bins out', kind: null, nextRunAt: at, enabled: true }),
       automation({ id: 5, label: 'paused one', kind: null, nextRunAt: at, enabled: false }),
-      automation({ id: 6, label: '2Up transactions', kind: 'money', nextRunAt: at, enabled: true }),
+      automation({ id: 6, label: 'Money snapshot', kind: 'snapshot', nextRunAt: at, enabled: true }),
       automation({ id: 7, label: 'next week', kind: null, nextRunAt: new Date(at.getTime() + 7 * 86_400_000), enabled: true }),
     ])
     listProposals.mockResolvedValue({ timezone: 'Australia/Melbourne', proposals: [{ id: 3, title: 'Athletics carnival', start_local: 'Thu, 22 Oct 2026', all_day: true, location: 'the oval' }] })
@@ -1840,7 +1802,7 @@ describe('ready-made watchers', () => {
     expect(call.text).toContain('reminders:')
     expect(call.text).toContain('label: bins out')
     expect(call.text).toContain('at: 11:59 pm')
-    for (const left of ['paused one', '2Up transactions', 'next week']) expect(call.text).not.toContain(left)
+    for (const left of ['paused one', 'Money snapshot', 'next week']) expect(call.text).not.toContain(left)
     expect(call.text).toContain('proposals:')
     expect(call.text).toContain('Athletics carnival')
   })
@@ -1873,10 +1835,8 @@ describe('ready-made watchers', () => {
 
   it('posts the money snapshot from PocketSmith, the week and the month so far with the budget', async () => {
     dueAutomations.mockResolvedValue([snapshot()])
-    spendingSummary.mockImplementation(async ({ from, source }: { from?: string; source: string }) =>
-      source === 'pocketsmith'
-        ? { source, transactions: from ? 12 : 40, spent: from ? '$812.40' : '$3,120.00' }
-        : { error: 'should not have fallen back' },
+    spendingSummary.mockImplementation(async ({ from }: { from?: string }) =>
+      ({ source: 'pocketsmith', transactions: from ? 12 : 40, spent: from ? '$812.40' : '$3,120.00' }),
     )
     budgetSummary.mockResolvedValue({ expenses: { actual: '$3,120.00', forecast: '$5,000.00', used: '62%' }, period_progress: '15 of 30 days (50% of the month)' })
     runAgent.mockResolvedValue({ text: '**Week to Sun 15 Sep**\n| | |\n| --- | --- |\n| This week | $812.40 |', notices: [], model: 'primary:test' })
@@ -1886,27 +1846,13 @@ describe('ready-made watchers', () => {
     expect(call.text).toContain('$812.40')
     expect(call.text).toContain('$3,120.00')
     expect(call.text).toContain('62%')
-    expect(call.text).not.toContain('fallen back')
     expect(spendingSummary).toHaveBeenCalledTimes(2)
     expect(send).toHaveBeenCalledWith('-100999', expect.stringContaining('$812.40'))
   })
 
-  it('falls back to the raw Up feed for the snapshot when PocketSmith is not configured', async () => {
-    dueAutomations.mockResolvedValue([snapshot()])
-    spendingSummary.mockImplementation(async ({ source }: { source: string }) =>
-      source === 'pocketsmith' ? { error: 'PocketSmith is not configured.' } : { source: 'up', transactions: 9, spent: '$389.60' },
-    )
-    await authed()
-    expect(spendingSummary).toHaveBeenCalledTimes(4)
-    const call = runAgent.mock.calls[0][0] as { text: string }
-    expect(call.text).toContain('$389.60')
-    expect(call.text).not.toContain('not configured')
-    expect(send).not.toHaveBeenCalledWith('900', expect.anything())
-  })
-
   it('stays quiet on the snapshot when no bank is connected, or when no money moved', async () => {
     dueAutomations.mockResolvedValue([snapshot()])
-    spendingSummary.mockResolvedValue({ error: 'Up Bank is not configured.' })
+    spendingSummary.mockResolvedValue({ error: 'PocketSmith is not configured.' })
     await authed()
     expect(runAgent).not.toHaveBeenCalled()
     expect(send).not.toHaveBeenCalled()
@@ -2006,26 +1952,27 @@ describe('the corners of a run', () => {
   })
 
   it('copes with a tool that answers nothing at all', async () => {
-    dueAutomations.mockResolvedValue([automation({ kind: 'money', label: '2Up transactions' })])
-    newTransactions.mockResolvedValue(undefined)
+    dueAutomations.mockResolvedValue([automation({ kind: 'snapshot', label: 'Money snapshot' })])
+    spendingSummary.mockResolvedValue(undefined)
+    budgetSummary.mockResolvedValue(undefined)
     await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
     expect(runAgent).not.toHaveBeenCalled()
     expect(send).not.toHaveBeenCalled()
   })
 
   it('refuses to run a tool with no execute callback, and reports the failure', async () => {
-    dueAutomations.mockResolvedValue([automation({ kind: 'money', label: '2Up transactions' })])
-    buildTools.mockReturnValueOnce({ new_transactions: {} })
+    dueAutomations.mockResolvedValue([automation({ kind: 'snapshot', label: 'Money snapshot' })])
+    buildTools.mockReturnValueOnce({ spending_summary: {}, budget_summary: { execute: budgetSummary } })
     await authed()
-    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('new_transactions cannot run outside a model turn'))
+    expect(send).toHaveBeenCalledWith('900', expect.stringContaining('spending_summary cannot run outside a model turn'))
   })
 
   it('phrases for a private chat when the automation lives in one', async () => {
     dueAutomations.mockResolvedValue([
       automation({ id: 1, chatId: '111' }),
-      automation({ id: 2, chatId: '111', kind: 'money', label: '2Up transactions' }),
+      automation({ id: 2, chatId: '111', kind: 'snapshot', label: 'Money snapshot' }),
     ])
-    newTransactions.mockResolvedValue({ account: '2Up', count: 1, transactions: [{ description: 'CAFE', amount: '$4.50', when: 'Mon', status: 'SETTLED' }] })
+    moneyMoved()
     await authed()
     expect(runAgent).toHaveBeenCalledTimes(2)
     for (const [input] of runAgent.mock.calls) expect((input as { chatType: string }).chatType).toBe('private')
@@ -2040,8 +1987,8 @@ describe('the corners of a run', () => {
   })
 
   it('looks the creator up when the automation has one, and runs a watcher without them if they are gone', async () => {
-    dueAutomations.mockResolvedValue([automation({ memberId: 9, kind: 'money', label: '2Up transactions' })])
-    newTransactions.mockResolvedValue({ account: '2Up', count: 1, transactions: [{ description: 'CAFE', amount: '$4.50', when: 'Mon', status: 'SETTLED' }] })
+    dueAutomations.mockResolvedValue([automation({ memberId: 9, kind: 'snapshot', label: 'Money snapshot' })])
+    moneyMoved()
     await authed()
     expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ member: null, memberName: 'the family' }))
   })

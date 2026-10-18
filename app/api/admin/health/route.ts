@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server'
 import { requireAdmin } from '@/lib/auth/session'
 import { hydrateSecrets } from '@/lib/settings'
-import * as up from '@/lib/providers/up'
 import * as ps from '@/lib/providers/pocketsmith'
 import * as notion from '@/lib/providers/notion'
 import * as jira from '@/lib/providers/jira'
@@ -17,7 +16,6 @@ export const dynamic = 'force-dynamic'
  * Settings page instead of failing silently at 9pm in a watcher.
  */
 const PROBES: { name: string; configured: () => boolean; run: () => Promise<unknown> }[] = [
-  { name: 'Up Bank', configured: up.upConfigured, run: () => up.ping() },
   { name: 'PocketSmith', configured: ps.pocketsmithConfigured, run: () => ps.userId() },
   { name: 'Notion', configured: notion.notionConfigured, run: () => notion.search({ limit: 1 }) },
   { name: 'Jira', configured: jira.jiraConfigured, run: () => jira.ping() },

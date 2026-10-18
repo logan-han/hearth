@@ -538,7 +538,7 @@ describe('read_attachment', () => {
 
 describe('new_mail', () => {
   const mail = (id: string, hoursAgo: number, subject = 'S') => ({
-    id, from: 'school@x.edu', to: 'me@x.com', subject,
+    id, from: 'school@x.edu', to: 'me@x.com', cc: '', subject,
     snippet: '…', date: new Date(Date.parse('2026-08-27T00:00:00Z') - hoursAgo * 3600_000).toISOString(),
     unread: true,
   })
@@ -660,6 +660,39 @@ describe('new_mail', () => {
     await commitCursors(ctx.pendingCursors)
     const cursor = JSON.parse((await q.getSetting(`mail_cursor:-100:${ctx.member!.id}:google`))!)
     expect(cursor.at).toBe(mail('m0', 1).date)
+  })
+
+  it('says whom each message was to and copied to, and marks one that only copied its mailbox in', async () => {
+    listMail.mockResolvedValue([
+      { ...mail('asked', 1), to: 'Teacher <teacher@hillside.example>', cc: 'Rowan <A@B.com>' },
+      { ...mail('direct', 2), to: 'a@b.com', cc: 'Teacher <teacher@hillside.example>' },
+    ])
+    const r = await call(mailTools(ctx), 'new_mail', { limit: 10 })
+    const [asked, direct] = (r.accounts as { messages: Record<string, unknown>[] }[])[0].messages
+    expect(asked).toMatchObject({ from: 'school@x.edu', to: 'Teacher <teacher@hillside.example>', cc: 'Rowan <A@B.com>', copied_in: true })
+    expect(direct).toMatchObject({ to: 'a@b.com', cc: 'Teacher <teacher@hillside.example>' })
+    expect(direct.copied_in).toBeUndefined()
+  })
+
+  it('names the first few of a long recipient list and counts the rest, still finding its mailbox among them', async () => {
+    const parents = Array.from({ length: 30 }, (_, i) => `Parent ${i} <p${i}@hillside.example>`).join(', ')
+    listMail.mockResolvedValue([{ ...mail('class', 1), to: 'Teacher <teacher@hillside.example>', cc: `${parents}, a@b.com` }])
+    const r = await call(mailTools(ctx), 'new_mail', { limit: 10 })
+    const [m] = (r.accounts as { messages: Record<string, unknown>[] }[])[0].messages
+    expect(m.cc).toBe('Parent 0 <p0@hillside.example>, Parent 1 <p1@hillside.example>, Parent 2 <p2@hillside.example> and 28 more')
+    expect(m.copied_in).toBe(true)
+  })
+
+  it('leaves out recipients a message does not have, and marks nothing without the mailbox address to go by', async () => {
+    const ada = await q.upsertMember('222', 'Ada', { allowed: true })
+    await q.saveConnection({ memberId: ada.id, provider: 'google', email: null, refreshToken: 'r', scopes: null })
+    listMail.mockResolvedValue([{ ...mail('bare', 1), to: '', cc: 'ada@hearth.example' }])
+    const r = await call(mailTools(ctx), 'new_mail', { limit: 10, everyone: true })
+    const accounts = r.accounts as { member: string; messages: Record<string, unknown>[] }[]
+    const [m] = accounts.find((a) => a.member === 'Ada')!.messages
+    expect(m).not.toHaveProperty('to')
+    expect(m.cc).toBe('ada@hearth.example')
+    expect(m).not.toHaveProperty('copied_in')
   })
 
   it('marks the cursor on an empty first look, so the count is not replayed forever', async () => {

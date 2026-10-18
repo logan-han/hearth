@@ -31,6 +31,10 @@ export type PsTransaction = {
   account: string | null
   note: string | null
   memo: string | null
+  /** The labels the household put on it in PocketSmith. */
+  labels: string[]
+  /** The bank's own wording, before PocketSmith tidied it into the payee. */
+  originalPayee: string | null
   isTransfer: boolean
   /** PocketSmith marks whole categories as transfer buckets (e.g. "Transfers"). */
   categoryIsTransfer: boolean
@@ -134,6 +138,8 @@ export async function listTransactions(opts: {
     account: t.transaction_account?.name ?? null,
     note: t.note ?? null,
     memo: t.memo ?? null,
+    labels: Array.isArray(t.labels) ? t.labels.filter((l: unknown): l is string => typeof l === 'string') : [],
+    originalPayee: t.original_payee ?? null,
     isTransfer: Boolean(t.is_transfer),
     categoryIsTransfer: Boolean(t.category?.is_transfer),
     categoryKind: categoryKind(t.category?.refund_behaviour),

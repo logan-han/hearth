@@ -4,6 +4,8 @@ export type MailSummary = {
   id: string
   from: string
   to: string
+  /** Whoever else it went to openly; empty when nobody. */
+  cc: string
   subject: string
   snippet: string
   date: string

@@ -174,7 +174,7 @@ export const CUSTOM_AUTOMATION_TOOLS: ToolName[] = [
   'list_email', 'new_mail', 'read_email', 'read_attachment',
   'list_calendar', 'list_family_events', 'propose_family_event', 'list_event_proposals',
   'show_list', 'show_lists', 'add_to_list',
-  'list_bank_accounts', 'list_transactions', 'spending_summary', 'new_transactions', 'budget_summary',
+  'list_bank_accounts', 'list_transactions', 'spending_summary', 'budget_summary',
   'notion_search', 'notion_read_page', 'notion_query_database',
   'jira_search', 'jira_board_summary', 'jira_read_issue',
 ]

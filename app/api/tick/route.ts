@@ -222,13 +222,6 @@ type Fetched = {
 async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tools: Tools): Promise<Fetched> {
   const problems: string[] = []
   switch (kind) {
-    case 'money': {
-      const r = await runTool(tools, 'new_transactions', { account: '2up', limit: 20 })
-      const err = errorOf(r)
-      if (err) problems.push(`new_transactions: ${err}`)
-      const transactions = Array.isArray(r.transactions) ? r.transactions : []
-      return { data: { transactions: r }, empty: transactions.length === 0, problems }
-    }
     case 'morning': {
       const day = localDateKey(ctx.now)
       const next = dayAfter(day)
@@ -318,15 +311,9 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
     case 'snapshot': {
       const today = localDateKey(ctx.now)
       const weekStart = localDateKey(new Date(ctx.now.getTime() - 6 * 86_400_000))
-      // PocketSmith has the categories and the budget; without it the raw Up
-      // feed still gives the totals.
-      const spending = async (range: { from?: string; to?: string }) => {
-        const categorised = await runTool(tools, 'spending_summary', { ...range, source: 'pocketsmith' })
-        return isUnconfigured(errorOf(categorised)) ? runTool(tools, 'spending_summary', { ...range, source: 'up' }) : categorised
-      }
       const [week, month, budget] = await Promise.all([
-        spending({ from: weekStart, to: today }),
-        spending({}),
+        runTool(tools, 'spending_summary', { from: weekStart, to: today }),
+        runTool(tools, 'spending_summary', {}),
         runTool(tools, 'budget_summary', {}),
       ])
       for (const [name, r] of [['spending_summary (week)', week], ['spending_summary (month)', month], ['budget_summary', budget]] as const) {
@@ -863,7 +850,6 @@ const describeMove = (m: Stuck) => {
   const provider = rest.at(-1)
   const what =
     kind === 'mail_cursor' ? `mail in a linked ${provider === 'google' ? 'Gmail' : provider === 'microsoft' ? 'Outlook' : String(provider)} mailbox`
-    : kind === 'up_cursor' ? 'Up transactions'
     : 'new items'
   const from = m.from === '-' ? 'up' : `from ${formatLocal(new Date(m.from))}`
   return `${what} ${from} to ${formatLocal(new Date(m.move.at))}`

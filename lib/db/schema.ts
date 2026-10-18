@@ -180,7 +180,7 @@ export const automations = pgTable(
     label: text('label').notNull(),
     cronExpr: text('cron_expr').notNull(),
     instruction: text('instruction').notNull(),
-    /** A ready-made watcher's kind (money, inbox, morning); null for a custom instruction. */
+    /** A ready-made watcher's kind (morning, snapshot); null for a custom instruction. */
     kind: text('kind'),
     nextRunAt: timestamp('next_run_at', { withTimezone: true }).notNull(),
     lastRunAt: timestamp('last_run_at', { withTimezone: true }),

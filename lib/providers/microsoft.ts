@@ -30,6 +30,7 @@ type GraphMessage = {
   receivedDateTime?: string
   from?: GraphAddress
   toRecipients?: GraphAddress[]
+  ccRecipients?: GraphAddress[]
   body?: { contentType?: string; content?: string }
   hasAttachments?: boolean
 }
@@ -65,6 +66,7 @@ function toSummary(m: GraphMessage): MailSummary {
     id: m.id,
     from: addr(m.from),
     to: (m.toRecipients ?? []).map(addr).filter(Boolean).join(', '),
+    cc: (m.ccRecipients ?? []).map(addr).filter(Boolean).join(', '),
     subject: m.subject || '(no subject)',
     snippet: m.bodyPreview ?? '',
     date: m.receivedDateTime ?? '',
@@ -124,7 +126,7 @@ export function microsoftClient(memberId: number): AccountClient {
       // /messages spans every folder including Archive; the inbox is its own.
       const url = new URL(scope === 'all' ? `${GRAPH}/messages` : `${GRAPH}/mailFolders/inbox/messages`)
       url.searchParams.set('$top', String(Math.min(limit, 50)))
-      url.searchParams.set('$select', 'id,subject,bodyPreview,isRead,receivedDateTime,from,toRecipients')
+      url.searchParams.set('$select', 'id,subject,bodyPreview,isRead,receivedDateTime,from,toRecipients,ccRecipients')
       if (query) {
         // $search cannot be combined with $orderby (or $filter) in Graph.
         url.searchParams.set('$search', `"${query.replace(/"/g, '')}"`)

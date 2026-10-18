@@ -13,7 +13,6 @@ const { microsoftClient } = await import('@/lib/providers/microsoft')
 const jira = await import('@/lib/providers/jira')
 const notion = await import('@/lib/providers/notion')
 const pocketsmith = await import('@/lib/providers/pocketsmith')
-const up = await import('@/lib/providers/up')
 const weather = await import('@/lib/providers/weather')
 const { refreshAccessToken } = await import('@/lib/oauth/providers')
 const { searchTools } = await import('@/lib/tools/search')
@@ -31,7 +30,6 @@ beforeEach(() => {
     JIRA_API_TOKEN: 'token',
     NOTION_TOKEN: 'secret',
     POCKETSMITH_DEVELOPER_KEY: 'key',
-    UP_API_TOKEN: 'up',
     OPENWEATHER_API_KEY: 'owm',
     GOOGLE_CLIENT_ID: 'gid',
     GOOGLE_CLIENT_SECRET: 'gsecret',
@@ -58,7 +56,6 @@ describe('deadline', () => {
     ['a Jira upload', () => jira.attachFile('HTL-1', { filename: 'a.txt', mimeType: 'text/plain', bytes: new Uint8Array(1) })],
     ['Notion', () => notion.search({ query: 'rates' })],
     ['PocketSmith', () => pocketsmith.listAccounts()],
-    ['Up', () => up.listAccounts()],
     ['OpenWeatherMap', () => weather.geocode('Melbourne')],
     ['a token refresh', () => refreshAccessToken('google', 'refresh')],
     ['a web search', () => (searchTools.web_search.execute as (a: unknown, o: unknown) => Promise<unknown>)({ query: 'rates', depth: 'basic' }, {})],

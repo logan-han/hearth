@@ -260,7 +260,6 @@ async function handleWatch(c: TelegramContext, member: Member): Promise<void> {
           ? "/watch morning — a brief each day at 7am: what is on today and tomorrow, on the family calendar and on everyone's own; everyone's new mail worth knowing about (dates proposed for the calendar); the board, the day's reminders, proposals waiting on a yes, and the weather"
           : "/watch morning — a brief each day at 7am: what is on today and tomorrow, on the family calendar and on your own; your new mail worth knowing about (dates proposed for the calendar); the board, the day's reminders, proposals waiting on a yes, and the weather",
         "/watch snapshot — Sunday 6pm: the week's spending, the month so far, and how the budget is tracking",
-        '/watch money — new 2Up transactions, checked hourly 9am–10pm',
         '/watch list — what this chat is already watching',
         '',
         ...(inGroup ? ['The brief and the snapshot are already on in a family group; pause either from Home if it is not wanted.', ''] : []),
@@ -314,7 +313,7 @@ const HELP = [
   'Just talk to me. In the group, @mention me or reply to one of my messages.',
   '',
   '**Commands**',
-  "/watch — have me keep an eye on the day ahead, the week's money or 2Up, and post only when it matters",
+  "/watch — have me keep an eye on the day ahead or the week's money, and post only when it matters",
   '/connect — link your Google or Microsoft account',
   '/accounts — see and unlink your linked accounts',
   '/calendar — the shared family calendar subscription link',

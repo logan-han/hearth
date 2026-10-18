@@ -100,7 +100,7 @@ describe('the built-in watchers', () => {
   it('skips installing a watcher whose cron can never fire, rather than crashing', async () => {
     await q.rememberChat('-100', 'group', 'Family')
     const impossible: Watcher = {
-      kind: 'money', label: 'Impossible watcher', cron: '0 0 30 2 *', builtin: true, instruction: 'x', tools: [],
+      kind: 'snapshot', label: 'Impossible watcher', cron: '0 0 30 2 *', builtin: true, instruction: 'x', tools: [],
     }
     BUILTIN_WATCHERS.push(impossible)
     try {
@@ -187,5 +187,24 @@ describe('the built-in watchers', () => {
     expect(converted.nextRunAt.toISOString()).toBe('2026-09-15T21:00:00.000Z')
     expect((await q.listAutomations('-100')).map((a) => a.kind).sort()).toEqual(['morning', 'snapshot'])
     expect(await q.listAutomations()).toHaveLength(3)
+  })
+
+  it('retire a 2Up watcher, which went with the Up feed it read, paused or not', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    const ada = await q.upsertMember('111', 'Ada', { allowed: true })
+    await q.addAutomation({
+      chatId: '-100', label: '2Up transactions', cronExpr: '0 9-22 * * *', instruction: 'x', kind: 'money',
+      nextRunAt: new Date('2026-09-15T01:00:00Z'),
+    })
+    const paused = await q.addAutomation({
+      chatId: '111', memberId: ada.id, label: '2Up transactions', cronExpr: '0 9-22 * * *', instruction: 'x', kind: 'money',
+      nextRunAt: new Date('2026-09-15T01:00:00Z'),
+    })
+    await q.setAutomationEnabled(paused.id, false)
+
+    const report = await installBuiltins(now)
+    expect(report.retired).toBe(2)
+    expect((await q.listAutomations()).map((a) => a.kind).sort()).toEqual(['morning', 'snapshot'])
+    expect((await installBuiltins(now)).retired).toBe(0)
   })
 })

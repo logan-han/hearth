@@ -6,7 +6,6 @@ import { commitCursors } from '@/lib/tools/cursor'
 import type { ToolContext } from '@/lib/tools/context'
 
 const { moneyTools, budgetPosition, budgetNote } = await import('@/lib/tools/money')
-const up = await import('@/lib/providers/up')
 const ps = await import('@/lib/providers/pocketsmith')
 
 const fetchMock = vi.fn()
@@ -28,28 +27,9 @@ const call = (name: string, args: unknown) => {
 
 const json = (body: unknown) => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) })
 
-const upAccounts = {
-  data: [
-    { id: 'ind', attributes: { displayName: 'Spending', accountType: 'TRANSACTIONAL', ownershipType: 'INDIVIDUAL', balance: { value: '10.00', currencyCode: 'AUD' } } },
-    { id: 'joint', attributes: { displayName: '2Up Spending', accountType: 'TRANSACTIONAL', ownershipType: 'JOINT', balance: { value: '1500.50', currencyCode: 'AUD' } } },
-  ],
-}
-
-const upTxn = (id: string, amount: string, createdAt: string, desc = 'Coles') => ({
-  id,
-  attributes: {
-    description: desc, message: null, status: 'SETTLED',
-    amount: { value: amount, currencyCode: 'AUD' },
-    createdAt, settledAt: createdAt,
-    performingCustomer: { displayName: '$rowanhale' },
-  },
-  relationships: { account: { data: { id: 'joint' } } },
-})
-
 beforeEach(async () => {
   vi.clearAllMocks()
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
-  process.env.UP_API_TOKEN = 'up:yeah:test'
   process.env.POCKETSMITH_DEVELOPER_KEY = 'ps-key'
   ps.resetUserCache()
   vi.stubGlobal('fetch', fetchMock)
@@ -60,95 +40,41 @@ beforeEach(async () => {
 afterEach(async () => { vi.unstubAllGlobals(); await closeDb(client) })
 
 describe('configuration', () => {
-  it('reports each integration independently', () => {
-    expect(up.upConfigured()).toBe(true)
-    delete process.env.UP_API_TOKEN
-    expect(up.upConfigured()).toBe(false)
-    expect(ps.pocketsmithConfigured()).toBe(true)
+  it('says so rather than throwing when PocketSmith is not configured', async () => {
+    delete process.env.POCKETSMITH_DEVELOPER_KEY
+    expect(ps.pocketsmithConfigured()).toBe(false)
+    for (const name of ['list_bank_accounts', 'list_transactions', 'spending_summary', 'budget_summary']) {
+      expect(String((await call(name, {})).error)).toBe('PocketSmith is not configured.')
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('says so rather than throwing when nothing is configured', async () => {
-    delete process.env.UP_API_TOKEN
-    delete process.env.POCKETSMITH_DEVELOPER_KEY
-    expect(String((await call('list_bank_accounts', {})).error)).toContain('No bank integration')
-    expect(String((await call('list_transactions', { limit: 5 })).error)).toContain('Up Bank')
-    expect(String((await call('budget_summary', {})).error)).toContain('PocketSmith')
-    expect(String((await call('spending_summary', { source: 'up' })).error)).toContain('Up Bank')
-    expect(String((await call('spending_summary', { source: 'pocketsmith' })).error)).toContain('PocketSmith')
-    expect(String((await call('new_transactions', {})).error)).toContain('Up Bank')
+  it('has no tool left for a feed it no longer reads', () => {
+    expect(Object.keys(moneyTools(ctx)).sort()).toEqual(['budget_summary', 'list_bank_accounts', 'list_transactions', 'spending_summary'])
   })
 })
 
 describe('accounts', () => {
-  it('flags the JOINT account as shared and formats balances', async () => {
+  const serve = (accounts: unknown) =>
+    fetchMock.mockImplementation(async (url: URL) => (String(url).endsWith('/me') ? json({ id: 42 }) : json(accounts)))
+
+  it('lists the PocketSmith accounts with their balances formatted', async () => {
+    serve([{ id: 1, title: 'NAB', type: 'bank', current_balance: 1500.5, currency_code: 'aud', current_balance_date: '2026-08-27' }])
+    const r = await call('list_bank_accounts', {})
+    expect(r.accounts).toEqual([{ name: 'NAB', type: 'bank', balance: '$1,500.50', as_at: '2026-08-27' }])
+  })
+
+  it('reports a null balance as null, not a formatted currency string', async () => {
+    serve([{ id: 1, title: 'Wise', type: 'bank', current_balance: null, currency_code: 'usd', current_balance_date: null }])
+    const r = await call('list_bank_accounts', {})
+    expect((r.accounts as { name: string; balance: string | null }[])[0]).toMatchObject({ name: 'Wise', balance: null })
+  })
+
+  it('surfaces a provider error instead of throwing', async () => {
     fetchMock.mockImplementation(async (url: URL) =>
-      String(url).includes('up.com.au') ? json(upAccounts) : json([]),
+      String(url).endsWith('/me') ? json({ id: 42 }) : { ok: false, status: 500, text: async () => 'ps down' },
     )
-    const r = await call('list_bank_accounts', {})
-    const accounts = r.up as { name: string; shared: boolean; balance: string }[]
-    expect(accounts.find((a) => a.name === '2Up Spending')).toMatchObject({ shared: true, balance: '$1,500.50' })
-    expect(accounts.find((a) => a.name === 'Spending')!.shared).toBe(false)
-  })
-
-  it('sends the Up token as a bearer', async () => {
-    fetchMock.mockImplementation(async () => json(upAccounts))
-    await up.listAccounts()
-    const init = fetchMock.mock.calls[0][1] as RequestInit
-    expect((init.headers as Record<string, string>).authorization).toBe('Bearer up:yeah:test')
-  })
-
-  it('reports one provider failing without losing the other', async () => {
-    fetchMock.mockImplementation(async (url: URL) =>
-      String(url).includes('up.com.au')
-        ? { ok: false, status: 401, text: async () => 'unauthorised' }
-        : json([{ id: 1, title: 'NAB', type: 'bank', current_balance: 5, currency_code: 'aud', current_balance_date: '2026-08-27' }]),
-    )
-    fetchMock.mockImplementationOnce(async () => ({ ok: false, status: 401, text: async () => 'unauthorised' }))
-    const r = await call('list_bank_accounts', {})
-    expect(String((r.up as { error: string }).error)).toContain('401')
-  })
-
-  it('reports pocketsmith failing without losing up', async () => {
-    fetchMock.mockImplementation(async (url: URL) =>
-      String(url).includes('up.com.au') ? json(upAccounts) : { ok: false, status: 500, text: async () => 'ps down' },
-    )
-    const r = await call('list_bank_accounts', {})
-    expect(String((r.pocketsmith as { error: string }).error)).toContain('500')
-    expect((r.up as { name: string }[]).length).toBe(2)
-  })
-
-  it('reports a null pocketsmith balance as null, not a formatted currency string', async () => {
-    fetchMock.mockImplementation(async (url: URL) => {
-      const u = String(url)
-      if (u.includes('up.com.au')) return json(upAccounts)
-      if (u.endsWith('/me')) return json({ id: 42 })
-      return json([{ id: 1, title: 'Wise', type: 'bank', current_balance: null, currency_code: 'usd', current_balance_date: null }])
-    })
-    const r = await call('list_bank_accounts', {})
-    const accounts = r.pocketsmith as { name: string; balance: string | null }[]
-    expect(accounts[0]).toMatchObject({ name: 'Wise', balance: null })
-  })
-})
-
-describe('findAccount', () => {
-  beforeEach(() => fetchMock.mockImplementation(async () => json(upAccounts)))
-
-  it('matches "2up" to the shared account', async () => {
-    expect((await up.findAccount('2up'))!.id).toBe('joint')
-  })
-
-  it('matches an exact name, a partial name and an id', async () => {
-    expect((await up.findAccount('2Up Spending'))!.id).toBe('joint')
-    expect((await up.findAccount('Home'))?.id).toBeUndefined()
-    expect((await up.findAccount('ind'))!.id).toBe('ind')
-  })
-
-  it('falls back to the joint account for the word "joint"', async () => {
-    expect((await up.findAccount('joint account'))!.id).toBe('joint')
-  })
-
-  it('returns nothing for a name it cannot place', async () => {
-    expect(await up.findAccount('offshore')).toBeUndefined()
+    expect(String((await call('list_bank_accounts', {})).error)).toContain('500')
   })
 })
 
@@ -185,13 +111,13 @@ describe('spending_summary via PocketSmith', () => {
   })
 
   it('defaults to the current month in Melbourne', async () => {
-    const r = await call('spending_summary', { source: 'pocketsmith' })
+    const r = await call('spending_summary', {})
     expect(r.from).toBe('2026-08-01')
     expect(r.to).toBe('2026-08-31')
   })
 
   it('excludes transfers, which would otherwise double the total', async () => {
-    const r = await call('spending_summary', { source: 'pocketsmith' })
+    const r = await call('spending_summary', {})
     expect(r.transactions).toBe(8)
     expect(r.spent).toBe('$275.00')
     expect(r.received).toBe('$1,000.00')
@@ -199,7 +125,7 @@ describe('spending_summary via PocketSmith', () => {
   })
 
   it('keeps a debit filed under income out of the spend: a deduction from income, said as such', async () => {
-    const r = await call('spending_summary', { source: 'pocketsmith' })
+    const r = await call('spending_summary', {})
     expect(r.deductions).toBe('$60.00')
     expect(r.net_income).toBe('$940.00')
     const cats = r.by_category as { category: string }[]
@@ -210,14 +136,14 @@ describe('spending_summary via PocketSmith', () => {
   })
 
   it('nets a refund against the expense it refunds rather than counting it as income', async () => {
-    const r = await call('spending_summary', { source: 'pocketsmith' })
+    const r = await call('spending_summary', {})
     const cats = r.by_category as { category: string; amount: string }[]
     expect(cats.find((c) => c.category === 'Medical')).toMatchObject({ amount: '$50.00' })
     expect(r.received).toBe('$1,000.00')
   })
 
   it('says a credit filed under an expense is a refund, so a post may call it one', async () => {
-    const r = await call('spending_summary', { source: 'pocketsmith' })
+    const r = await call('spending_summary', {})
     const credits = r.largest_credits as { payee: string; counts_as?: string }[]
     expect(credits.find((c) => c.payee === 'Medicare rebate')?.counts_as).toBe('a refund, taken off the spend in its category')
     expect(credits.find((c) => c.payee === 'Salary')?.counts_as).toBeUndefined()
@@ -225,14 +151,14 @@ describe('spending_summary via PocketSmith', () => {
 
   it('says nothing about deductions when there are none', async () => {
     serve(psTxns.filter((t) => t.id !== 8))
-    const r = await call('spending_summary', { source: 'pocketsmith' })
+    const r = await call('spending_summary', {})
     expect(r.deductions).toBeUndefined()
     expect(r.net_income).toBeUndefined()
     expect(r.net).toBe('$725.00')
   })
 
   it('excludes transfer-category transactions without a trace, since their sum means nothing', async () => {
-    const r = await call('spending_summary', { source: 'pocketsmith' })
+    const r = await call('spending_summary', {})
     const cats = r.by_category as { category: string }[]
     expect(cats.map((c) => c.category)).not.toContain('Transfers')
     expect(r.transfers_excluded).toBeUndefined()
@@ -241,7 +167,7 @@ describe('spending_summary via PocketSmith', () => {
   })
 
   it('breaks spending down by category, largest first', async () => {
-    const r = await call('spending_summary', { source: 'pocketsmith' })
+    const r = await call('spending_summary', {})
     const cats = r.by_category as { category: string; amount: string; share_of_spend: string }[]
     expect(cats[0]).toEqual({ category: 'Supermarket', amount: '$150.00', share_of_spend: '55%' })
     // No category kind to go by: a debit is spend.
@@ -249,7 +175,7 @@ describe('spending_summary via PocketSmith', () => {
   })
 
   it('lists the largest outgoings with payee, category and note, salaries kept apart', async () => {
-    const r = await call('spending_summary', { source: 'pocketsmith' })
+    const r = await call('spending_summary', {})
     const largest = r.largest as { payee: string; amount: string; category: string; note: string | null }[]
     expect(largest[0]).toMatchObject({ payee: 'Coles', amount: '$100.00' })
     const zip = largest.find((t) => t.payee.startsWith('ZIPPAY'))
@@ -260,22 +186,22 @@ describe('spending_summary via PocketSmith', () => {
   })
 
   it('honours an explicit range', async () => {
-    const r = await call('spending_summary', { from: '2026-07-01', to: '2026-07-31', source: 'pocketsmith' })
+    const r = await call('spending_summary', { from: '2026-07-01', to: '2026-07-31' })
     expect(r.from).toBe('2026-07-01')
     const url = new URL(String(fetchMock.mock.calls.find(([u]) => String(u).includes('/transactions'))![0]))
     expect(url.searchParams.get('start_date')).toBe('2026-07-01')
   })
 
   it('asks for a page size the API will accept', async () => {
-    await call('spending_summary', { source: 'pocketsmith' })
+    await call('spending_summary', {})
     const url = new URL(String(fetchMock.mock.calls.find(([u]) => String(u).includes('/transactions'))![0]))
     expect(Number(url.searchParams.get('per_page'))).toBeGreaterThanOrEqual(10)
     expect(Number(url.searchParams.get('per_page'))).toBeLessThanOrEqual(1000)
   })
 
   it('resolves the user id once and reuses it', async () => {
-    await call('spending_summary', { source: 'pocketsmith' })
-    await call('spending_summary', { source: 'pocketsmith' })
+    await call('spending_summary', {})
+    await call('spending_summary', {})
     expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/me'))).toHaveLength(1)
   })
 
@@ -297,7 +223,7 @@ describe('spending_summary via PocketSmith', () => {
 
     it('reads every page, not just the first thousand', async () => {
       serveRows(1400)
-      const r = await call('spending_summary', { from: '2026-07-01', to: '2026-09-23', source: 'pocketsmith' })
+      const r = await call('spending_summary', { from: '2026-07-01', to: '2026-09-23' })
       expect(pages).toEqual([1, 2])
       expect(r.transactions).toBe(1400)
       expect(r.spent).toBe('$1,400.00')
@@ -306,14 +232,14 @@ describe('spending_summary via PocketSmith', () => {
 
     it('asks once more when the last page is exactly full, to see there is nothing after it', async () => {
       serveRows(1000)
-      const r = await call('spending_summary', { source: 'pocketsmith' })
+      const r = await call('spending_summary', {})
       expect(pages).toEqual([1, 2])
       expect(r.transactions).toBe(1000)
     })
 
     it('stops at the most one summary reads, and says the figures may fall short', async () => {
       serveRows(8000)
-      const r = await call('spending_summary', { from: '2025-07-01', to: '2026-06-30', source: 'pocketsmith' })
+      const r = await call('spending_summary', { from: '2025-07-01', to: '2026-06-30' })
       expect(pages).toEqual([1, 2, 3, 4, 5])
       expect(r.transactions).toBe(ps.MAX_TRANSACTIONS)
       expect(String(r.incomplete)).toContain(`${ps.MAX_TRANSACTIONS} transactions`)
@@ -322,7 +248,7 @@ describe('spending_summary via PocketSmith', () => {
 
   it('treats an uncategorised credit as income, not spend, and labels it Uncategorised among the largest credits', async () => {
     serve([{ id: 20, date: '2026-08-11', payee: 'Refund misc', amount: 30, category: null, is_transfer: false }])
-    const r = await call('spending_summary', { source: 'pocketsmith' })
+    const r = await call('spending_summary', {})
     expect(r.received).toBe('$30.00')
     expect(r.by_category).toEqual([])
     const credits = r.largest_credits as { payee: string; category: string }[]
@@ -330,258 +256,90 @@ describe('spending_summary via PocketSmith', () => {
   })
 })
 
-describe('spending_summary via Up', () => {
-  /** A move Up counts as between the household's own accounts, naming the other one. */
-  const transfer = (id: string, amount: string, createdAt: string, desc: string, from: string, to: string) => ({
-    ...upTxn(id, amount, createdAt, desc),
-    relationships: { account: { data: { id: from } }, transferAccount: { data: { id: to } } },
-  })
-
-  it('sums the feed, leaving out moves between the household\'s own accounts', async () => {
-    fetchMock.mockImplementation(async () =>
-      json({
-        data: [
-          upTxn('a', '-100.00', '2026-08-02T10:00:00+10:00'),
-          upTxn('b', '250.00', '2026-08-03T10:00:00+10:00'),
-          transfer('c', '-500.00', '2026-08-04T10:00:00+10:00', 'Transfer to 2Up Spending', 'ind', 'joint'),
-          transfer('d', '500.00', '2026-08-04T10:00:00+10:00', 'Transfer from Spending', 'joint', 'ind'),
-        ],
-        links: {},
-      }),
-    )
-    const r = await call('spending_summary', { source: 'up' })
-    expect(r.transactions).toBe(2)
-    expect(r.spent).toBe('$100.00')
-    expect(r.received).toBe('$250.00')
-    expect(r.net).toBe('$150.00')
-    expect((r.largest as { description: string }[]).map((t) => t.description)).toEqual(['Coles', 'Coles'])
-    expect(r.incomplete).toBeUndefined()
-  })
-
-  /** Pages of a hundred debits of a dollar each, with a next link until `pages` have been served. */
-  const servePages = (pages: number) => {
-    let served = 0
-    fetchMock.mockImplementation(async () => {
-      served += 1
-      const n = served
-      return json({
-        data: Array.from({ length: 100 }, (_, i) => upTxn(`p${n}-${i}`, '-1.00', '2026-08-02T10:00:00+10:00')),
-        links: { next: n < pages ? `https://api.up.com.au/api/v1/transactions?page=${n + 1}` : null },
-      })
-    })
-    return () => served
-  }
-
-  it('follows the feed to the start of a busy month rather than stopping at the newest few hundred', async () => {
-    const served = servePages(5)
-    const r = await call('spending_summary', { source: 'up' })
-    expect(served()).toBe(5)
-    expect(r.transactions).toBe(500)
-    expect(r.spent).toBe('$500.00')
-    expect(r.incomplete).toBeUndefined()
-  })
-
-  it('stops at the most one summary reads, and says the figures may fall short', async () => {
-    const served = servePages(30)
-    const r = await call('spending_summary', { source: 'up' })
-    expect(served()).toBe(up.MAX_TRANSACTIONS / 100)
-    expect(r.transactions).toBe(up.MAX_TRANSACTIONS)
-    expect(String(r.incomplete)).toContain(`${up.MAX_TRANSACTIONS} transactions`)
-  })
-
-  it('surfaces a provider error instead of throwing', async () => {
-    fetchMock.mockImplementation(async () => ({ ok: false, status: 500, text: async () => 'down' }))
-    expect(String((await call('spending_summary', { source: 'up' })).error)).toContain('500')
-  })
-})
-
 describe('list_transactions', () => {
-  it('names who made each 2Up purchase', async () => {
-    fetchMock.mockImplementation(async (url: URL) =>
-      String(url).includes('/accounts/joint/transactions')
-        ? json({ data: [upTxn('a', '-12.50', '2026-08-26T18:00:00+10:00', 'Coles')], links: {} })
-        : json(upAccounts),
-    )
-    const r = await call('list_transactions', { account: '2up', limit: 5 })
-    expect(r.account).toBe('2Up Spending')
-    expect((r.transactions as { by: string; amount: string }[])[0]).toMatchObject({ by: '$rowanhale', amount: '-$12.50' })
+  // What the household writes on a transaction lives in its note, memo and
+  // labels; a search finds it there as well as in the payee.
+  const psTxns = [
+    { id: 1, date: '2026-08-03', payee: 'Sugar Cafe', original_payee: 'SUGAR CAFE RINGWOOD', amount: -42.5, category: { title: 'Restaurants/Dining' }, transaction_account: { name: 'Spending' }, is_transfer: false, note: 'for Ada', labels: [] },
+    { id: 2, date: '2026-08-16', payee: 'Ada Fixture', amount: 42.5, category: { title: 'Reimbursements', is_transfer: true }, transaction_account: { name: 'Spending' }, is_transfer: false, note: null, labels: [] },
+    { id: 3, date: '2026-08-10', payee: 'Coles', amount: -80, category: { title: 'Supermarket' }, transaction_account: { name: '2Up Spending' }, is_transfer: false, memo: 'split with ada', labels: ['groceries'] },
+    { id: 4, date: '2026-08-12', payee: 'Petrol', amount: -60, category: { title: 'Transport' }, transaction_account: { name: 'Amex' }, is_transfer: false, labels: ['ADA'] },
+    { id: 5, date: '2026-08-20', payee: 'Bunnings', amount: -15, category: null, transaction_account: { name: 'Amex' }, is_transfer: false },
+  ]
+  const serve = (txns: unknown[]) =>
+    fetchMock.mockImplementation(async (url: URL) => {
+      const u = String(url)
+      if (u.endsWith('/me')) return json({ id: 42 })
+      if (u.includes('/transactions')) return json(txns)
+      return json([])
+    })
+  const asked = () => new URL(String(fetchMock.mock.calls.find(([u]) => String(u).includes('/transactions'))![0]))
+
+  beforeEach(() => {
+    serve(psTxns)
   })
 
-  it('refuses an account it cannot find', async () => {
-    fetchMock.mockImplementation(async () => json(upAccounts))
-    expect(String((await call('list_transactions', { account: 'swiss', limit: 5 })).error)).toContain('No Up account')
+  it('lists the month so far one by one, newest first, with what was written on each and nothing it lacks', async () => {
+    const r = await call('list_transactions', {})
+    expect(r).toMatchObject({ from: '2026-08-01', to: '2026-08-27', matched: 5 })
+    expect(asked().searchParams.get('start_date')).toBe('2026-08-01')
+    expect(asked().searchParams.get('end_date')).toBe('2026-08-27')
+    const txns = r.transactions as Record<string, unknown>[]
+    expect(txns.map((t) => t.payee)).toEqual(['Bunnings', 'Ada Fixture', 'Petrol', 'Coles', 'Sugar Cafe'])
+    expect(txns[4]).toEqual({ date: '2026-08-03', payee: 'Sugar Cafe', amount: '-$42.50', category: 'Restaurants/Dining', account: 'Spending', note: 'for Ada' })
+    expect(txns[3]).toMatchObject({ memo: 'split with ada', labels: ['groceries'] })
+    expect(txns[0]).toMatchObject({ category: 'Uncategorised', amount: '-$15.00' })
+    expect(txns[1]).toMatchObject({ amount: '$42.50', transfer: true })
   })
 
-  it('lists across all accounts when none is named, honouring an explicit date range', async () => {
-    fetchMock.mockImplementation(async (url: URL) =>
-      String(url).includes('/transactions')
-        ? json({ data: [upTxn('a', '-5.00', '2026-08-02T10:00:00+10:00')], links: {} })
-        : json(upAccounts),
-    )
-    const r = await call('list_transactions', { from: '2026-08-01', to: '2026-08-05', limit: 5 })
-    expect(r.account).toBe('all accounts')
-    const url = new URL(String(fetchMock.mock.calls.find(([u]) => String(u).includes('/transactions'))![0]))
-    expect(url.searchParams.get('filter[since]')).toBeTruthy()
-    expect(url.searchParams.get('filter[until]')).toBeTruthy()
+  it('finds a name wherever it was written, ignoring case, and sums every match, transfers included', async () => {
+    const r = await call('list_transactions', { search: 'Ada' })
+    expect(r).toMatchObject({ search: 'Ada', matched: 4, total_in: '$42.50', total_out: '$182.50', net: '-$140.00' })
+    expect((r.transactions as { payee: string }[]).map((t) => t.payee)).toEqual(['Ada Fixture', 'Petrol', 'Coles', 'Sugar Cafe'])
+    // The bank's own wording counts too, though only the tidied payee is shown.
+    expect((await call('list_transactions', { search: 'ringwood' })).matched).toBe(1)
+    expect((await call('list_transactions', { search: 'nobody' })).matched).toBe(0)
   })
 
-  it('surfaces a provider error instead of throwing', async () => {
-    fetchMock.mockImplementation(async (url: URL) =>
-      String(url).includes('/transactions') ? { ok: false, status: 500, text: async () => 'boom' } : json(upAccounts),
-    )
-    expect(String((await call('list_transactions', { limit: 5 })).error)).toContain('500')
-  })
-})
-
-describe('new_transactions', () => {
-  const feed = (...txns: ReturnType<typeof upTxn>[]) => ({ data: txns, links: {} })
-
-  const wire = (txns: ReturnType<typeof upTxn>[]) =>
-    fetchMock.mockImplementation(async (url: URL) =>
-      String(url).includes('/transactions') ? json(feed(...txns)) : json(upAccounts),
-    )
-
-  it('looks back only a day on the first check, and remembers it looked once the result is delivered', async () => {
-    wire([])
-    const r = await call('new_transactions', { account: '2up', limit: 10 })
-    expect(r.first_check).toBe(true)
-    expect(r.count).toBe(0)
-    expect(await getSetting('up_cursor:-100:joint')).toBeNull()
-    await commitCursors(ctx.pendingCursors)
-    expect(await getSetting('up_cursor:-100:joint')).toContain('at')
+  it('totals every match even when the list is cut short, and says how many it left out', async () => {
+    const r = await call('list_transactions', { limit: 2 })
+    expect(r.transactions).toHaveLength(2)
+    expect(r).toMatchObject({ matched: 5, more_not_shown: 3, total_in: '$42.50', total_out: '$197.50', net: '-$155.00' })
+    expect((await call('list_transactions', {})).more_not_shown).toBeUndefined()
   })
 
-  it('returns what is new and stages the marker, which moves only when committed', async () => {
-    wire([upTxn('t1', '-10.00', '2026-08-27T11:00:00+10:00')])
-    const first = await call('new_transactions', { account: '2up', limit: 10 })
-    expect(first.count).toBe(1)
-    expect(await getSetting('up_cursor:-100:joint')).toBeNull()
-    await commitCursors(ctx.pendingCursors)
-    const cursor = JSON.parse((await getSetting('up_cursor:-100:joint'))!)
-    expect(cursor.ids).toContain('t1')
+  it('starts a range given only its end at the first of that month', async () => {
+    const r = await call('list_transactions', { to: '2026-07-31' })
+    expect(r).toMatchObject({ from: '2026-07-01', to: '2026-07-31' })
+    expect(asked().searchParams.get('start_date')).toBe('2026-07-01')
   })
 
-  it('reports it again to a later run when the earlier one was never delivered', async () => {
-    wire([upTxn('t1', '-10.00', '2026-08-27T11:00:00+10:00')])
-    expect((await call('new_transactions', { account: '2up', limit: 10 })).count).toBe(1)
-    // That run died before posting: nothing was committed, and the next run starts afresh.
-    ctx = { ...ctx, pendingCursors: undefined }
-    expect((await call('new_transactions', { account: '2up', limit: 10 })).count).toBe(1)
+  it('narrows to an account by part of its name, and names the accounts there are when none matches', async () => {
+    const r = await call('list_transactions', { account: '2up' })
+    expect(r).toMatchObject({ account: '2up', matched: 1 })
+    expect((r.transactions as { payee: string }[])[0].payee).toBe('Coles')
+    const none = await call('list_transactions', { account: 'joint' })
+    expect(String(none.error)).toContain('"joint"')
+    expect(String(none.error)).toContain('Spending, 2Up Spending, Amex')
   })
 
-  it('counts what does not fit rather than dropping it, and moves past it', async () => {
-    const txns = Array.from({ length: 5 }, (_, i) => upTxn(`t${i}`, '-1.00', `2026-08-27T1${i}:00:00+10:00`))
-    wire(txns.reverse())
-    const r = await call('new_transactions', { account: '2up', limit: 3 })
-    expect(r.count).toBe(3)
-    expect(r.more_not_shown).toBe(2)
-    expect(r.more_not_shown_is_at_least).toBeUndefined()
-    await commitCursors(ctx.pendingCursors)
-    const cursor = JSON.parse((await getSetting('up_cursor:-100:joint'))!)
-    expect(new Date(cursor.at).toISOString()).toBe(new Date('2026-08-27T14:00:00+10:00').toISOString())
-  })
-
-  it('says the count is a floor when the look read as far as it goes', async () => {
-    const txns = Array.from({ length: 51 }, (_, i) => upTxn(`t${i}`, '-1.00', new Date(Date.parse('2026-08-27T01:00:00Z') + i * 60_000).toISOString()))
-    wire(txns.reverse())
-    const r = await call('new_transactions', { account: '2up', limit: 1 })
-    expect(r.count).toBe(1)
-    expect(r.more_not_shown).toBe(50)
-    expect(r.more_not_shown_is_at_least).toBe(true)
-  })
-
-  it('never posts the same transaction twice', async () => {
-    wire([upTxn('t1', '-10.00', '2026-08-27T11:00:00+10:00')])
-    expect((await call('new_transactions', { account: '2up', limit: 10 })).count).toBe(1)
-    expect((await call('new_transactions', { account: '2up', limit: 10 })).count).toBe(0)
-  })
-
-  it('picks up a genuinely newer transaction after a quiet run', async () => {
-    wire([upTxn('t1', '-10.00', '2026-08-27T11:00:00+10:00')])
-    await call('new_transactions', { account: '2up', limit: 10 })
-    wire([upTxn('t2', '-20.00', '2026-08-27T12:00:00+10:00'), upTxn('t1', '-10.00', '2026-08-27T11:00:00+10:00')])
-    const r = await call('new_transactions', { account: '2up', limit: 10 })
-    expect(r.count).toBe(1)
-    expect((r.transactions as { amount: string }[])[0].amount).toBe('-$20.00')
-  })
-
-  it('keeps a separate marker per chat', async () => {
-    wire([upTxn('t1', '-10.00', '2026-08-27T11:00:00+10:00')])
-    await call('new_transactions', { account: '2up', limit: 10 })
-    ctx = { ...ctx, chatId: '-200' }
-    expect((await call('new_transactions', { account: '2up', limit: 10 })).count).toBe(1)
-  })
-
-  it('defaults to the shared account without being told', async () => {
-    wire([])
-    expect((await call('new_transactions', { limit: 10 })).account).toBe('2Up Spending')
-  })
-
-  it('flags a new, oversized payee against the account history, and says what typical looks like', async () => {
-    const past = Array.from({ length: 12 }, (_, i) =>
-      upTxn(`h${i}`, i % 2 ? '-12.50' : '-84.20', `2026-08-${String(10 + i).padStart(2, '0')}T18:00:00+10:00`, i % 2 ? 'Corner Cafe' : 'Grocer 0812 Hillside'),
-    )
-    const lisbon = upTxn('s1', '-389.60', '2026-08-27T11:00:00+10:00', 'FARESAVER LISBON')
-    const grocer = upTxn('c1', '-60.00', '2026-08-27T11:30:00+10:00', 'Grocer 0812 Hillside')
-    wire([lisbon, grocer, ...past])
-    const r = await call('new_transactions', { account: '2up', limit: 10 })
-    const rows = r.transactions as { description: string; flags: string[] }[]
-    expect(rows.find((t) => t.description === 'FARESAVER LISBON')?.flags).toEqual(['new_payee', 'unusually_large'])
-    expect(rows.find((t) => t.description === 'Grocer 0812 Hillside')?.flags).toEqual([])
-    expect(r.typical_debit).toBe('$48.35')
-    expect(r.history_days).toBe(90)
-  })
-
-  it('refuses an account it cannot find', async () => {
-    wire([])
-    expect(String((await call('new_transactions', { account: 'swiss', limit: 10 })).error)).toContain('No Up account')
-  })
-
-  it('reads the whole history for its flags, so a payee last seen hundreds of transactions ago is not new', async () => {
-    const grocer = upTxn('c1', '-60.00', '2026-08-27T11:00:00+10:00', 'Grocer 0812 Hillside')
+  it('stops at the most one read takes, and says the range may hold more', async () => {
+    const row = (id: number) => ({ id, date: '2026-08-15', payee: 'Coles', amount: -1, category: null, is_transfer: false })
     fetchMock.mockImplementation(async (url: URL) => {
       const u = new URL(String(url))
-      if (!u.pathname.includes('/transactions')) return json(upAccounts)
-      // The look for what is new asks from a day back; the history, from ninety.
-      if (u.searchParams.get('filter[since]')?.startsWith('2026-08-26')) return json(feed(grocer))
-      const page = Number(u.searchParams.get('page') ?? 1)
-      const coffees = Array.from({ length: 100 }, (_, i) => upTxn(`h${page}-${i}`, '-4.50', '2026-08-20T08:00:00+10:00', 'Corner Cafe'))
-      // Newest first: the last time at the grocer is on the fifth page.
-      if (page === 5) coffees[99] = upTxn('old', '-60.00', '2026-06-01T10:00:00+10:00', 'Grocer 0812 Hillside')
-      return json({ data: coffees, links: { next: page < 5 ? `https://api.up.com.au/api/v1/accounts/joint/transactions?page=${page + 1}` : null } })
+      if (u.pathname.endsWith('/me')) return json({ id: 42 })
+      return json(Array.from({ length: Number(u.searchParams.get('per_page')) }, (_, i) => row(i)))
     })
-    const r = await call('new_transactions', { account: '2up', limit: 10 })
-    expect((r.transactions as { flags: string[] }[])[0].flags).not.toContain('new_payee')
+    const r = await call('list_transactions', { from: '2025-07-01', to: '2026-06-30' })
+    expect(r.matched).toBe(ps.MAX_TRANSACTIONS)
+    expect(String(r.incomplete)).toContain(`${ps.MAX_TRANSACTIONS} transactions`)
   })
 
   it('surfaces a provider error instead of throwing', async () => {
     fetchMock.mockImplementation(async (url: URL) =>
-      String(url).includes('/transactions') ? { ok: false, status: 500, text: async () => 'boom' } : json(upAccounts),
+      String(url).endsWith('/me') ? json({ id: 42 }) : { ok: false, status: 502, text: async () => 'bad gateway' },
     )
-    expect(String((await call('new_transactions', { account: '2up', limit: 10 })).error)).toContain('500')
-  })
-
-  it('finds the newest transaction by timestamp even when it is not last in the feed', async () => {
-    wire([upTxn('newer', '-15.00', '2026-08-27T14:00:00+10:00'), upTxn('older', '-5.00', '2026-08-27T13:00:00+10:00')])
-    await call('new_transactions', { account: '2up', limit: 10 })
-    await commitCursors(ctx.pendingCursors)
-    const cursor = JSON.parse((await getSetting('up_cursor:-100:joint'))!)
-    expect(new Date(cursor.at).toISOString()).toBe(new Date('2026-08-27T14:00:00+10:00').toISOString())
-  })
-
-  it('keeps the transactions when the history read fails', async () => {
-    let calls = 0
-    fetchMock.mockImplementation(async (url: URL) => {
-      if (!String(url).includes('/transactions')) return json(upAccounts)
-      calls++
-      if (calls === 1) return json(feed(upTxn('t1', '-10.00', '2026-08-27T11:00:00+10:00')))
-      return { ok: false, status: 500, text: async () => 'boom', json: async () => ({}) }
-    })
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const r = await call('new_transactions', { account: '2up', limit: 10 })
-    expect(r.count).toBe(1)
-    expect((r.transactions as { flags: string[] }[])[0].flags).toEqual([])
-    expect(r.typical_debit).toBeUndefined()
+    expect(String((await call('list_transactions', {})).error)).toContain('PocketSmith API 502')
   })
 })
 
@@ -739,6 +497,20 @@ describe('pocketsmith client', () => {
     expect(await ps.budgetByCategory({ startDate: '2026-08-01', endDate: '2026-08-31' })).toEqual([])
   })
 
+  it('keeps the labels and the bank\'s own wording, and reads a transaction with neither as having none', async () => {
+    fetchMock.mockImplementation(async (url: URL) =>
+      String(url).endsWith('/me')
+        ? json({ id: 42 })
+        : json([
+            { id: 1, date: '2026-08-02', payee: 'Coles', original_payee: 'COLES 0123 RINGWOOD', amount: -5, labels: ['groceries', 7] },
+            { id: 2, date: '2026-08-03', payee: 'Woolies', amount: -6 },
+          ]),
+    )
+    const [labelled, bare] = await ps.listTransactions({ startDate: '2026-08-01', endDate: '2026-08-31' })
+    expect(labelled).toMatchObject({ labels: ['groceries'], originalPayee: 'COLES 0123 RINGWOOD' })
+    expect(bare).toMatchObject({ labels: [], originalPayee: null, note: null, memo: null })
+  })
+
   it('asks for a page of 100 when no limit is given', async () => {
     fetchMock.mockImplementation(async (url: URL) => (String(url).endsWith('/me') ? json({ id: 42 }) : json([])))
     await ps.listTransactions({ startDate: '2026-08-01', endDate: '2026-08-31' })
@@ -757,78 +529,5 @@ describe('pocketsmith client', () => {
     delete process.env.POCKETSMITH_DEVELOPER_KEY
     ps.resetUserCache()
     await expect(ps.listAccounts()).rejects.toThrow(/POCKETSMITH_DEVELOPER_KEY/)
-  })
-})
-
-describe('up pagination', () => {
-  it('follows the next link until it has enough', async () => {
-    let page = 0
-    fetchMock.mockImplementation(async (url: URL) => {
-      if (!String(url).includes('/transactions')) return json(upAccounts)
-      page += 1
-      return json({
-        data: [upTxn(`p${page}`, '-1.00', `2026-08-0${page}T10:00:00+10:00`)],
-        links: { next: page < 3 ? 'https://api.up.com.au/api/v1/transactions?page=2' : null },
-      })
-    })
-    const out = await up.listTransactions({ limit: 3 })
-    expect(out).toHaveLength(3)
-    expect(page).toBe(3)
-  })
-
-  it('stops at the requested limit even with more pages waiting', async () => {
-    fetchMock.mockImplementation(async (url: URL) =>
-      String(url).includes('/transactions')
-        ? json({
-            data: [upTxn('a', '-1.00', '2026-08-01T10:00:00+10:00'), upTxn('b', '-2.00', '2026-08-02T10:00:00+10:00')],
-            links: { next: 'https://api.up.com.au/api/v1/transactions?page=2' },
-          })
-        : json(upAccounts),
-    )
-    expect(await up.listTransactions({ limit: 1 })).toHaveLength(1)
-  })
-
-  it('passes date and status filters through', async () => {
-    fetchMock.mockImplementation(async () => json({ data: [], links: {} }))
-    await up.listTransactions({
-      since: new Date('2026-08-01T00:00:00Z'),
-      until: new Date('2026-08-31T00:00:00Z'),
-      status: 'SETTLED',
-    })
-    const url = new URL(String(fetchMock.mock.calls[0][0]))
-    expect(url.searchParams.get('filter[since]')).toBe('2026-08-01T00:00:00.000Z')
-    expect(url.searchParams.get('filter[status]')).toBe('SETTLED')
-  })
-
-  it('refuses to run at all without a token', async () => {
-    delete process.env.UP_API_TOKEN
-    await expect(up.listAccounts()).rejects.toThrow(/UP_API_TOKEN/)
-  })
-})
-
-describe('toTransaction mapping', () => {
-  it('maps a sparse transaction with no relationships, settlement time or performing customer', async () => {
-    fetchMock.mockImplementation(async (url: URL) =>
-      String(url).includes('/transactions')
-        ? json({
-            data: [
-              {
-                id: 'sparse1',
-                attributes: {
-                  description: 'ATM Withdrawal',
-                  amount: { value: '-40.00', currencyCode: 'AUD' },
-                  status: 'HELD',
-                  createdAt: '2026-08-27T09:00:00+10:00',
-                },
-              },
-            ],
-            links: {},
-          })
-        : json(upAccounts),
-    )
-    const [t] = await up.listTransactions({})
-    expect(t).toMatchObject({
-      settledAt: null, performedBy: null, accountId: null, transferAccountId: null, category: null, parentCategory: null,
-    })
   })
 })

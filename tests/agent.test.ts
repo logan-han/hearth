@@ -139,8 +139,15 @@ describe('systemPrompt money rules', () => {
     for (const w of Object.values(WATCHERS)) expect(w.instruction).not.toMatch(specific)
   })
 
-  it('sends the model to the confirmation email for where a booking goes', () => {
-    expect(systemPrompt({ ...base, chatType: 'group' })).toContain('comes only from a confirmation email or a Known fact')
+  it('sends the model to the note or the confirmation email for where a booking goes', () => {
+    expect(systemPrompt({ ...base, chatType: 'group' })).toContain('comes only from its note, a confirmation email or a Known fact')
+  })
+
+  it('has one feed to name, and no sums of its own', () => {
+    const p = systemPrompt({ ...base, chatType: 'group' })
+    expect(p).toContain('it all comes from PocketSmith')
+    expect(p).toContain('never a sum of your own')
+    expect(p).not.toMatch(/\bUp\b/)
   })
 
   it('stays under a few dozen rule lines, in plain lines rather than prose', () => {
@@ -1271,7 +1278,7 @@ describe('tool scoping by mode', () => {
     generateText.mockResolvedValue(reply('ok'))
     await runAgent({ ...input, mode: 'watcher' })
     const active: string[] = generateText.mock.calls[0][0].activeTools
-    expect(active).toContain('new_transactions')
+    expect(active).toContain('list_transactions')
     expect(active).toContain('propose_family_event')
     expect(active).not.toContain('send_email')
     expect(active).not.toContain('add_family_event')
@@ -1342,10 +1349,10 @@ describe('tool scoping by mode', () => {
   it('returns what the tools said as evidence for a watcher run', async () => {
     generateText.mockResolvedValue({
       ...reply('2Up: **$389.60** FARESAVER LISBON.'),
-      steps: [{ toolResults: [{ toolName: 'new_transactions', input: { account: '2up' }, output: { count: 1 } }] }],
+      steps: [{ toolResults: [{ toolName: 'list_transactions', input: { search: 'faresaver' }, output: { count: 1 } }] }],
     })
     const r = await runAgent({ ...input, mode: 'watcher' })
-    expect(r.evidence).toContain('new_transactions')
+    expect(r.evidence).toContain('list_transactions')
     expect(r.evidence).toContain('"count":1')
     generateText.mockResolvedValue(reply('hello'))
     expect((await runAgent({ ...input, mode: 'chat' })).evidence).toBeUndefined()

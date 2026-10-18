@@ -264,7 +264,19 @@ describe('google mail', () => {
   it('reads a bare message without inventing headers, and a body-less one as empty', async () => {
     fetchMock.mockResolvedValueOnce(reply({ id: 'bare' }))
     const m = await googleClient(1).readMail('bare')
-    expect(m).toEqual({ id: 'bare', from: '', to: '', subject: '(no subject)', snippet: '', date: '', unread: false, body: '', attachments: [] })
+    expect(m).toEqual({ id: 'bare', from: '', to: '', cc: '', subject: '(no subject)', snippet: '', date: '', unread: false, body: '', attachments: [] })
+  })
+
+  it('says whom a message was copied to, asked for in the listing as well as the read', async () => {
+    const copied = {
+      ...message,
+      payload: { ...message.payload, headers: [...message.payload.headers, { name: 'Cc', value: '"Teacher, Class 2" <teacher@hillside.example>' }] },
+    }
+    fetchMock.mockResolvedValueOnce(reply({ messages: [{ id: 'm1' }] })).mockResolvedValueOnce(reply(copied))
+    const [m] = await googleClient(1).listMail({ limit: 5 })
+    expect(new URL(lastCall(1)[0]).searchParams.getAll('metadataHeaders')).toContain('Cc')
+    expect(m.cc).toBe('Teacher, Class 2 <teacher@hillside.example>')
+    expect(m.to).toBe('parent@example.com')
   })
 
   it('skips parts with no data and decodes a lone html part', async () => {
@@ -542,7 +554,17 @@ describe('microsoft graph', () => {
   it('reads a bare message without inventing fields', async () => {
     fetchMock.mockResolvedValueOnce(reply({ id: 'bare' }))
     const m = await microsoftClient(1).readMail('bare')
-    expect(m).toEqual({ id: 'bare', from: '', to: '', subject: '(no subject)', snippet: '', date: '', unread: false, body: '', attachments: [] })
+    expect(m).toEqual({ id: 'bare', from: '', to: '', cc: '', subject: '(no subject)', snippet: '', date: '', unread: false, body: '', attachments: [] })
+  })
+
+  it('says whom a message was copied to, asked for in the listing', async () => {
+    fetchMock.mockResolvedValueOnce(
+      reply({ value: [{ ...graphMessage, ccRecipients: [{ emailAddress: { name: 'Teacher', address: 'teacher@hillside.example' } }, {}] }] }),
+    )
+    const [m] = await microsoftClient(1).listMail({})
+    expect(new URL(String(lastCall()[0])).searchParams.get('$select')).toContain('ccRecipients')
+    expect(m.cc).toBe('Teacher <teacher@hillside.example>')
+    expect(m.to).toBe('parent@example.com')
   })
 
   it('shows a name alone when the address is missing, and drops recipients with neither', async () => {
