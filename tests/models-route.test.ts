@@ -148,6 +148,13 @@ describe('openrouter listing', () => {
     expect(models[1].note).toContain('$0.30 in')
   })
 
+  it('files an alias for the newest of a family with that family, not ahead of every paid model', async () => {
+    const paid = (id: string) => ({ id, supported_parameters: ['tools'], pricing: { prompt: '0.0000003', completion: '0.0000012' } })
+    fetchMock.mockResolvedValue(json({ data: [paid('deepseek/deepseek-v4-flash'), paid('~deepseek/deepseek-flash-latest'), paid('anthropic/claude'), paid('deepseek/deepseek-chat')] }))
+    const ids = (await (await list('openrouter')).json()).models.map((m: { id: string }) => m.id)
+    expect(ids).toEqual(['anthropic/claude', 'deepseek/deepseek-chat', '~deepseek/deepseek-flash-latest', 'deepseek/deepseek-v4-flash'])
+  })
+
   it('reads a sparse catalogue: no pricing means free, no name means the id, no parameters means out', async () => {
     fetchMock.mockResolvedValue(
       json({ data: [{ id: 'z/gratis', supported_parameters: ['tools'] }, { id: 'a/bare' }, { id: 'a/also-free:free', supported_parameters: ['tools'] }] }),

@@ -76,7 +76,9 @@ async function openrouter(): Promise<ModelOption[]> {
         note: free ? 'free' : `$${inCost.toFixed(2)} in / $${outCost.toFixed(2)} out per M`,
       }
     })
-    .sort((a, b) => Number(b.free) - Number(a.free) || a.id.localeCompare(b.id))
+    // An alias such as ~deepseek/deepseek-flash-latest sorts with its family:
+    // by its ~ it went ahead of every paid model, where nobody looked for it.
+    .sort((a, b) => Number(b.free) - Number(a.free) || a.id.replace(/^~/, '').localeCompare(b.id.replace(/^~/, '')))
 }
 
 /** OpenAI-compatible servers advertise what they have loaded at /v1/models. */
