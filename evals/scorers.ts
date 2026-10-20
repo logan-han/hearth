@@ -31,9 +31,9 @@ export const CLOCK_TIME = /\b\d{1,2}(?::\d{2})?\s?(?:am|pm)\b/i
 type Judge = { name: string; model: LanguageModel }
 
 /**
- * Judges are deliberately not from the Gemini family that answers most of
- * Hearth's turns, because judges favour their own family: OpenRouter's paid
- * MiniMax slot leads, Gemini is the fallback when it is down, and
+ * Judges are deliberately not from the OpenRouter model that answers most of
+ * Hearth's turns, because judges favour their own family: Gemini's last slot
+ * leads, OpenRouter is the fallback when it is down, and
  * EVAL_JUDGE_MODEL=provider:model pins one. A judge that fails is a missing
  * score, never a failed case; the deterministic checks carry the verdict.
  */
@@ -58,10 +58,10 @@ export function judgeCandidates(): Judge[] {
     throw new Error(`EVAL_JUDGE_MODEL=${explicit} is not a configured provider`)
   }
   const candidates: Judge[] = []
-  const openrouter = openrouterSlots()
-  if (openrouter.length) candidates.push(openrouter.at(-1)!)
   const gemini = geminiSlots()
   if (gemini.length) candidates.push(gemini.at(-1)!)
+  const openrouter = openrouterSlots()
+  if (openrouter.length) candidates.push(openrouter.at(-1)!)
   return candidates
 }
 

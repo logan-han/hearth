@@ -48,6 +48,11 @@ describe('tiers', () => {
     ])
   })
 
+  it('gives OpenRouter the alias that follows the newest DeepSeek Flash', () => {
+    process.env.OPENROUTER_API_KEY = 'k'
+    expect(openrouterSlots().map((s) => s.name)).toEqual(['openrouter:~deepseek/deepseek-flash-latest'])
+  })
+
   it('expands a comma-separated model list in order', () => {
     process.env.GEMINI_API_KEY = 'k'
     process.env.GEMINI_MODEL = ' a , b ,, c '
@@ -62,7 +67,7 @@ describe('tiers', () => {
 })
 
 describe('modelChain ordering', () => {
-  it('runs local, then Gemini, then OpenRouter', () => {
+  it('runs local, then OpenRouter, then Gemini', () => {
     process.env.LLM_BASE_URL = 'http://127.0.0.1:9/v1'
     process.env.LLM_MODEL = 'qwen3'
     process.env.GEMINI_API_KEY = 'k'
@@ -71,8 +76,8 @@ describe('modelChain ordering', () => {
     process.env.OPENROUTER_MODEL = 'minimax/minimax-m3:free'
     expect(modelChain().map((s) => s.name)).toEqual([
       'local:qwen3',
-      'gemini:gemini-3.5-flash-lite',
       'openrouter:minimax/minimax-m3:free',
+      'gemini:gemini-3.5-flash-lite',
     ])
   })
 
@@ -80,14 +85,17 @@ describe('modelChain ordering', () => {
     process.env.GEMINI_API_KEY = 'k'
     process.env.GEMINI_MODEL = 'gemini-3.5-flash-lite'
     process.env.OPENROUTER_API_KEY = 'sk-or-test'
-    expect(gateSlot()?.name).toBe('gemini:gemini-3.5-flash-lite')
+    expect(gateSlot()?.name).toBe('openrouter:~deepseek/deepseek-flash-latest')
   })
 
-  it('promotes Gemini to first when there is no local endpoint', () => {
+  it('promotes OpenRouter to first when there is no local endpoint, with Gemini behind it', () => {
     process.env.GEMINI_API_KEY = 'k'
     process.env.GEMINI_MODEL = 'gemini-3.5-flash-lite'
     process.env.OPENROUTER_API_KEY = 'sk-or-test'
-    expect(modelChain()[0].name).toBe('gemini:gemini-3.5-flash-lite')
+    expect(modelChain().map((s) => s.name)).toEqual([
+      'openrouter:~deepseek/deepseek-flash-latest',
+      'gemini:gemini-3.5-flash-lite',
+    ])
   })
 })
 

@@ -53,7 +53,7 @@ export function localSlots(): ModelSlot[] {
   })
 }
 
-/** Tier 2: Gemini through its OpenAI-compatible surface. Generous free quota. */
+/** Tier 3: Gemini through its OpenAI-compatible surface. Generous free quota, so it covers for the rest. */
 export function geminiSlots(): ModelSlot[] {
   return slots({
     label: 'gemini',
@@ -63,13 +63,13 @@ export function geminiSlots(): ModelSlot[] {
   })
 }
 
-/** Tier 3: OpenRouter, the widest catalogue and the last resort. */
+/** Tier 2: OpenRouter, the widest catalogue, and stronger models than Gemini's free ones. */
 export function openrouterSlots(): ModelSlot[] {
   return slots({
     label: 'openrouter',
     baseURL: OPENROUTER_BASE_URL,
     apiKey: process.env.OPENROUTER_API_KEY ?? '',
-    models: modelList(process.env.OPENROUTER_MODEL, 'minimax/minimax-m2.7:free'),
+    models: modelList(process.env.OPENROUTER_MODEL, '~deepseek/deepseek-flash-latest'),
     headers: {
       'HTTP-Referer': process.env.APP_URL ?? 'https://github.com/logan-han/hearth',
       'X-Title': 'Hearth',
@@ -85,8 +85,11 @@ export const TIERS: { name: TierName; label: string; slots: () => ModelSlot[] }[
   { name: 'openrouter', label: 'OpenRouter', slots: openrouterSlots },
 ]
 
-/** Self-hosted first by default: it is the only one that keeps data at home. */
-const DEFAULT_ORDER: TierName[] = ['self-hosted', 'gemini', 'openrouter']
+/**
+ * Self-hosted first by default: it is the only one that keeps data at home.
+ * Then OpenRouter, for the better answers, with Gemini's free quota behind it.
+ */
+const DEFAULT_ORDER: TierName[] = ['self-hosted', 'openrouter', 'gemini']
 
 /**
  * Which providers to try, in order. `LLM_ORDER` overrides the default; any tier

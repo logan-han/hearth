@@ -30,6 +30,8 @@ beforeEach(async () => {
   process.env.GEMINI_MODEL = 'gemini-3.5-flash-lite'
   process.env.OPENROUTER_API_KEY = 'sk-or'
   process.env.OPENROUTER_MODEL = 'minimax/minimax-m3:free'
+  // The fallback cases fail Gemini first and hand on to OpenRouter.
+  process.env.LLM_ORDER = 'gemini,openrouter'
   delete process.env.LLM_BASE_URL
   client = (await freshDb()).client
 })

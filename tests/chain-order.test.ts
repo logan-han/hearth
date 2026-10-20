@@ -9,8 +9,8 @@ beforeEach(() => {
 })
 
 describe('tierOrder', () => {
-  it('puts the self-hosted tier first by default, being the only private one', () => {
-    expect(tierOrder()).toEqual(['self-hosted', 'gemini', 'openrouter'])
+  it('puts the self-hosted tier first by default, being the only private one, then OpenRouter ahead of Gemini', () => {
+    expect(tierOrder()).toEqual(['self-hosted', 'openrouter', 'gemini'])
   })
 
   it('honours an explicit order', () => {
@@ -41,7 +41,7 @@ describe('tierOrder', () => {
 
   it('falls back to the default when the value is empty', () => {
     process.env.LLM_ORDER = '   '
-    expect(tierOrder()).toEqual(['self-hosted', 'gemini', 'openrouter'])
+    expect(tierOrder()).toEqual(['self-hosted', 'openrouter', 'gemini'])
   })
 })
 

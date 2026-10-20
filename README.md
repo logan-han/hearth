@@ -9,8 +9,9 @@ with web search, reads and writes each member's own email and calendar (Google a
 Microsoft), publishes a shared family calendar everyone can subscribe to, and runs
 reminders on a schedule.
 
-Built to run entirely on free tiers: Vercel Hobby, Neon Postgres, Upstash QStash,
-Tavily, and a local-first OpenAI-compatible LLM with OpenRouter as a fallback.
+Built to run on free tiers (Vercel Hobby, Neon Postgres, Upstash QStash, Tavily)
+and a local-first OpenAI-compatible LLM, with OpenRouter and then Gemini's free
+quota behind it.
 
 - [How it fits together](#how-it-fits-together)
 - [Layout](#layout)
@@ -106,7 +107,7 @@ admin told the first time the cap holds something back.
 | `lib/handler.ts` | Update parsing, allowlist, commands, reply routing |
 | `lib/watchers.ts` | The ready-made watchers: schedule, phrasing rules, context tools |
 | `lib/builtins.ts` | Installs the built-in watchers in every household group and keeps them in step with their definitions |
-| `lib/model.ts` | Tiered model chain: local, Gemini, OpenRouter |
+| `lib/model.ts` | Tiered model chain: local, OpenRouter, Gemini |
 | `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations |
 | `lib/tools/router.ts` | Which tool groups a chat turn sees, and the `more_tools` escape hatch |
 | `app/api/mcp/route.ts` | The same tools over MCP, behind a per-member key |
@@ -232,11 +233,13 @@ AADSTS code.
 Three tiers, tried in order, each dropping out when unconfigured. The order is
 `LLM_ORDER` and is editable from **Settings** by moving tiers up and down, so
 the thing you read is the thing you change. Self-hosted leads by default, being
-the only tier where nothing leaves the house.
+the only tier where nothing leaves the house. OpenRouter comes next, for the
+better answers, and Gemini's free quota covers for it. An order saved in
+Settings stays as saved; the default only applies where none was.
 
 1. `LLM_BASE_URL` + `LLM_MODEL` — a self-hosted OpenAI-compatible endpoint
-2. `GEMINI_API_KEY` + `GEMINI_MODEL`
-3. `OPENROUTER_API_KEY` + `OPENROUTER_MODEL`
+2. `OPENROUTER_API_KEY` + `OPENROUTER_MODEL`
+3. `GEMINI_API_KEY` + `GEMINI_MODEL`
 
 Models are picked from what each provider actually serves rather than typed by
 hand, and only tool-capable ones are offered, because a model that cannot drive
@@ -245,8 +248,12 @@ promoting a candidate, probe it with a real tool call and a typed choice, the
 two things every slot has to do:
 
 ```bash
-npm run probe -- openrouter minimax/minimax-m3
+npm run probe -- openrouter '~deepseek/deepseek-flash-latest'
 ```
+
+An id starting with `~` is OpenRouter's alias for a family's newest model, so
+the next DeepSeek Flash takes over without an edit. Quote it, or the shell
+reads the `~` as a home directory.
 
 It takes the provider's key from `.env.local`, or, when that holds the
 database URL and `TOKEN_ENC_KEY`, from the dashboard's store, so a key entered
@@ -386,11 +393,9 @@ the bot shows what it found and waits for someone to say yes. Nothing the bot
 merely *found* reaches the shared calendar on its own, which is the same rule
 that governs outbound email.
 
-Only some models can read images. Gemini and MiniMax M3 (free or paid) can;
+Only some models can read images. Gemini, DeepSeek Flash and MiniMax M3 can;
 the older `minimax-m2.7` cannot, and fails with a clear error the fallback
-simply steps past, which is one reason the paid tail in `.env.example` is
-`minimax/minimax-m3` rather than m2.7: same price, newer, and it reads what the
-free head reads. Attachments that cannot be fetched or are of a type no model
+simply steps past. Attachments that cannot be fetched or are of a type no model
 reads are dropped, and the bot answers on the text alone. Nothing is fetched
 until the bot is answering, so a stranger's file or a group photo nobody asked
 about costs no download, and a file that declares a type no model reads is
@@ -997,8 +1002,8 @@ or *Somewhat grounded* is the next case for `evals/`.
 tool results, and scores the replies two ways: deterministic checks (every
 dollar figure appears in what the tools returned, no trip read into a payee
 string, no working shown, the right tool called) and an LLM judge for
-groundedness and usefulness. The judge defaults to the paid OpenRouter slot so
-it is not from the family under test; `EVAL_JUDGE_MODEL=provider:model`
+groundedness and usefulness. The judge defaults to the last Gemini slot so it
+is not from the family under test; `EVAL_JUDGE_MODEL=provider:model`
 overrides it. Judge scores are reported and only fail the run with
 `EVAL_STRICT=1`. The cases in `evals/` are the failures the family has actually
 seen; when a new one turns up, it belongs there before the prompt is touched.

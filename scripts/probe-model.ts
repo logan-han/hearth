@@ -1,7 +1,7 @@
 /**
  * Probe a model with a real tool call before putting it in the chain.
  *
- *   npm run probe -- openrouter minimax/minimax-m3
+ *   npm run probe -- openrouter '~deepseek/deepseek-flash-latest'
  *   npm run probe -- gemini gemini-3.5-flash-lite
  *   npm run probe -- self-hosted qwen3
  *
