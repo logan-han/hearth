@@ -445,7 +445,10 @@ worth saying**:
 
 - **Morning brief**, daily at 7am: what is on today, on the family calendar
   and on each member's own (Google or Outlook), and what starts tomorrow, so
-  tonight's preparation is no surprise; the mail that has arrived since the
+  tonight's preparation is no surprise; what is coming up over the rest of the
+  fortnight, from the family calendar, each member's calendar, the reminders
+  set for those days and the board's due dates, so next Monday and this Friday
+  are in view from any day of the week; the mail that has arrived since the
   last brief and is worth knowing about (appointments, notices, bills,
   deliveries), sorted into what still asks for something and what only
   informs (mail written to someone else, with the household only copied in,
@@ -460,8 +463,10 @@ worth saying**:
   the last brief, up to 20 a mailbox, and says how many more there were
   rather than dropping them without a word. "Today" means anything on during
   the day, so the third day of a camp is on it too; tomorrow is only what
-  starts then. A day with nothing on anyone's calendar, no new mail and
-  nothing due gets no brief: the weather, tomorrow, a reminder that will
+  starts then, and coming up is what starts after it, to the end of the
+  fortnight counting today. A day with nothing on anyone's calendar, nothing
+  coming up, no new mail and nothing due gets no brief: the weather, tomorrow,
+  a reminder that will
   speak for itself and a proposal Home already lists are context for a
   brief, never the reason for one.
 - **Money snapshot**, Sunday at 6pm: the week's spending and the month so far

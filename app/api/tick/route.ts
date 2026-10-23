@@ -7,7 +7,7 @@ import {
   messagesSince, getSetting, setSetting, retireStaleProposals, recordTick,
   unaskedQuestions, markQuestionsAsked, memberByTelegramId, setAutomationEnabled, moveChat, listAutomations,
 } from '@/lib/db/queries'
-import { localDateKey, tzOffsetMs, nextRun, formatLocal, formatLocalDate, formatLocalTime, localToUtc, dayAfter, clockLine } from '@/lib/cron'
+import { localDateKey, tzOffsetMs, nextRun, formatLocal, formatLocalDate, formatLocalTime, localToUtc, dayAfter, daysAfter, clockLine } from '@/lib/cron'
 import { retryTickAt } from '@/lib/scheduler'
 import { timezone, idSet } from '@/lib/env'
 import { db, schema } from '@/lib/db'
@@ -90,10 +90,8 @@ const isSkipLine = (line: string) => /^skip[.!]*$/i.test(line.trim())
 /** A marked failure, and nothing else, is what earns an admin a DM. */
 const isProblemLine = (line: string) => /^\**\s*problem\s*\**\s*:/i.test(line.trim())
 
-/** Enough of a held-back draft for an admin to judge the call by, not the whole post. */
-const HELD_DRAFT_CHARS = 600
-const heldBack = (a: Automation, why: string, draft: string) =>
-  `Watcher **${a.label}** was held back: ${why}\n\nDraft:\n${draft.length > HELD_DRAFT_CHARS ? `${draft.slice(0, HELD_DRAFT_CHARS)}…` : draft}`
+/** The whole held-back draft, so an admin judges the call on all of what was held, not a cut-off part of it. */
+const heldBack = (a: Automation, why: string, draft: string) => `Watcher **${a.label}** was held back: ${why}\n\nDraft:\n${draft}`
 
 /**
  * The nightly memory pass: relying on the chat-turn model to file memories
@@ -168,41 +166,62 @@ function startDay(e: Record<string, unknown>): string | null {
 }
 
 /**
- * The calendars read for today and tomorrow in one look, split: an account's
- * events that start on `next` are its tomorrow, and the rest are on today,
- * whatever began earlier and runs on included. An account that answered with
- * an error is kept as it came, so the brief sees that it could not be read.
+ * How far past today the brief looks, in days: to the end of the fortnight,
+ * today included, so next Monday and this Friday are in view on any day of
+ * the week.
  */
-function splitCalendars(r: Record<string, unknown>, next: string) {
+const LOOK_AHEAD_DAYS = 13
+
+/**
+ * The calendars read for the look-ahead in one look, split by when each event
+ * starts: an account's events that began by `day` are today's, whatever began
+ * earlier and runs on included; those that start on `next` are its tomorrow;
+ * and the rest of the fortnight is coming. An account that answered with an
+ * error is kept as it came, so the brief sees that it could not be read.
+ */
+function splitCalendars(r: Record<string, unknown>, day: string, next: string) {
   const accounts = Array.isArray(r.accounts) ? (r.accounts as Record<string, unknown>[]) : []
   const today: Record<string, unknown>[] = []
   const tomorrow: Record<string, unknown>[] = []
+  const coming: Record<string, unknown>[] = []
   let onToday = 0
+  let comingCount = 0
   for (const acct of accounts) {
     if (!Array.isArray(acct.events)) {
       today.push(acct)
       continue
     }
     const events = acct.events as Record<string, unknown>[]
-    const starting = events.filter((e) => startDay(e) === next)
-    const on = events.filter((e) => startDay(e) !== next)
+    // An event with no readable start counts as today, as it always has.
+    const startsOn = (e: Record<string, unknown>) => startDay(e) ?? day
+    const on = events.filter((e) => startsOn(e) <= day)
+    const starting = events.filter((e) => startsOn(e) === next)
+    const later = events.filter((e) => startsOn(e) > next)
     onToday += on.length
+    comingCount += later.length
     today.push({ ...acct, events: on })
     if (starting.length) tomorrow.push({ ...acct, events: starting })
+    if (later.length) coming.push({ ...acct, events: later })
   }
-  return { accounts, today, tomorrow, onToday }
+  return { accounts, today, tomorrow, coming, onToday, comingCount }
 }
 
+type Reminder = { label: string; at: string; date: string }
+
 /**
- * The reminders a member set in this chat that go off later today, for the
- * brief to mention. The ready-made watchers have a kind and speak for
+ * The reminders a member set in this chat that go off from now to `last`, for
+ * the brief to mention: today's by time, the rest of the fortnight's by day
+ * and time as well. The ready-made watchers have a kind and speak for
  * themselves; a member's own instruction has none.
  */
-async function remindersOn(chatId: string, now: Date): Promise<{ label: string; at: string }[]> {
+async function remindersBetween(chatId: string, now: Date, last: string): Promise<Reminder[]> {
   const day = localDateKey(now)
   return (await listAutomations(chatId))
-    .filter((r) => r.enabled && r.kind === null && r.nextRunAt > now && localDateKey(r.nextRunAt) === day)
-    .map((r) => ({ label: r.label, at: formatLocalTime(r.nextRunAt) }))
+    .filter((r) => r.enabled && r.kind === null && r.nextRunAt > now && localDateKey(r.nextRunAt) <= last)
+    .map((r) => {
+      const date = localDateKey(r.nextRunAt)
+      return { label: r.label, at: date === day ? formatLocalTime(r.nextRunAt) : formatLocal(r.nextRunAt), date }
+    })
 }
 
 type Fetched = {
@@ -225,6 +244,8 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
     case 'morning': {
       const day = localDateKey(ctx.now)
       const next = dayAfter(day)
+      const after = dayAfter(next)
+      const horizon = daysAfter(day, LOOK_AHEAD_DAYS)
       const everyone = isGroupChat(a.chatId)
       // In a group the brief sweeps the mailbox and the calendar of every
       // member Telegram says is in the room, each mailbox on its own cursor;
@@ -232,12 +253,14 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
       // picks up where the retired inbox sweep left off.
       // The nightly pass asks rather than guesses; the brief is where its
       // questions reach the family, once each. Home carries them after that.
-      const [events, tomorrowEvents, calendars, mail, board, weather, questions, proposals, reminders] = await Promise.all([
+      const [events, tomorrowEvents, comingEvents, calendars, mail, board, weather, questions, proposals, reminders] = await Promise.all([
         // The whole day, and anything on during it: day three of a camp is news too.
         runTool(tools, 'list_family_events', { from: day, to: day, include_cancelled: false }),
         runTool(tools, 'list_family_events', { from: next, to: next, include_cancelled: false }),
-        // Both days in one look, split below, so Telegram is asked who is in the room once.
-        runTool(tools, 'list_calendar', { from: day, to: next, everyone }),
+        // The rest of the fortnight, so next Monday and this Friday are in view from any day of the week.
+        runTool(tools, 'list_family_events', { from: after, to: horizon, include_cancelled: false }),
+        // Today to the end of the fortnight in one look, split below, so Telegram is asked who is in the room once.
+        runTool(tools, 'list_calendar', { from: day, to: horizon, everyone }),
         // A day's mail, not an hour's: the brief runs once a morning. What
         // does not fit is counted in the brief rather than dropped.
         runTool(tools, 'new_mail', { limit: 20, everyone }),
@@ -246,15 +269,17 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
         everyone ? unaskedQuestions().catch(() => []) : Promise.resolve([]),
         // Context for the brief, never the reason for one: a lookup that fails leaves it out.
         runTool(tools, 'list_event_proposals', {}).catch((): Record<string, unknown> => ({})),
-        remindersOn(a.chatId, ctx.now).catch(() => []),
+        remindersBetween(a.chatId, ctx.now, horizon).catch((): Reminder[] => []),
       ])
       const eventsErr = errorOf(events)
       if (eventsErr) problems.push(`list_family_events: ${eventsErr}`)
       const tomorrowErr = errorOf(tomorrowEvents)
       if (tomorrowErr && tomorrowErr !== eventsErr) problems.push(`list_family_events (tomorrow): ${tomorrowErr}`)
+      const comingErr = errorOf(comingEvents)
+      if (comingErr && comingErr !== eventsErr && comingErr !== tomorrowErr) problems.push(`list_family_events (coming): ${comingErr}`)
       const calendarsErr = errorOf(calendars)
       if (calendarsErr && !isUnlinked(calendarsErr)) problems.push(`list_calendar: ${calendarsErr}`)
-      const days = splitCalendars(calendars, next)
+      const days = splitCalendars(calendars, day, next)
       for (const acct of days.accounts) {
         const e = errorOf(acct)
         if (e) problems.push(`list_calendar (${String(acct.calendar ?? acct.provider)}): ${e}`)
@@ -275,12 +300,23 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
       const todays = Array.isArray(events.events) ? (events.events as Record<string, unknown>[]) : []
       // Tomorrow is what starts then: a camp on both days is already under today.
       const onToday = new Set(todays.map((e) => e.id))
-      const startsTomorrow = (Array.isArray(tomorrowEvents.events) ? (tomorrowEvents.events as Record<string, unknown>[]) : []).filter(
-        (e) => !onToday.has(e.id),
+      const tomorrowAll = Array.isArray(tomorrowEvents.events) ? (tomorrowEvents.events as Record<string, unknown>[]) : []
+      const startsTomorrow = tomorrowAll.filter((e) => !onToday.has(e.id))
+      // Listed once, under the first day it is on: a camp already under today or tomorrow is not repeated under coming.
+      const listed = new Set([...onToday, ...tomorrowAll.map((e) => e.id)])
+      const comingFamily = (Array.isArray(comingEvents.events) ? (comingEvents.events as Record<string, unknown>[]) : []).filter(
+        (e) => !listed.has(e.id),
       )
       const overdue = Array.isArray(board.overdue) ? board.overdue : []
       const dueToday = Array.isArray(board.due_today) ? board.due_today : []
       const waiting = Array.isArray(proposals.proposals) ? proposals.proposals : []
+      // The board's next due dates, soonest first, kept to the fortnight from tomorrow on.
+      const dueNext = Array.isArray(board.due_next) ? (board.due_next as { due?: string }[]) : []
+      const dueSoon = dueNext.filter((i) => i.due !== undefined && i.due >= next && i.due <= horizon)
+      const todaysReminders = reminders.filter((r) => r.date === day).map(({ label, at }) => ({ label, at }))
+      const laterReminders = reminders.filter((r) => r.date !== day).map(({ label, at }) => ({ label, at }))
+      // Coming is a reason to post, as a due date is; a reminder speaks for itself when it goes off, so on its own it only rides along.
+      const ahead = comingFamily.length + days.comingCount + dueSoon.length
       const data: Record<string, unknown> = { events }
       if (!calendarsErr) data.calendars = { ...calendars, accounts: days.today }
       if (startsTomorrow.length || days.tomorrow.length) {
@@ -291,19 +327,36 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
         }
       }
       if (!mailErr) data.mail = mail
-      if (!errorOf(board)) data.board = board
-      if (reminders.length) data.reminders = reminders
+      // The board's due dates within the fortnight are under coming, so its own list of next dues is left out here.
+      if (!errorOf(board)) data.board = { ...board, due_next: undefined }
+      if (todaysReminders.length) data.reminders = todaysReminders
+      if (ahead || laterReminders.length) {
+        data.coming = {
+          through: formatLocalDate(localToUtc(horizon)),
+          ...(comingFamily.length ? { events: comingFamily } : {}),
+          ...(days.coming.length ? { calendars: days.coming } : {}),
+          ...(dueSoon.length ? { board: dueSoon } : {}),
+          ...(laterReminders.length ? { reminders: laterReminders } : {}),
+        }
+      }
       if (waiting.length) data.proposals = waiting
       if (!errorOf(weather)) data.weather = weather
       if (questions.length) data.questions = questions.map((qn) => ({ id: qn.id, question: qn.question }))
-      // A day with nothing on anyone's calendar, no new mail, nothing due and
-      // nothing to ask gets no brief. The weather, tomorrow, a reminder that
-      // will speak for itself and a proposal Home already lists are context
-      // for a brief, not news to wake the household for.
+      // A day with nothing on anyone's calendar, nothing coming up in the
+      // fortnight, no new mail, nothing due and nothing to ask gets no brief.
+      // The weather, tomorrow, a reminder that will speak for itself and a
+      // proposal Home already lists are context for a brief, not news to wake
+      // the household for.
       return {
         data,
         empty:
-          todays.length === 0 && days.onToday === 0 && arrived === 0 && overdue.length === 0 && dueToday.length === 0 && questions.length === 0,
+          todays.length === 0 &&
+          days.onToday === 0 &&
+          arrived === 0 &&
+          overdue.length === 0 &&
+          dueToday.length === 0 &&
+          questions.length === 0 &&
+          ahead === 0,
         problems,
         asked: questions.map((qn) => qn.id),
       }

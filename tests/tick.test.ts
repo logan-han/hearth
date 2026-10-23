@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Automation } from '@/lib/db/schema'
-import { dayAfter, localToUtc } from '@/lib/cron'
+import { dayAfter, daysAfter, localToUtc } from '@/lib/cron'
 
 const dueAutomations = vi.fn<(now: Date) => Promise<Automation[]>>()
 const claimAutomation = vi.fn<(id: number, expected: Date, next: Date | null) => Promise<boolean>>()
@@ -1583,7 +1583,7 @@ describe('ready-made watchers', () => {
     const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Melbourne' }).format(new Date())
     expect(listEvents).toHaveBeenCalledWith(expect.objectContaining({ from: day, to: day }), expect.anything())
     expect(newMail).toHaveBeenCalledWith(expect.objectContaining({ limit: 20 }), expect.anything())
-    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ maxOutputTokens: 2400 }))
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ maxOutputTokens: 3200 }))
   })
 
   it('sweeps every mailbox into the brief from a group and only the owner\'s from a DM', async () => {
@@ -1713,13 +1713,15 @@ describe('ready-made watchers', () => {
   /** Today as the household's calendar has it, the way the route reads it. */
   const todayKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Melbourne' }).format(new Date())
 
-  it("reads every present member's own calendar into the group brief and only the owner's into a DM, both days in one look", async () => {
+  it("reads every present member's own calendar into the group brief and only the owner's into a DM, the fortnight in one look", async () => {
     dueAutomations.mockResolvedValue([brief({ id: 1, chatId: '-100999' }), brief({ id: 2, chatId: '111' })])
     await authed()
     const day = todayKey()
-    expect(listCalendar).toHaveBeenNthCalledWith(1, expect.objectContaining({ from: day, to: dayAfter(day), everyone: true }), expect.anything())
-    expect(listCalendar).toHaveBeenNthCalledWith(2, expect.objectContaining({ from: day, to: dayAfter(day), everyone: false }), expect.anything())
+    const horizon = daysAfter(day, 13)
+    expect(listCalendar).toHaveBeenNthCalledWith(1, expect.objectContaining({ from: day, to: horizon, everyone: true }), expect.anything())
+    expect(listCalendar).toHaveBeenNthCalledWith(2, expect.objectContaining({ from: day, to: horizon, everyone: false }), expect.anything())
     expect(listEvents).toHaveBeenCalledWith(expect.objectContaining({ from: dayAfter(day), to: dayAfter(day) }), expect.anything())
+    expect(listEvents).toHaveBeenCalledWith(expect.objectContaining({ from: dayAfter(dayAfter(day)), to: horizon }), expect.anything())
     expect(runAgent).not.toHaveBeenCalled()
   })
 
@@ -1765,6 +1767,34 @@ describe('ready-made watchers', () => {
     expect(call.text.indexOf('Piano')).toBeLessThan(call.text.indexOf('tomorrow:'))
   })
 
+  it('looks ahead through the fortnight, so what is coming is in the brief, and a quiet day with something coming still gets one', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    const day = todayKey()
+    const after = dayAfter(dayAfter(day))
+    listEvents.mockImplementation(async ({ from }: { from: string }) =>
+      from === after ? { events: [{ id: 11, title: 'Swimming carnival', start_local: 'Fri 30 Oct 2026, 9:00 am' }] } : { events: [] },
+    )
+    listCalendar.mockResolvedValue({ accounts: [{ member: 'Sam', calendar: "Sam's Google Calendar", provider: 'google', events: [
+      { id: 'c1', title: 'Dentist', start: `${daysAfter(day, 6)}T09:00:00+11:00`, end: '', allDay: false, start_local: 'Sun 1 Nov, 9:00 am', end_local: '' },
+    ] }] })
+    boardSummary.mockResolvedValue({
+      open: 3,
+      overdue: [],
+      due_today: [],
+      due_next: [
+        { key: 'HH-7', summary: 'Renew passports', due: daysAfter(day, 6) },
+        { key: 'HH-9', summary: 'Book the vet', due: daysAfter(day, 14) },
+      ],
+    })
+    listAutomations.mockResolvedValue([automation({ id: 4, label: 'pick up the cake', kind: null, nextRunAt: localToUtc(`${daysAfter(day, 6)}T10:30`), enabled: true })])
+    await authed()
+    const call = runAgent.mock.calls[0][0] as { text: string }
+    expect(call.text).toContain('coming:')
+    expect(call.text).toContain('through:')
+    for (const title of ['Swimming carnival', 'Dentist', 'Renew passports', 'pick up the cake']) expect(call.text).toContain(title)
+    expect(call.text).not.toContain('Book the vet')
+  })
+
   it('lists a family event that runs over both days under today only', async () => {
     dueAutomations.mockResolvedValue([brief()])
     listEvents.mockResolvedValue({ events: [{ id: 9, title: 'School camp', start_local: 'Tue, 13 Oct 2026', end_local: 'Thu, 15 Oct 2026', all_day: true }] })
@@ -1802,7 +1832,10 @@ describe('ready-made watchers', () => {
     expect(call.text).toContain('reminders:')
     expect(call.text).toContain('label: bins out')
     expect(call.text).toContain('at: 11:59 pm')
-    for (const left of ['paused one', 'Money snapshot', 'next week']) expect(call.text).not.toContain(left)
+    // A reminder a week out is under coming, with its day, and still does not wake the household alone.
+    expect(call.text).toContain('coming:')
+    expect(call.text).toContain('label: next week')
+    for (const left of ['paused one', 'Money snapshot']) expect(call.text).not.toContain(left)
     expect(call.text).toContain('proposals:')
     expect(call.text).toContain('Athletics carnival')
   })
@@ -1941,14 +1974,13 @@ describe('the corners of a run', () => {
     expect(runAgent).not.toHaveBeenCalled()
   })
 
-  it('cuts a long held-back draft short in the admin DM', async () => {
+  it('sends a long held-back draft to the admin DM whole, so the admin judges all of it', async () => {
     dueAutomations.mockResolvedValue([automation()])
     runAgent.mockResolvedValue({ text: 'x'.repeat(700), notices: [], model: 'primary:test' })
     decideWatcherPost.mockResolvedValue({ decision: 'skip', confidence: 0.9, model: 'primary:test' })
     await authed()
     const text = String(send.mock.calls[0][1])
-    expect(text).toContain('x'.repeat(600) + '…')
-    expect(text).not.toContain('x'.repeat(601))
+    expect(text).toContain('x'.repeat(700))
   })
 
   it('copes with a tool that answers nothing at all', async () => {

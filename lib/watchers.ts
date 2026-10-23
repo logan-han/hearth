@@ -36,24 +36,27 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
     cron: '0 7 * * *',
     builtin: true,
     instruction: [
-      "Today's calendars (the family calendar under events, and each person's own under calendars), what starts tomorrow, the mail that has arrived since the last brief, the household board, the reminders set for today, the proposals waiting on a yes and the weather are under DATA. Post one short brief for the day in named parts, each a **bold** line with its bullets under it; leave out a part with nothing in it.",
+      "Today's calendars (the family calendar under events, and each person's own under calendars), what starts tomorrow, what is coming up over the fortnight (under coming), the mail that has arrived since the last brief, the household board, the reminders set for today, the proposals waiting on a yes and the weather are under DATA. Post one short brief for the day in named parts, each a **bold** line with its bullets under it; leave out a part with nothing in it.",
       '**Today**: what is on, from the family calendar and from each calendar under calendars, with its time and place as given, and a flag only where the data supports one: an early start, rain in the forecast.',
       '**Tomorrow**: what starts tomorrow, with its time as given, so the household can get ready tonight.',
+      '**Coming up**: the items under coming, up to the date given as through, one bullet each in date order: its day first, then its time and place as given, and for a board item its due date. Reminders are listed with their day and time. Say nothing about a date after through.',
       'Mail: first set aside what gets no bullet: newsletters and promotions, the mail with nothing in it to attend, book, pay or reply to; mail whose moment has passed by NOW, however recently it arrived: a collection, a booking or an event timed earlier than NOW, an order already delivered; and a request that is done, which is one a later email from the same sender answers: a thank-you for the response to that form, a receipt for that payment, a confirmation of that booking or reply. Look for that later email for every request before sorting, whichever of the two the list shows first; a done request gets no To do, only a Heads up line that it was done, if that. Then sort the rest into two parts.',
       '**To do**: mail asking the household for something still open, with no later email saying it was done: a payment, a signature, a reply, a form, a booking to make, an appointment or a deadline still ahead, whoever sent it and however many people it went to.',
       '**Heads up**: mail that only tells the household something worth knowing: an order or a connection confirmed, a delivery on its way, a change to an account or a service.',
       'Mail marked copied_in was written to the people under its to, with the household only copied in: whatever it asks, it asks of them, never of the household, so it is a Heads up at most.',
       'One bullet per email, in your own words: who sent it, whom it was to when it is marked copied_in, and what it says or asks, with every date, time, amount and place exactly as given. Never paste the subject line or put it in quotes. Open an email with read_email when its snippet is not enough. Propose any calendar-worthy date still ahead with propose_family_event.',
       'A mailbox with more_not_shown had more new mail than fits: end its mail with one line saying how many more arrived in it (with "at least" when more_not_shown_is_at_least is set), so nobody thinks they have seen it all.',
+      'A calendar marked truncated had more events in its range than fit: end its part with one line saying the rest is not shown.',
       '**Overdue**: anything overdue on the board, as given. **Due today**: anything on the board due today, as given.',
       '**Later today**: the reminders set to go off today, each with its time as given.',
       '**Waiting on a yes**: the proposals, as given; a yes here or on Home puts one on the family calendar.',
       'If DATA lists questions, end with "Not sure about:" and each question on its own line, worded as given, and say that anyone can answer here or on Home. Nothing under DATA answers them, so do not guess.',
     ].join(' '),
     tools: ['recall', 'read_email', 'propose_family_event', 'list_family_events'],
-    // A bullet an email across every mailbox, and the sections after the mail,
-    // with room for a thinking model's reasoning, which the budget also counts.
-    maxOutputTokens: 2400,
+    // A bullet an email across every mailbox, and the sections after the mail
+    // and the fortnight ahead, with room for a thinking model's reasoning,
+    // which the budget also counts.
+    maxOutputTokens: 3200,
   },
   snapshot: {
     kind: 'snapshot',

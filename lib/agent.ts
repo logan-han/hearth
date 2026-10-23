@@ -1190,7 +1190,14 @@ async function rewriteWithout(
           timeout: within(30_000, input.deadline),
           telemetry: callTelemetry('hearth.verify'),
         }),
-      ).then((r) => dropEmptiedHeadings(r.output.message.trim(), input.draft)),
+      ).then((r) => {
+        const message = dropEmptiedHeadings(r.output.message.trim(), input.draft)
+        // Statements the check passed are still in the post, so an empty rewrite
+        // is a model that misread the task, not a verdict that nothing is left
+        // worth posting: the next model in the chain is asked instead.
+        if (!message && input.supported.length > 0) throw new Error('the rewrite came back empty with supported statements still in the post')
+        return message
+      }),
     chain,
     'hearth.verify',
     input.deadline,

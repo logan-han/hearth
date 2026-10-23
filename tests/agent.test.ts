@@ -1616,6 +1616,36 @@ describe('reviewDraft', () => {
     expect(generateText).toHaveBeenCalledTimes(3)
   })
 
+  it('asks the next model when the rewrite comes back empty with statements still supported in the post', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText
+      .mockResolvedValueOnce(out({ claims: ['Swimming is at 9 on Friday', "Logan and Meg Treeby are Winter's parents"] }))
+      .mockResolvedValueOnce(out({ supported: true }))
+      .mockResolvedValueOnce(out({ supported: false }))
+      .mockResolvedValueOnce(out({ message: '' }))
+      .mockResolvedValueOnce(out({ message: 'Swimming is at 9 on Friday.' }))
+    const r = await reviewDraft({
+      label: 'Morning brief',
+      draft: "**Coming up**\n- Fri 30 Oct: swimming at 9 am.\n\n**Not sure about:**\nAre Logan and Meg Treeby Winter's parents?",
+      evidence: 'DATA ...',
+    })
+    expect(r.unsupported).toEqual(["Logan and Meg Treeby are Winter's parents"])
+    expect(r.message).toBe('Swimming is at 9 on Friday.')
+    expect(generateText).toHaveBeenCalledTimes(5)
+  })
+
+  it('reports a rewrite that stays empty on every model as failed, not as nothing worth posting, while statements are still supported', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText
+      .mockResolvedValueOnce(out({ claims: ['Swimming is at 9 on Friday', 'a trip to Lisbon was booked'] }))
+      .mockResolvedValueOnce(out({ supported: true }))
+      .mockResolvedValueOnce(out({ supported: false }))
+      .mockResolvedValueOnce(out({ message: '' }))
+      .mockResolvedValueOnce(out({ message: '' }))
+    const r = await reviewDraft({ label: 'x', draft: 'Swimming is at 9 on Friday. Looks like a trip to Lisbon!', evidence: 'DATA ...' })
+    expect(r).toMatchObject({ unsupported: ['a trip to Lisbon was booked'], message: null, rewriteFailed: expect.stringMatching(/came back empty/) })
+  })
+
   it('hands back what failed, not a throw, when the rewrite cannot finish', async () => {
     generateText
       .mockResolvedValueOnce(out({ claims: ['$389.60 to FARESAVER', 'a trip to Lisbon was booked'] }))
