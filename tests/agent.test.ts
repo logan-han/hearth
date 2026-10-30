@@ -122,6 +122,33 @@ describe('systemPrompt', () => {
   })
 })
 
+describe('systemPrompt with a name and manner of its own', () => {
+  const base = { memberName: 'Rowan', now: new Date('2026-08-27T00:00:00Z'), context: '' }
+  afterEach(() => {
+    delete process.env.ASSISTANT_NAME
+    delete process.env.ASSISTANT_PERSONA
+  })
+
+  it('is Hearth, plainly, until the household says otherwise', () => {
+    const p = systemPrompt({ ...base, chatType: 'group' })
+    expect(p).toContain('You are Hearth, the household assistant')
+    expect(p).not.toMatch(/^VOICE:/m)
+  })
+
+  it('goes by the name chosen, and talks in the manner chosen in the chat alone', () => {
+    process.env.ASSISTANT_NAME = 'Pip'
+    process.env.ASSISTANT_PERSONA = 'warm and brief, with a dry sense of humour'
+    const chat = systemPrompt({ ...base, chatType: 'group' })
+    expect(chat).toContain('You are Pip, the household assistant')
+    expect(chat).toContain('VOICE: warm and brief, with a dry sense of humour. That is how you sound, never what you say')
+    for (const mode of ['watcher', 'sweep'] as const) {
+      const p = systemPrompt({ ...base, mode, chatType: 'group' })
+      expect(p).toContain('You are Pip')
+      expect(p).not.toMatch(/^VOICE:/m)
+    }
+  })
+})
+
 describe('systemPrompt money rules', () => {
   const base = { memberName: 'Rowan', now: new Date('2026-08-27T00:00:00Z'), context: '' }
 

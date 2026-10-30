@@ -26,10 +26,19 @@ const ADDRESS = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/
 /** A mailbox as the family names it, owner first. The provider is an id for read_email, not a name. */
 const mailboxName = (owner: string, provider: Provider) => `${owner}'s ${providerConfig(provider).mailbox}`
 
-async function linkedProviders(memberId: number): Promise<Provider[]> {
+/** The accounts a member linked, and which of them they linked to be read only. */
+async function linkedProviders(memberId: number): Promise<{ all: Provider[]; writable: Provider[] }> {
   const conns = await connectionsFor(memberId)
-  return conns.map((c) => c.provider as Provider)
+  return {
+    all: conns.map((c) => c.provider as Provider),
+    writable: conns.filter((c) => !c.readOnly).map((c) => c.provider as Provider),
+  }
 }
+
+/** Why nothing can be written from an account its owner linked to be read only, and how they would allow it. */
+export const readOnlyRefusal = (provider: Provider) =>
+  `Your ${providerConfig(provider).label} account is linked read-only, so nothing is drafted, sent or put on its calendar through it. ` +
+  `Send /readonly ${provider} off to allow it again.`
 
 /**
  * Whose mailbox a tool reads: the asker's, or a named family member's when
@@ -255,8 +264,11 @@ export function mailTools(ctx: ToolContext) {
           return { error: `"${notAddress}" is not an email address. Give each recipient as a bare address, like name@example.com.` }
         }
         const linked = await linkedProviders(member.id)
-        if (linked.length === 0) return { error: 'No email account linked. Send /connect to link one.' }
-        const from = provider && linked.includes(provider) ? provider : linked[0]
+        if (linked.all.length === 0) return { error: 'No email account linked. Send /connect to link one.' }
+        // An account its owner linked to be read only is never written from, and is not swapped for another unasked.
+        if (provider && linked.all.includes(provider) && !linked.writable.includes(provider)) return { error: readOnlyRefusal(provider) }
+        if (linked.writable.length === 0) return { error: readOnlyRefusal(linked.all[0]) }
+        const from = provider && linked.writable.includes(provider) ? provider : linked.writable[0]
 
         // A new draft to the same people is a revision: supersede the old one,
         // or every rewrite leaves another "pending" behind and "send it" has a
@@ -312,6 +324,10 @@ export function mailTools(ctx: ToolContext) {
           return { error: 'Only the member who drafted this email can send it.' }
         }
         if (draft.status !== 'pending') return { error: `Draft ${draft_id} is already ${draft.status}.` }
+        // Made read-only since the draft was written, the account sends nothing.
+        if ((await connectionsFor(member.id)).some((c) => c.provider === draft.provider && c.readOnly)) {
+          return { error: readOnlyRefusal(draft.provider as Provider) }
+        }
         if (ctx.draftedThisTurn?.has(draft_id)) {
           return {
             error:

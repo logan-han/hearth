@@ -42,6 +42,8 @@ export const BOT_COMMANDS = [
   { command: 'connect', description: 'Link your Google or Microsoft account' },
   { command: 'accounts', description: 'See and unlink your linked accounts' },
   { command: 'calendar', description: 'The family calendar subscription link' },
+  { command: 'pending', description: 'Everything here waiting on a yes' },
+  { command: 'activity', description: 'What I have changed here lately, and for whom' },
   { command: 'whoami', description: 'Your Telegram id' },
   { command: 'members', description: 'Who I answer to' },
   { command: 'help', description: 'Everything I can do' },

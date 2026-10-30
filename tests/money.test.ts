@@ -43,14 +43,14 @@ describe('configuration', () => {
   it('says so rather than throwing when PocketSmith is not configured', async () => {
     delete process.env.POCKETSMITH_DEVELOPER_KEY
     expect(ps.pocketsmithConfigured()).toBe(false)
-    for (const name of ['list_bank_accounts', 'list_transactions', 'spending_summary', 'budget_summary']) {
+    for (const name of ['list_bank_accounts', 'list_transactions', 'spending_summary', 'budget_summary', 'recurring_payments']) {
       expect(String((await call(name, {})).error)).toBe('PocketSmith is not configured.')
     }
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('has no tool left for a feed it no longer reads', () => {
-    expect(Object.keys(moneyTools(ctx)).sort()).toEqual(['budget_summary', 'list_bank_accounts', 'list_transactions', 'spending_summary'])
+    expect(Object.keys(moneyTools(ctx)).sort()).toEqual(['budget_summary', 'list_bank_accounts', 'list_transactions', 'recurring_payments', 'spending_summary'])
   })
 })
 

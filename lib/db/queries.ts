@@ -2,9 +2,10 @@ import { and, asc, desc, eq, gte, inArray, lte, lt, ne, or, sql, isNull, gt, exi
 import { db } from './index'
 import {
   members, chats, connections, messages, familyEvents, memories, memoryQuestions, automations, settings, emailDrafts,
-  lists, listItems, eventProposals,
+  lists, listItems, eventProposals, activity, goals, goalSteps, goalUpdates, helpers, routines,
   type Member, type Connection, type EmailDraft, type Stranger,
-  type List, type ListItem, type EventProposal, type Memory, type MemoryQuestion,
+  type List, type ListItem, type EventProposal, type Memory, type MemoryQuestion, type Activity,
+  type Goal, type GoalStep, type GoalUpdate, type Helper, type Routine,
 } from './schema'
 import { encrypt, decrypt, randomToken, hashToken, mintMcpKey, mcpKeyHolder } from '../crypto'
 import { rankSimilar, findCorrected, DUPLICATE } from '../memory-match'
@@ -390,6 +391,16 @@ export async function saveConnection(input: {
     })
 }
 
+/** Make a member's link read-only, or writable again; the row it changed, or nothing when there is no such link. */
+export async function setConnectionReadOnly(memberId: number, provider: Provider, readOnly: boolean): Promise<Connection | undefined> {
+  const [row] = await db()
+    .update(connections)
+    .set({ readOnly, updatedAt: new Date() })
+    .where(and(eq(connections.memberId, memberId), eq(connections.provider, provider)))
+    .returning()
+  return row
+}
+
 /** A refreshed link's replacement refresh token, stored the same way the first one was. */
 export async function updateRefreshToken(memberId: number, provider: Provider, refreshToken: string) {
   await db()
@@ -633,6 +644,10 @@ export async function answerQuestion(
 
 /* ------------------------------------------------------------ automations */
 
+/** How often an automation runs; see the column in lib/db/schema.ts. */
+export const REPEATS = ['always', 'once', 'until'] as const
+export type Repeat = (typeof REPEATS)[number]
+
 /**
  * A chat has at most one of each ready-made watcher, and the database holds
  * it to that: a second of the same kind, from two ticks installing the
@@ -646,6 +661,8 @@ export async function addAutomation(input: {
   instruction: string
   kind?: string | null
   nextRunAt: Date
+  repeat?: Repeat
+  helperId?: number | null
 }) {
   const [row] = await db().insert(automations).values({
     chatId: input.chatId,
@@ -655,6 +672,8 @@ export async function addAutomation(input: {
     instruction: input.instruction,
     kind: input.kind ?? null,
     nextRunAt: input.nextRunAt,
+    repeat: input.repeat ?? 'always',
+    helperId: input.helperId ?? null,
   }).onConflictDoNothing().returning()
   if (row) return row
   const [have] = await db()
@@ -728,6 +747,221 @@ export async function getAutomation(id: number) {
 export async function deleteAutomation(id: number) {
   const rows = await db().delete(automations).where(eq(automations.id, id)).returning()
   return rows.length > 0
+}
+
+/* ------------------------------------------------------------------ goals */
+
+export type GoalStatus = 'active' | 'done' | 'dropped'
+
+export async function createGoal(input: {
+  chatId: string
+  memberId: number | null
+  title: string
+  outcome?: string | null
+  targetDate?: string | null
+}): Promise<Goal> {
+  const [row] = await db()
+    .insert(goals)
+    .values({ chatId: input.chatId, memberId: input.memberId, title: input.title, outcome: input.outcome ?? null, targetDate: input.targetDate ?? null })
+    .returning()
+  return row
+}
+
+export async function getGoal(id: number): Promise<Goal | undefined> {
+  const [row] = await db().select().from(goals).where(eq(goals.id, id)).limit(1)
+  return row
+}
+
+export async function updateGoal(
+  id: number,
+  patch: Partial<Pick<Goal, 'title' | 'outcome' | 'targetDate' | 'automationId'>>,
+): Promise<Goal | undefined> {
+  const [row] = await db().update(goals).set({ ...patch, updatedAt: new Date() }).where(eq(goals.id, id)).returning()
+  return row
+}
+
+/**
+ * The goals in progress a room can see: in a group, the group's own; in a
+ * member's own chat, theirs from anywhere as well, since a goal set in a DM is
+ * that member's and never the family group's to read. Oldest first.
+ */
+export async function goalsIn(opts: { chatId?: string; memberId?: number | null; status?: GoalStatus } = {}): Promise<Goal[]> {
+  const where = [eq(goals.status, opts.status ?? 'active')]
+  const scope = [
+    ...(opts.chatId ? [eq(goals.chatId, opts.chatId)] : []),
+    ...(opts.memberId ? [eq(goals.memberId, opts.memberId)] : []),
+  ]
+  if (scope.length) where.push(scope.length === 1 ? scope[0] : or(...scope)!)
+  return db().select().from(goals).where(and(...where)).orderBy(asc(goals.id))
+}
+
+/** Settle a goal, once: the predicate makes it a claim, so a second "done" finds it already closed. */
+export async function closeGoal(id: number, status: Exclude<GoalStatus, 'active'>): Promise<Goal | undefined> {
+  const now = new Date()
+  const [row] = await db()
+    .update(goals)
+    .set({ status, closedAt: now, updatedAt: now })
+    .where(and(eq(goals.id, id), eq(goals.status, 'active')))
+    .returning()
+  return row
+}
+
+/** Back in progress after being closed, as a person can change their mind. */
+export async function reopenGoal(id: number): Promise<Goal | undefined> {
+  const [row] = await db()
+    .update(goals)
+    .set({ status: 'active', closedAt: null, updatedAt: new Date() })
+    .where(and(eq(goals.id, id), ne(goals.status, 'active')))
+    .returning()
+  return row
+}
+
+export async function addGoalSteps(goalId: number, contents: string[]): Promise<GoalStep[]> {
+  const clean = contents.map((c) => c.trim()).filter(Boolean)
+  if (clean.length === 0) return []
+  return db().insert(goalSteps).values(clean.map((content) => ({ goalId, content }))).returning()
+}
+
+/** A goal's steps in the order they were planned. */
+export async function goalStepsOf(goalId: number): Promise<GoalStep[]> {
+  return db().select().from(goalSteps).where(eq(goalSteps.goalId, goalId)).orderBy(asc(goalSteps.id))
+}
+
+export async function getGoalStep(id: number): Promise<GoalStep | undefined> {
+  const [row] = await db().select().from(goalSteps).where(eq(goalSteps.id, id)).limit(1)
+  return row
+}
+
+export async function setGoalStepDone(id: number, done: boolean): Promise<GoalStep | undefined> {
+  const [row] = await db().update(goalSteps).set({ done }).where(eq(goalSteps.id, id)).returning()
+  return row
+}
+
+/** Tick steps off, or back on, by what they say: "venue" ticks "Book the venue", as a list item is matched. */
+export async function markGoalSteps(goalId: number, needles: string[], done: boolean): Promise<GoalStep[]> {
+  const steps = await goalStepsOf(goalId)
+  const matched = new Set<number>()
+  for (const needle of needles) {
+    const n = needle.trim().toLowerCase()
+    if (!n) continue
+    const hit =
+      steps.find((st) => st.content.toLowerCase() === n) ??
+      steps.find((st) => st.content.toLowerCase().includes(n)) ??
+      steps.find((st) => n.includes(st.content.toLowerCase()))
+    if (hit) matched.add(hit.id)
+  }
+  if (matched.size === 0) return []
+  return db()
+    .update(goalSteps)
+    .set({ done })
+    .where(and(eq(goalSteps.goalId, goalId), inArray(goalSteps.id, [...matched])))
+    .returning()
+}
+
+export async function addGoalUpdate(goalId: number, note: string, memberId: number | null): Promise<GoalUpdate> {
+  const [row] = await db().insert(goalUpdates).values({ goalId, note: note.trim(), memberId }).returning()
+  await db().update(goals).set({ updatedAt: row.createdAt }).where(eq(goals.id, goalId))
+  return row
+}
+
+/** A goal's latest progress notes, newest first, with who gave each. */
+export async function goalUpdatesFor(goalId: number, limit = 5): Promise<(GoalUpdate & { who: string | null })[]> {
+  const rows = await db()
+    .select({ row: goalUpdates, who: members.name })
+    .from(goalUpdates)
+    .leftJoin(members, eq(members.id, goalUpdates.memberId))
+    .where(eq(goalUpdates.goalId, goalId))
+    .orderBy(desc(goalUpdates.createdAt), desc(goalUpdates.id))
+    .limit(limit)
+  return rows.map((r) => ({ ...r.row, who: r.who }))
+}
+
+/* ---------------------------------------------------------------- helpers */
+
+export async function listHelpers(): Promise<Helper[]> {
+  return db().select().from(helpers).orderBy(asc(helpers.id))
+}
+
+export async function getHelper(id: number): Promise<Helper | undefined> {
+  const [row] = await db().select().from(helpers).where(eq(helpers.id, id)).limit(1)
+  return row
+}
+
+export async function helperNamed(name: string): Promise<Helper | undefined> {
+  const [row] = await db().select().from(helpers).where(sql`lower(${helpers.name}) = ${name.trim().toLowerCase()}`).limit(1)
+  return row
+}
+
+/** A new helper, or null when one of that name, in any case, is already there. */
+export async function addHelper(input: { name: string; role: string; groups: string[]; createdBy: number | null }): Promise<Helper | null> {
+  const [row] = await db()
+    .insert(helpers)
+    .values({ name: input.name.trim(), role: input.role.trim(), groups: JSON.stringify(input.groups), createdBy: input.createdBy })
+    .onConflictDoNothing()
+    .returning()
+  return row ?? null
+}
+
+export async function deleteHelper(id: number): Promise<boolean> {
+  return (await db().delete(helpers).where(eq(helpers.id, id)).returning()).length > 0
+}
+
+/* --------------------------------------------------------------- routines */
+
+export async function listRoutines(): Promise<Routine[]> {
+  return db().select().from(routines).orderBy(asc(routines.name))
+}
+
+export async function routineNamed(name: string): Promise<Routine | undefined> {
+  const [row] = await db().select().from(routines).where(sql`lower(${routines.name}) = ${name.trim().toLowerCase()}`).limit(1)
+  return row
+}
+
+/** Keep a routine, or replace the steps of the one already kept under that name. */
+export async function saveRoutine(input: { name: string; steps: string; createdBy: number | null }): Promise<{ row: Routine; replaced: boolean }> {
+  const existing = await routineNamed(input.name)
+  if (existing) {
+    const [row] = await db().update(routines).set({ steps: input.steps, updatedAt: new Date() }).where(eq(routines.id, existing.id)).returning()
+    return { row, replaced: true }
+  }
+  const [made] = await db()
+    .insert(routines)
+    .values({ name: input.name.trim(), steps: input.steps, createdBy: input.createdBy })
+    .onConflictDoNothing()
+    .returning()
+  // Kept under that name by someone else a moment ago: these steps replace its.
+  return made ? { row: made, replaced: false } : saveRoutine(input)
+}
+
+export async function deleteRoutine(id: number): Promise<boolean> {
+  return (await db().delete(routines).where(eq(routines.id, id)).returning()).length > 0
+}
+
+/* --------------------------------------------------------------- activity */
+
+export async function recordActivity(input: { chatId: string; memberId: number | null; via: string; tool: string; summary: string }): Promise<void> {
+  await db().insert(activity).values(input)
+}
+
+/** The latest changes, newest first, with who asked for each; a chat's own when one is named. */
+export async function recentActivity(opts: { chatId?: string; limit?: number } = {}): Promise<(Activity & { who: string | null })[]> {
+  const rows = await db()
+    .select({ row: activity, who: members.name })
+    .from(activity)
+    .leftJoin(members, eq(members.id, activity.memberId))
+    .where(opts.chatId ? eq(activity.chatId, opts.chatId) : undefined)
+    .orderBy(desc(activity.createdAt), desc(activity.id))
+    .limit(opts.limit ?? 20)
+  return rows.map((r) => ({ ...r.row, who: r.who }))
+}
+
+/** Ninety days is long enough to answer "what happened to the dentist booking?" and no longer. */
+export async function pruneActivity(days = 90): Promise<number> {
+  const rows = await db()
+    .delete(activity)
+    .where(lt(activity.createdAt, new Date(Date.now() - days * 86_400_000)))
+    .returning({ id: activity.id })
+  return rows.length
 }
 
 /* --------------------------------------------------------------- settings */
@@ -1040,7 +1274,7 @@ export async function settleProposal(
 
 /* ------------------------------------------------------- member admin ---- */
 
-export type MemberRow = Member & { linked: { provider: string; email: string | null }[] }
+export type MemberRow = Member & { linked: { provider: string; email: string | null; readOnly: boolean }[] }
 
 /** Everyone the bot knows, with whatever mailboxes each has linked. */
 export async function allMembersWithLinks(): Promise<MemberRow[]> {
@@ -1052,7 +1286,7 @@ export async function allMembersWithLinks(): Promise<MemberRow[]> {
     ...m,
     linked: links
       .filter((c) => c.memberId === m.id)
-      .map((c) => ({ provider: c.provider, email: c.email })),
+      .map((c) => ({ provider: c.provider, email: c.email, readOnly: c.readOnly })),
   }))
 }
 

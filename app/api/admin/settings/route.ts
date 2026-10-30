@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireAdmin } from '@/lib/auth/session'
 import { isManaged, setSecret, clearSecret, listSettings, SETTING_META } from '@/lib/settings'
-import { canonicalTimeZone } from '@/lib/env'
+import { canonicalTimeZone, isAssistantName } from '@/lib/env'
 import { botTokenProblem } from '@/lib/telegram-admin'
 
 export const runtime = 'nodejs'
@@ -55,5 +55,9 @@ async function invalid(key: string, value: string): Promise<string | null> {
   }
   const options = (SETTING_META as Record<string, { options?: readonly string[] }>)[key]?.options
   if (options && !options.includes(value)) return `${key} is one of: ${options.join(', ')}.`
+  if (key === 'ASSISTANT_NAME' && !isAssistantName(value)) {
+    return 'A name is one or two words of letters, up to 24 characters, like Pip or Aunty Bot.'
+  }
+  if (key === 'ASSISTANT_PERSONA' && value.length > 300) return 'Keep the manner to a line or two, under 300 characters.'
   return null
 }

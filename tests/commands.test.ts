@@ -288,6 +288,26 @@ describe('/connect and /accounts', () => {
   })
 })
 
+describe('/readonly', () => {
+  it('makes a linked account read only and writable again, and says when there is nothing to change', async () => {
+    await processUpdate(dm('/whoami'))
+    const rowan = (await q.memberByTelegramId('111'))!
+    await processUpdate(dm('/readonly google'))
+    expect(lastSent()).toBe('You have no google account linked. Send /connect to link one.')
+    await q.saveConnection({ memberId: rowan.id, provider: 'google', email: 'r@gmail.example', refreshToken: 'r', scopes: null })
+    await processUpdate(dm('/readonly google'))
+    expect(lastSent()).toContain('read only now')
+    expect((await q.connectionsFor(rowan.id))[0].readOnly).toBe(true)
+    await processUpdate(dm('/accounts'))
+    expect(lastSent()).toContain('r@gmail.example (read only)')
+    await processUpdate(dm('/readonly Google OFF'))
+    expect(lastSent()).toContain('writable again')
+    expect((await q.connectionsFor(rowan.id))[0].readOnly).toBe(false)
+    await processUpdate(dm('/readonly'))
+    expect(lastSent()).toContain('Usage: /readonly google')
+  })
+})
+
 describe('/mcp', () => {
   const keyFrom = (text: string) => text.match(/Bearer ([^"]+)"/)?.[1] ?? ''
 
@@ -596,6 +616,25 @@ describe('/watch', () => {
     expect(rows[0].nextRunAt.getTime()).toBeGreaterThan(Date.now())
   })
 
+  it('switches on the hourly look for mail that needs someone now, which no group has unasked', async () => {
+    await processUpdate(dm('/watch'))
+    expect(lastSent()).toContain('/watch urgent')
+    await processUpdate(dm('/watch urgent'))
+    expect(lastSent()).toContain('**Needs you now** first runs')
+    const [row] = await q.listAutomations('111')
+    expect(row).toMatchObject({ kind: 'urgent', cronExpr: '0 8-20 * * *', label: 'Needs you now' })
+    await processUpdate(group('/watch'))
+    expect(lastSent()).toContain("anyone's new mail that needs someone today or tomorrow")
+  })
+
+  it('switches on the monthly look at subscriptions and bills', async () => {
+    await processUpdate(dm('/watch'))
+    expect(lastSent()).toContain('/watch subscriptions')
+    await processUpdate(dm('/watch subscriptions'))
+    const [row] = await q.listAutomations('111')
+    expect(row).toMatchObject({ kind: 'subscriptions', cronExpr: '0 18 1 * *', label: 'Subscriptions check' })
+  })
+
   it('lists what this chat is watching', async () => {
     await processUpdate(dm('/watch morning'))
     await processUpdate(dm('/watch list'))
@@ -631,6 +670,147 @@ describe('/watch', () => {
     expect(lastSent()).toContain('already on in a family group')
     await processUpdate(dm('/watch'))
     expect(lastSent()).not.toContain('already on')
+  })
+})
+
+describe('called by name in a group', () => {
+  afterEach(() => {
+    delete process.env.ASSISTANT_NAME
+  })
+
+  it('answers a message that opens with its name as it would an @mention, and not one that only mentions it', async () => {
+    process.env.ASSISTANT_NAME = 'Pip'
+    await processUpdate(group('Pip, what is on today?'))
+    expect(runAgent).toHaveBeenCalledTimes(1)
+    await processUpdate(group('Pip is a funny name for a bot'))
+    expect(runAgent).toHaveBeenCalledTimes(1)
+  })
+
+  it('answers to Hearth when unnamed, and says how to call it in /help', async () => {
+    await processUpdate(group('Hearth, is it bin night?'))
+    expect(runAgent).toHaveBeenCalledTimes(1)
+    process.env.ASSISTANT_NAME = 'Pip'
+    await processUpdate(dm('/help'))
+    expect(lastSent()).toContain('**Pip** — your family assistant.')
+    expect(lastSent()).toContain('start with my name ("Pip, ...")')
+  })
+})
+
+describe('a helper called by name', () => {
+  beforeEach(async () => {
+    await q.addHelper({ name: 'Chef', role: 'Plans meals.', groups: ['money'], createdBy: null })
+  })
+
+  it('answers a group message that opens with its name, as itself, and signs the reply', async () => {
+    await processUpdate(group('Chef, what can I make with leeks?'))
+    expect(runAgent).toHaveBeenCalledTimes(1)
+    const asked = (runAgent.mock.calls[0] as unknown as [{ helper?: { name: string } }])[0]
+    expect(asked.helper?.name).toBe('Chef')
+    expect(lastSent()).toBe('**Chef:** sure')
+    const [, reply] = await q.recentMessages('-100', 5)
+    expect(reply.content).toBe('**Chef:** sure')
+  })
+
+  it('goes on as the helper whose signed message is being replied to, and is the bot itself otherwise', async () => {
+    const replyTo = (text: string) => ({
+      update_id: 9,
+      message: {
+        message_id: 10, date: 1787000000,
+        from: { id: 111, is_bot: false, first_name: 'Rowan' },
+        chat: { id: -100, type: 'group', title: 'Family' },
+        text: 'and for dessert?',
+        reply_to_message: { message_id: 8, date: 1787000000, chat: { id: -100, type: 'group' }, from: { id: 1, is_bot: true, first_name: 'Hearth' }, text },
+      },
+    }) as never
+    await processUpdate(replyTo('Chef: Leek and potato soup.'))
+    expect((runAgent.mock.calls[0] as unknown as [{ helper?: { name: string } }])[0].helper?.name).toBe('Chef')
+    await processUpdate(replyTo('Added to the family calendar: Dentist'))
+    expect((runAgent.mock.calls[1] as unknown as [{ helper?: unknown }])[0].helper).toBeUndefined()
+    expect(lastSent()).toBe('sure')
+  })
+
+  it('leaves a message to a family member who has come to share its name to them', async () => {
+    await q.addHelper({ name: 'Max', role: 'Runs errands.', groups: [], createdBy: null })
+    await processUpdate(group('Max, are you there?'))
+    expect((runAgent.mock.calls[0] as unknown as [{ helper?: { name: string } }])[0].helper?.name).toBe('Max')
+    // Max joins the family after the helper was made.
+    await q.upsertMember('333', 'Max Power', { allowed: true })
+    await processUpdate(group('Max, are you coming?'))
+    expect(runAgent).toHaveBeenCalledTimes(1)
+  })
+
+  it('answers as the bot itself when the helpers cannot be read', async () => {
+    await client.exec('drop table helpers cascade')
+    await processUpdate(group('Chef, are you there?'))
+    // No helper to answer as, and the name is not an @mention of the bot.
+    expect(runAgent).not.toHaveBeenCalled()
+    await processUpdate(dm('Chef, are you there?'))
+    expect((runAgent.mock.calls[0] as unknown as [{ helper?: unknown }])[0].helper).toBeUndefined()
+  })
+
+  it('leaves a message that only mentions it to the ambient rules, and answers by name in a DM too', async () => {
+    await processUpdate(group('I asked Chef already'))
+    expect(runAgent).not.toHaveBeenCalled()
+    await processUpdate(dm('chef: what is for tea?'))
+    expect((runAgent.mock.calls[0] as unknown as [{ helper?: { name: string } }])[0].helper?.name).toBe('Chef')
+  })
+})
+
+describe('/pending', () => {
+  it("lists the asker's own drafts here, the dates waiting for the calendar, and in a group the open questions", async () => {
+    await processUpdate(dm('/whoami'))
+    const rowan = (await q.memberByTelegramId('111'))!
+    const sam = await q.upsertMember('222', 'Sam', { allowed: true })
+    await q.createDraft({ chatId: '-100', memberId: rowan.id, provider: 'google', to: ['office@example.org'], subject: 'Excursion form', body: 'x' })
+    await q.createDraft({ chatId: '111', memberId: rowan.id, provider: 'google', to: ['bank@example.org'], subject: 'Private', body: 'x' })
+    // Sam's, written from his MCP client and filed under the group without ever being shown there.
+    await q.createDraft({ chatId: '-100', memberId: sam.id, provider: 'google', to: ['clinic@example.org'], subject: 'Biopsy results', body: 'x' })
+    await q.addProposal({ chatId: '-100', title: 'Swimming carnival', startsAt: new Date(Date.now() + 5 * 86_400_000), endsAt: new Date(Date.now() + 5 * 86_400_000 + 3_600_000), allDay: false })
+    await q.askQuestion({ question: 'Who attends Riverbend?', candidate: 'x' })
+    await processUpdate(group('/pending'))
+    const said = lastSent()
+    expect(said).toContain('Waiting on a yes here:')
+    expect(said).toContain('**Your email drafts**')
+    expect(said).toContain('· to office@example.org, "Excursion form"')
+    expect(said).not.toContain('Private')
+    expect(said).not.toContain('Biopsy')
+    expect(said).toContain('· Swimming carnival, ')
+    expect(said).toContain('· Who attends Riverbend?')
+  })
+
+  it('keeps the questions for a group, and says when nothing is waiting', async () => {
+    await q.askQuestion({ question: 'Who attends Riverbend?', candidate: 'x' })
+    await processUpdate(dm('/pending'))
+    expect(lastSent()).toBe('Nothing is waiting on a yes here.')
+  })
+})
+
+describe('/activity', () => {
+  it("lists what was changed in this chat, newest first, with who asked, and nothing from elsewhere", async () => {
+    await processUpdate(dm('/whoami'))
+    const rowan = (await q.memberByTelegramId('111'))!
+    await q.recordActivity({ chatId: '-100', memberId: rowan.id, via: 'chat', tool: 'add_to_list', summary: 'added milk to the shopping list' })
+    await q.recordActivity({ chatId: '-100', memberId: null, via: 'watcher', tool: 'add_to_list', summary: 'added bread to the shopping list' })
+    await q.recordActivity({ chatId: '111', memberId: rowan.id, via: 'chat', tool: 'draft_email', summary: 'drafted an email' })
+    await processUpdate(group('/activity'))
+    const said = lastSent()
+    expect(said).toContain('What I have changed here lately, newest first:')
+    expect(said.indexOf('added bread')).toBeLessThan(said.indexOf('added milk'))
+    expect(said).toContain('(User111, asked in the chat)')
+    expect(said).toContain('(Hearth, on a schedule)')
+    expect(said).not.toContain('drafted an email')
+  })
+
+  it('says so when nothing has been changed', async () => {
+    await processUpdate(dm('/activity'))
+    expect(lastSent()).toBe('I have not changed anything in this chat yet.')
+  })
+
+  it('is not read out in front of someone unrecognised', async () => {
+    await q.rememberChat('-100', 'group', 'Family')
+    await q.noteStranger('-100', { id: '999', name: 'Visitor' })
+    await processUpdate(group('/activity'))
+    expect(lastSent()).toContain('Not while Visitor is here')
   })
 })
 

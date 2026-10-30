@@ -125,6 +125,8 @@ export function Reminders({
     enabled: boolean
     /** Part of the product: it can be paused, but the tick would only put a deleted one back. */
     builtin: boolean
+    /** A job that goes once it has run, or once it has found what it was waiting for. */
+    repeat?: 'once' | 'until' | null
     nextRun: string | null
     offGrid: boolean
     runsAt: string | null
@@ -145,6 +147,8 @@ export function Reminders({
               <span className="grow">
                 <span className="title">
                   {a.label} {a.builtin ? <span className="tag none">built in</span> : null}
+                  {a.repeat === 'once' ? <span className="tag none">once</span> : null}
+                  {a.repeat === 'until' ? <span className="tag none">until it happens</span> : null}
                   {a.enabled ? null : <span className="tag none">paused</span>}
                   {a.offGrid ? <span className="tag none">off the tick</span> : null}
                 </span>
@@ -420,6 +424,185 @@ export function Remembered({
           ))}
         </ul>
       )}
+      {error ? <p className="flash bad">{error}</p> : null}
+    </div>
+  )
+}
+
+/**
+ * What the bot changed lately, and for whom: the household's record, so
+ * nobody has to take its word that something was done. Read-only; each line
+ * is undone the way it was done, by asking or on the panel that holds it.
+ */
+export function Lately({
+  activity,
+}: {
+  activity: { id: number; summary: string; who: string; chat: string; when: string }[]
+}) {
+  return (
+    <div className="panel">
+      {activity.length === 0 ? (
+        <Empty>Nothing changed yet. Whatever the bot adds, ticks off, sends or schedules is listed here, with who asked.</Empty>
+      ) : (
+        <ul className="listing">
+          {activity.map((a) => (
+            <li key={a.id}>
+              <span className="grow">
+                <span className="title">{a.summary}</span>
+                <span className="meta">
+                  {a.when} · {a.who} · in {a.chat}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+/**
+ * What the household is working towards. Each goal's steps tick off here as
+ * they do in the chat, and Done or Drop closes it and ends its check-ins.
+ */
+export function Goals({
+  goals,
+}: {
+  goals: {
+    id: number
+    title: string
+    outcome: string | null
+    target: string | null
+    daysLeft: number | null
+    done: number
+    steps: ListItem[]
+    latest: string | null
+  }[]
+}) {
+  const { act, busy, error } = useFamilyActions()
+
+  return (
+    <div className="panel">
+      {goals.map((g) => (
+        <div key={g.id} className="weblist">
+          <p className="subhead">
+            {g.title} · {g.done} of {g.steps.length} steps
+            {g.target ? ` · by ${g.target}${g.daysLeft !== null && g.daysLeft >= 0 ? `, ${g.daysLeft} days` : ', overdue'}` : ''}
+          </p>
+          {g.outcome ? <p className="meta">{g.outcome}</p> : null}
+          {g.steps.length ? (
+            <ul className="listing doable">
+              {g.steps.map((i) => (
+                <li key={i.id} className={i.done ? 'done' : ''}>
+                  <button
+                    className={`tick${i.done ? ' on' : ''}`}
+                    disabled={busy}
+                    aria-label={i.done ? `Untick ${i.content}` : `Tick off ${i.content}`}
+                    onClick={() => act({ action: 'toggle_goal_step', id: i.id, done: !i.done })}
+                  >
+                    {i.done ? '✓' : ''}
+                  </button>
+                  <span className="grow">
+                    <span className="title">{i.content}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {g.latest ? <p className="meta">Latest: {g.latest}</p> : null}
+          <p className="weblist-ticked">
+            <button className="primary" disabled={busy} title="Achieved: close it and end its check-ins" onClick={() => act({ action: 'close_goal', id: g.id, status: 'done' })}>
+              Done
+            </button>
+            <button
+              disabled={busy}
+              title="No longer wanted: close it and end its check-ins"
+              onClick={() => confirm(`Drop "${g.title}"?`) && act({ action: 'close_goal', id: g.id, status: 'dropped' })}
+            >
+              Drop
+            </button>
+          </p>
+        </div>
+      ))}
+      {error ? <p className="flash bad">{error}</p> : null}
+    </div>
+  )
+}
+
+/**
+ * The signed-in member's own email drafts, waiting on their yes. Send here is
+ * the same yes as in the chat: the draft goes from their mailbox as written,
+ * once, and Discard throws it away. Nobody else's drafts are shown, since
+ * only the writer can send one.
+ */
+export function Drafts({
+  drafts,
+}: {
+  drafts: { id: number; to: string; cc: string | null; subject: string; body: string; from: string; chat: string; when: string }[]
+}) {
+  const { act, busy, error } = useFamilyActions()
+
+  return (
+    <div className="panel">
+      <p className="group-note">Your email drafts. Nothing is sent until you say yes, here or in the chat.</p>
+      <ul className="listing doable">
+        {drafts.map((d) => (
+          <li key={d.id}>
+            <span className="grow">
+              <span className="title">{d.subject}</span>
+              <span className="meta">
+                to {d.to}
+                {d.cc ? `, copy to ${d.cc}` : ''} · from your {d.from} · drafted {d.when} in {d.chat}
+              </span>
+              <span className="meta draft-body">{d.body}</span>
+            </span>
+            <span className="row-acts">
+              <button
+                className="primary"
+                disabled={busy}
+                title="Send it now, as written"
+                onClick={() => confirm(`Send "${d.subject}" to ${d.to} now?`) && act({ action: 'send_draft', id: d.id })}
+              >
+                Send
+              </button>
+              <button disabled={busy} title="Throw this draft away" onClick={() => act({ action: 'discard_draft', id: d.id })}>
+                Discard
+              </button>
+            </span>
+          </li>
+        ))}
+      </ul>
+      {error ? <p className="flash bad">{error}</p> : null}
+    </div>
+  )
+}
+
+/**
+ * The household's helpers, each called by opening a message with its name.
+ * New ones are made by asking in the chat, where a role is worked out with
+ * whoever asks; here one can only be let go.
+ */
+export function Helpers({ helpers }: { helpers: { id: number; name: string; role: string }[] }) {
+  const { act, busy, error } = useFamilyActions()
+
+  return (
+    <div className="panel">
+      <p className="group-note">Call one by starting a message with its name, like &ldquo;{helpers[0].name}, ...&rdquo;. Ask in the chat to add another.</p>
+      <ul className="listing doable">
+        {helpers.map((h) => (
+          <li key={h.id}>
+            <span className="grow">
+              <span className="title">{h.name}</span>
+              <span className="meta">{h.role}</span>
+            </span>
+            <span className="row-acts">
+              <button disabled={busy} title={`Remove ${h.name}`} onClick={() => confirm(`Remove ${h.name}?`) && act({ action: 'remove_helper', id: h.id })}>
+                ×
+              </button>
+            </span>
+          </li>
+        ))}
+      </ul>
       {error ? <p className="flash bad">{error}</p> : null}
     </div>
   )

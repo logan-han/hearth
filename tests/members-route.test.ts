@@ -214,7 +214,7 @@ describe('adding and editing a member', () => {
     await q.saveConnection({ memberId: m.id, provider: 'google', email: 'l@hearth.example', refreshToken: 'r', scopes: null })
     const body = await (await post({ telegramUserId: '999', name: 'Ada' })).json()
     const linked = body.members.find((x: { telegramUserId: string }) => x.telegramUserId === '777')
-    expect(linked.linked).toEqual([{ provider: 'google', email: 'l@hearth.example' }])
+    expect(linked.linked).toEqual([{ provider: 'google', email: 'l@hearth.example', readOnly: false }])
   })
 })
 

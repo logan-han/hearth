@@ -18,6 +18,7 @@ const boardSummary = vi.fn()
 const weatherTool = vi.fn()
 const spendingSummary = vi.fn()
 const budgetSummary = vi.fn()
+const recurringPayments = vi.fn()
 const strangersIn = vi.fn<(chatId: string) => Promise<{ id: string; name: string }[]>>()
 const unaskedQuestions = vi.fn<() => Promise<{ id: number; question: string }[]>>()
 const markQuestionsAsked = vi.fn<(ids: number[]) => Promise<void>>()
@@ -38,11 +39,15 @@ const buildTools = vi.fn(
       weather: { execute: weatherTool },
       spending_summary: { execute: spendingSummary },
       budget_summary: { execute: budgetSummary },
+      recurring_payments: { execute: recurringPayments },
     }) as Record<string, { execute?: (...args: unknown[]) => unknown }>,
 )
 
-const { unaccountedIn, memberByTelegramId, creatorRows, setAutomationEnabled, moveChat } = vi.hoisted(() => ({
+const { unaccountedIn, memberByTelegramId, creatorRows, setAutomationEnabled, moveChat, deleteAutomation, pruneActivity, getHelper } = vi.hoisted(() => ({
   setAutomationEnabled: vi.fn(async (_id: number, _enabled: boolean) => ({})),
+  deleteAutomation: vi.fn(async (_id: number) => true),
+  pruneActivity: vi.fn(async (_days?: number) => 0),
+  getHelper: vi.fn(async (_id: number) => undefined as unknown),
   moveChat: vi.fn(async (_from: string, _to: string) => {}),
   unaccountedIn: vi.fn<(chatId: string) => Promise<number | null>>(async () => 0),
   memberByTelegramId: vi.fn<(id: string) => Promise<{ allowed: boolean } | undefined>>(async () => ({ allowed: true })),
@@ -83,6 +88,9 @@ vi.mock('@/lib/db/queries', () => ({
   setAutomationEnabled,
   moveChat,
   listAutomations,
+  deleteAutomation,
+  pruneActivity,
+  getHelper,
 }))
 vi.mock('@/lib/builtins', () => ({ installBuiltins }))
 vi.mock('@/lib/agent', async (orig) => ({
@@ -126,6 +134,8 @@ function automation(over: Partial<Automation> = {}): Automation {
     lastRunAt: null,
     enabled: true,
     createdAt: new Date('2026-08-01T00:00:00Z'),
+    repeat: 'always',
+    helperId: null,
     ...over,
   } as Automation
 }
@@ -737,6 +747,109 @@ describe('running due automations', () => {
     expect(prompt).toContain('reply with exactly SKIP')
   })
 
+  it('runs a job handed to a helper as that helper, and posts it under its name once the checks have passed it', async () => {
+    getHelper.mockResolvedValueOnce({ id: 3, name: 'Chef', role: 'Plans meals.', groups: '[]' })
+    dueAutomations.mockResolvedValue([automation({ id: 8, helperId: 3, repeat: 'once', label: 'Chef: plan dinners' })])
+    runAgent.mockResolvedValue({ text: 'Five dinners: soup, pasta, tacos, curry, roast.', notices: [], model: 'primary:test' })
+    await authed()
+    expect(getHelper).toHaveBeenCalledWith(3)
+    expect((runAgent.mock.calls[0][0] as { helper?: { name: string } }).helper?.name).toBe('Chef')
+    expect(decideWatcherPost.mock.calls[0][0].draft).toBe('Five dinners: soup, pasta, tacos, curry, roast.')
+    expect(send).toHaveBeenCalledWith('-100999', '**Chef:** Five dinners: soup, pasta, tacos, curry, roast.')
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ content: '**Chef:** Five dinners: soup, pasta, tacos, curry, roast.' }))
+  })
+
+  it('runs a job as the bot itself when its helper has gone, or cannot be looked up', async () => {
+    dueAutomations.mockResolvedValue([automation({ id: 8, helperId: 3 })])
+    getHelper.mockRejectedValueOnce(new Error('db away'))
+    await authed()
+    expect((runAgent.mock.calls[0][0] as { helper?: unknown }).helper).toBeUndefined()
+    expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
+  })
+
+  it("keeps ninety days of the household's activity log, and carries on when it cannot prune it", async () => {
+    await authed()
+    expect(pruneActivity).toHaveBeenCalledWith(90)
+    pruneActivity.mockRejectedValueOnce(new Error('db away'))
+    expect((await authed()).status).toBe(200)
+    expect(console.error).toHaveBeenCalledWith('[tick] could not prune the activity log:', 'db away')
+  })
+
+  describe('jobs that run once, or until they find something', () => {
+    it('runs a one-off once: the claim switches it off and the run takes it off the list', async () => {
+      dueAutomations.mockResolvedValue([automation({ id: 4, repeat: 'once', label: 'call the plumber' })])
+      await authed()
+      expect(claimAutomation).toHaveBeenCalledWith(4, expect.any(Date), null)
+      expect(send).toHaveBeenCalledWith('-100999', 'Bins out tonight.')
+      expect(deleteAutomation).toHaveBeenCalledWith(4)
+      expect(noteRun).toHaveBeenCalledWith({ metadata: { retired: 'its one run' } })
+    })
+
+    it('takes a one-off off the list even when its run is held back, rather than sending it hours late', async () => {
+      dueAutomations.mockResolvedValue([automation({ id: 4, repeat: 'once' })])
+      strangersIn.mockResolvedValue([{ id: '5', name: 'Visitor' }])
+      await authed()
+      expect(send).not.toHaveBeenCalled()
+      expect(deleteAutomation).toHaveBeenCalledWith(4)
+    })
+
+    it('keeps a watch-until going while it finds nothing, and leaves a schedule alone', async () => {
+      dueAutomations.mockResolvedValue([automation({ id: 5, repeat: 'until' }), automation({ id: 6 })])
+      runAgent.mockResolvedValue({ text: 'SKIP', notices: [], model: 'primary:test' })
+      await authed()
+      const [, , next] = claimAutomation.mock.calls[0]
+      expect(next!.getTime()).toBeGreaterThan(Date.now())
+      expect(deleteAutomation).not.toHaveBeenCalled()
+    })
+
+    it('stops a watch-until once it posts, and says so under the post in its own words', async () => {
+      dueAutomations.mockResolvedValue([automation({ id: 5, repeat: 'until', instruction: 'Post the camp dates once the school sends them.' })])
+      runAgent.mockResolvedValue({ text: 'Camp is 3 to 5 March.', notices: [], model: 'primary:test' })
+      await authed()
+      expect(send).toHaveBeenCalledWith(
+        '-100999',
+        "Camp is 3 to 5 March.\n\nThat's what I was waiting for, so I've stopped checking. Ask me to keep watching if you still want it.",
+      )
+      expect(deleteAutomation).toHaveBeenCalledWith(5)
+      // The writer was told a post ends it, so it posts only once the thing has happened.
+      expect(runAgent.mock.calls[0][0].text).toContain('stops for good once it posts anything')
+      // The line is said in code, after the checks: they judged the post alone.
+      expect(decideWatcherPost.mock.calls[0][0].draft).toBe('Camp is 3 to 5 March.')
+    })
+
+    it('stops a watch-until whose find the checks held back, since what it read is spent, and tells an admin', async () => {
+      dueAutomations.mockResolvedValue([automation({ id: 5, repeat: 'until', label: 'camp dates' })])
+      runAgent.mockResolvedValue({ text: 'Camp is 3 to 5 March.', notices: [], model: 'primary:test' })
+      decideWatcherPost.mockResolvedValue({ decision: 'skip', confidence: 0.9, reason: 'invented', model: 'primary:test' })
+      await authed()
+      expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+      expect(deleteAutomation).toHaveBeenCalledWith(5)
+      expect(send).toHaveBeenCalledWith('900', expect.stringContaining('**camp dates** has stopped watching: it found something, but the checks held its post back'))
+    })
+
+    it('runs each scheduled instruction on markers of its own, so a watch never spends the brief\'s mail', async () => {
+      dueAutomations.mockResolvedValue([automation({ id: 12 })])
+      await authed()
+      expect((runAgent.mock.calls[0][0] as { cursorScope?: string }).cursorScope).toBe('auto:12')
+    })
+
+    it('keeps a watch-until going when the hourly cap held its post back', async () => {
+      dueAutomations.mockResolvedValue([automation({ id: 5, repeat: 'until' })])
+      const full = { posts: Array.from({ length: 6 }, () => new Date().toISOString()) }
+      getSetting.mockImplementation(async (key: string) => (key.startsWith('proactive_posts:') ? JSON.stringify(full) : key === 'memory_sweep_day' ? today() : null))
+      await authed()
+      expect(send).not.toHaveBeenCalledWith('-100999', expect.anything())
+      expect(deleteAutomation).not.toHaveBeenCalled()
+    })
+
+    it('logs a finished job it could not take off the list, and carries on', async () => {
+      dueAutomations.mockResolvedValue([automation({ id: 4, repeat: 'once', label: 'plumber' }), automation({ id: 7 })])
+      deleteAutomation.mockRejectedValueOnce(new Error('db away'))
+      await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 2, skipped: 0 })
+      expect(console.error).toHaveBeenCalledWith('[tick] could not remove plumber after its one run:', 'db away')
+    })
+  })
+
   it('posts nothing when the agent replies SKIP, but still counts the run', async () => {
     dueAutomations.mockResolvedValue([automation()])
     runAgent.mockResolvedValue({ text: 'SKIP', notices: [], model: 'primary:test' })
@@ -1205,6 +1318,88 @@ describe('ready-made watchers', () => {
       budget_summary: { execute: budgetSummary },
     })) as never)
   const mailWaiting = { accounts: [{ member: 'Rowan', mailbox: "Rowan's Gmail", provider: 'google', messages: [{ id: 'm1', from: 'School', subject: 'Excursion', snippet: 'Permission slip due Friday', date: '2026-09-24T00:30:00Z' }] }] }
+
+  describe('the monthly look at subscriptions and bills', () => {
+    const check = (over: Partial<Automation> = {}) => automation({ kind: 'subscriptions', label: 'Subscriptions check', cronExpr: '0 18 1 * *', chatId: '111', ...over })
+    const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10)
+
+    it("posts only this month's changes: a new price, a new payee, one that has not come", async () => {
+      recurringPayments.mockResolvedValue({
+        monthly_total: '$95.98',
+        recurring: [
+          { payee: 'Netflix', price_change: '$16.99 to $18.99 at the last payment', last_paid_on: daysAgo(10), next_due: daysAgo(-20) },
+          { payee: 'Old rise', price_change: '$1.00 to $2.00 at the last payment', last_paid_on: daysAgo(60), next_due: daysAgo(-5) },
+          { payee: 'Stan', new: 'first paid 2026-07-12', last_paid_on: daysAgo(5), next_due: daysAgo(-25) },
+          { payee: 'Gym', overdue: 'due by ...', overdue_since: daysAgo(5), last_paid_on: daysAgo(50), next_due: daysAgo(20) },
+          { payee: 'Long gone', overdue: 'due by ...', overdue_since: daysAgo(150), last_paid_on: daysAgo(200), next_due: daysAgo(170) },
+          { payee: 'Water', last_paid_on: daysAgo(3), next_due: daysAgo(-88) },
+        ],
+      })
+      dueAutomations.mockResolvedValue([check()])
+      runAgent.mockResolvedValue({ text: '**Subscriptions and bills**\n- Netflix: $16.99 to $18.99', notices: [], model: 'primary:test' })
+      await authed()
+      expect(recurringPayments).toHaveBeenCalledWith({ months: 12 }, expect.anything())
+      const text = (runAgent.mock.calls[0][0] as { text: string }).text
+      for (const payee of ['Netflix', 'Stan', 'Gym', '$95.98']) expect(text).toContain(payee)
+      for (const payee of ['Old rise', 'Long gone', 'Water']) expect(text).not.toContain(payee)
+      expect(send).toHaveBeenCalledWith('111', expect.stringContaining('Netflix'))
+    })
+
+    it('costs no model call in a month with nothing changed, and says nothing of a feed not set up', async () => {
+      recurringPayments.mockResolvedValue({ error: 'PocketSmith is not configured.' })
+      dueAutomations.mockResolvedValue([check()])
+      await authed()
+      expect(runAgent).not.toHaveBeenCalled()
+      expect(send).not.toHaveBeenCalled()
+    })
+
+    it('tells an admin when the feed fails', async () => {
+      recurringPayments.mockResolvedValue({ error: 'PocketSmith answered 500' })
+      dueAutomations.mockResolvedValue([check({ chatId: '-100999' })])
+      await authed()
+      expect(send).toHaveBeenCalledWith('900', expect.stringContaining('recurring_payments: PocketSmith answered 500'))
+    })
+  })
+
+  describe('the hourly look for mail that needs someone now', () => {
+    const urgent = (over: Partial<Automation> = {}) => automation({ kind: 'urgent', label: 'Needs you now', cronExpr: '0 8-20 * * *', ...over })
+
+    it('reads new mail on markers of its own, so the brief still gets to report the same mail', async () => {
+      dueAutomations.mockResolvedValue([urgent()])
+      newMail.mockResolvedValue(mailWaiting)
+      runAgent.mockResolvedValue({ text: '**Needs you now**\n- School: permission slip due today.', notices: [], model: 'primary:test' })
+      await authed()
+      const ctx = (buildTools.mock.calls[0] as unknown as [{ cursorScope?: string }])[0]
+      expect(ctx.cursorScope).toBe('urgent:-100999')
+      expect(newMail).toHaveBeenCalledWith({ limit: 10, everyone: true }, expect.anything())
+      const asked = runAgent.mock.calls[0][0] as { tools: string[]; text: string }
+      expect(asked.tools).toEqual(['recall', 'read_email'])
+      expect(asked.text).toContain('before tomorrow morning')
+      expect(asked.text).toContain('Say whose mailbox or calendar each item came from')
+      expect(send).toHaveBeenCalledWith('-100999', expect.stringContaining('permission slip'))
+    })
+
+    it("reads only the owner's mail in a DM, and costs no model call in an hour with no new mail", async () => {
+      dueAutomations.mockResolvedValue([urgent({ chatId: '111' })])
+      newMail.mockResolvedValue({ accounts: [{ member: 'Rowan', mailbox: "Rowan's Gmail", provider: 'google', messages: [] }] })
+      await authed()
+      expect(newMail).toHaveBeenCalledWith({ limit: 10, everyone: false }, expect.anything())
+      expect(runAgent).not.toHaveBeenCalled()
+      expect(send).not.toHaveBeenCalled()
+    })
+
+    it("leaves a mailbox that will not answer to the brief to report, rather than telling an admin every hour", async () => {
+      dueAutomations.mockResolvedValue([urgent()])
+      newMail.mockResolvedValue({ accounts: [{ mailbox: "Rowan's Gmail", provider: 'google', error: 'The google link has expired or been revoked.' }] })
+      await authed()
+      expect(send).not.toHaveBeenCalled()
+      expect(console.warn).toHaveBeenCalledWith('[tick] Needs you now: The google link has expired or been revoked.')
+      newMail.mockResolvedValue({ error: 'Nobody in this chat has linked a mailbox yet. Send /connect to link one.' })
+      vi.mocked(console.warn).mockClear()
+      await authed()
+      expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining('Needs you now'))
+    })
+  })
 
   it('spends the mail it read only once the brief has gone out', async () => {
     dueAutomations.mockResolvedValue([brief()])
@@ -1820,6 +2015,8 @@ describe('ready-made watchers', () => {
       automation({ id: 5, label: 'paused one', kind: null, nextRunAt: at, enabled: false }),
       automation({ id: 6, label: 'Money snapshot', kind: 'snapshot', nextRunAt: at, enabled: true }),
       automation({ id: 7, label: 'next week', kind: null, nextRunAt: new Date(at.getTime() + 7 * 86_400_000), enabled: true }),
+      // An hourly watch for something is a check, not a reminder.
+      automation({ id: 8, label: 'camp dates', kind: null, repeat: 'until', nextRunAt: at, enabled: true }),
     ])
     listProposals.mockResolvedValue({ timezone: 'Australia/Melbourne', proposals: [{ id: 3, title: 'Athletics carnival', start_local: 'Thu, 22 Oct 2026', all_day: true, location: 'the oval' }] })
     await authed()
@@ -1835,7 +2032,7 @@ describe('ready-made watchers', () => {
     // A reminder a week out is under coming, with its day, and still does not wake the household alone.
     expect(call.text).toContain('coming:')
     expect(call.text).toContain('label: next week')
-    for (const left of ['paused one', 'Money snapshot']) expect(call.text).not.toContain(left)
+    for (const left of ['paused one', 'Money snapshot', 'camp dates']) expect(call.text).not.toContain(left)
     expect(call.text).toContain('proposals:')
     expect(call.text).toContain('Athletics carnival')
   })

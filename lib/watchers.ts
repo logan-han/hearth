@@ -13,7 +13,7 @@ import type { ToolName } from './tools'
  * rather than a delete. /watch adds them to a private chat, or switches a
  * paused one back on.
  */
-export type WatcherKind = 'morning' | 'snapshot'
+export type WatcherKind = 'morning' | 'snapshot' | 'urgent' | 'subscriptions'
 
 export type Watcher = {
   kind: WatcherKind
@@ -76,13 +76,39 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
     ].join(' '),
     tools: ['recall'],
   },
+  urgent: {
+    kind: 'urgent',
+    label: 'Needs you now',
+    // Hourly through the waking day; the night's mail waits for the brief.
+    cron: '0 8-20 * * *',
+    builtin: false,
+    instruction: [
+      'The mail that has arrived since the last look is under DATA. Post only what someone in the household has to act on before tomorrow morning: a deadline today or tomorrow, a change to or cancellation of something on today or tomorrow, a payment that failed or is due today, a reply someone is waiting on today, a notice about today from a club, a class or a service.',
+      'Everything else waits for the morning brief, which reads the same mail: newsletters, receipts, confirmations, deliveries on their way, anything with a later deadline. Mail marked copied_in asks nothing of the household and is never this. When nothing is that pressing, reply with exactly SKIP.',
+      '**Needs you now** as a title line, then one bullet per email: who sent it, what it needs and by when, every date, time, amount and place exactly as given. Open an email with read_email when its snippet does not say enough to tell.',
+    ].join(' '),
+    tools: ['recall', 'read_email'],
+  },
+  subscriptions: {
+    kind: 'subscriptions',
+    label: 'Subscriptions check',
+    cron: '0 18 1 * *',
+    builtin: false,
+    instruction: [
+      "The household's subscriptions and regular bills that changed over the past month are under DATA, as found in the bank feed: a price that changed at the last payment, one paid for the first time lately (new), and one whose next payment is overdue. Post a short note opening with the **bold** title line \"Subscriptions and bills\".",
+      'One bullet each: the payee, then what changed exactly as given: the price change; for a new one, how often it is paid and what it usually costs; for an overdue one, that it was due by its date and has not been seen, so it may have been cancelled, moved or be late.',
+      'Name a payee by the business name its payee string opens with, written the way a business name is written, in title case, never in all capitals, with nothing the bank adds after it.',
+      'End with one line, "All told: **$X** a month.", the monthly_total as given. Figures exactly as given, no arithmetic of your own, and no advice.',
+    ].join(' '),
+    tools: ['recall'],
+  },
 }
 
 /** The watchers every household group gets, in the order Home lists them. */
 export const BUILTIN_WATCHERS: Watcher[] = Object.values(WATCHERS).filter((w) => w.builtin)
 
 export function isWatcherKind(value: string | null | undefined): value is WatcherKind {
-  return value === 'morning' || value === 'snapshot'
+  return value === 'morning' || value === 'snapshot' || value === 'urgent' || value === 'subscriptions'
 }
 
 export function isBuiltinKind(value: string | null | undefined): boolean {
@@ -100,7 +126,7 @@ export const isGroupChat = (chatId: string) => chatId.startsWith('-')
  */
 export function watcherInstruction(kind: WatcherKind, chatId: string): string {
   const base = WATCHERS[kind].instruction
-  return kind === 'morning' && isGroupChat(chatId)
+  return (kind === 'morning' || kind === 'urgent') && isGroupChat(chatId)
     ? `${base} Say whose mailbox or calendar each item came from, as its mailbox or calendar field names it: a person, never a provider.`
     : base
 }

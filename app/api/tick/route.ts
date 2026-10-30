@@ -6,6 +6,7 @@ import {
   dueAutomations, claimAutomation, allowedMembers, recordMessage, strangersIn,
   messagesSince, getSetting, setSetting, retireStaleProposals, recordTick,
   unaskedQuestions, markQuestionsAsked, memberByTelegramId, setAutomationEnabled, moveChat, listAutomations,
+  deleteAutomation, pruneActivity, getHelper,
 } from '@/lib/db/queries'
 import { localDateKey, tzOffsetMs, nextRun, formatLocal, formatLocalDate, formatLocalTime, localToUtc, dayAfter, daysAfter, clockLine } from '@/lib/cron'
 import { retryTickAt } from '@/lib/scheduler'
@@ -24,10 +25,12 @@ import { hydrateSecrets, recheckSecrets } from '@/lib/settings'
 import { flushTelemetry, traced, traceRun, noteRun } from '@/lib/telemetry'
 import { pruneModelEvents } from '@/lib/model-events'
 import { parseLog, prune, underCap, recordPost, shouldWarn, markWarned, PROACTIVE_POSTS_PER_HOUR } from '@/lib/rate-cap'
-import type { Automation, Member } from '@/lib/db/schema'
+import type { Automation, Helper, Member } from '@/lib/db/schema'
+import { signed } from '@/lib/helpers'
 import { describeError } from '@/lib/errors'
 import { unsaid } from '@/lib/notices'
 import { plainData } from '@/lib/plain-data'
+import { changedLately } from '@/lib/recurring'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
@@ -212,12 +215,14 @@ type Reminder = { label: string; at: string; date: string }
  * The reminders a member set in this chat that go off from now to `last`, for
  * the brief to mention: today's by time, the rest of the fortnight's by day
  * and time as well. The ready-made watchers have a kind and speak for
- * themselves; a member's own instruction has none.
+ * themselves; a member's own instruction has none. A watch that runs until it
+ * finds something is a check, not a reminder: hourly, it would be in every
+ * brief at its next hour, saying nothing.
  */
 async function remindersBetween(chatId: string, now: Date, last: string): Promise<Reminder[]> {
   const day = localDateKey(now)
   return (await listAutomations(chatId))
-    .filter((r) => r.enabled && r.kind === null && r.nextRunAt > now && localDateKey(r.nextRunAt) <= last)
+    .filter((r) => r.enabled && r.kind === null && r.repeat !== 'until' && r.nextRunAt > now && localDateKey(r.nextRunAt) <= last)
     .map((r) => {
       const date = localDateKey(r.nextRunAt)
       return { label: r.label, at: date === day ? formatLocalTime(r.nextRunAt) : formatLocal(r.nextRunAt), date }
@@ -361,6 +366,27 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
         asked: questions.map((qn) => qn.id),
       }
     }
+    case 'urgent': {
+      // What arrived since this watcher last looked, on markers of its own:
+      // the morning brief still reads the same mail on its own markers.
+      const mail = await runTool(tools, 'new_mail', { limit: 10, everyone: isGroupChat(a.chatId) })
+      const accounts = Array.isArray(mail.accounts) ? (mail.accounts as Record<string, unknown>[]) : []
+      // A mailbox that will not answer is the brief's to report, once a day:
+      // said every hour it runs, the same fault would fill an admin's chat.
+      const failed = [errorOf(mail), ...accounts.map(errorOf)].filter((e): e is string => Boolean(e) && !isUnlinked(e))
+      if (failed.length) console.warn(`[tick] ${a.label}: ${failed.join(' | ')}`)
+      const arrived = accounts.reduce((n, acct) => n + (Array.isArray(acct.messages) ? acct.messages.length : 0), 0)
+      return { data: { mail }, empty: arrived === 0, problems }
+    }
+    case 'subscriptions': {
+      // A month's changes, found in code: a new price, a new payee, a payment that has not come.
+      const found = await runTool(tools, 'recurring_payments', { months: 12 })
+      const err = errorOf(found)
+      if (err && !isUnconfigured(err)) problems.push(`recurring_payments: ${err}`)
+      const all = Array.isArray(found.recurring) ? (found.recurring as Record<string, unknown>[]) : []
+      const changes = changedLately(all, localDateKey(ctx.now))
+      return { data: changes.length ? { changes, monthly_total: found.monthly_total } : {}, empty: changes.length === 0, problems }
+    }
     case 'snapshot': {
       const today = localDateKey(ctx.now)
       const weekStart = localDateKey(new Date(ctx.now.getTime() - 6 * 86_400_000))
@@ -403,10 +429,19 @@ const TICK_BUDGET_MS = 280_000
 const REVIEW_RESERVE_MS = 60_000
 const DECISION_RESERVE_MS = 30_000
 
-async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | undefined, deadline: number): Promise<void> {
+async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | undefined, deadline: number): Promise<Delivered | undefined> {
   const now = new Date()
   const memberName = member?.name ?? 'the family'
-  const ctx: ToolContext = { chatId: a.chatId, member: member ?? null, memberName, now, notices: [], shared: isGroupChat(a.chatId) }
+  const ctx: ToolContext = {
+    chatId: a.chatId,
+    member: member ?? null,
+    memberName,
+    now,
+    notices: [],
+    shared: isGroupChat(a.chatId),
+    // The hourly look at mail keeps markers of its own, so it never spends what the brief is to report.
+    ...(kind === 'urgent' ? { cursorScope: `urgent:${a.chatId}` } : {}),
+  }
   const tools = buildTools(ctx)
 
   const fetched = await fetchFor(kind, a, ctx, tools)
@@ -444,14 +479,20 @@ async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | u
   const evidence = `${clockLine(now)}\n\nINSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`
   // What the checks judge the draft against is what the run was given.
   noteRun({ input: evidence, metadata: { writer: result.model } })
-  await counted(a, member, staged, () => deliver(a, member, result, evidence, () => spentClean(a, staged()), deadline))
+  const delivered = await counted(a, member, staged, () => deliver(a, member, result, evidence, () => spentClean(a, staged()), deadline))
   // Asked once: whatever became of the post, Home keeps the question until it is answered.
   if (fetched.asked?.length) await markQuestionsAsked(fetched.asked)
+  return delivered
 }
 
-/** A member's own scheduled instruction: the model decides what to fetch, with read-only tools. */
-async function runCustom(a: Automation, member: Member | undefined, deadline: number): Promise<void> {
-  noteRun({ input: `INSTRUCTION:\n${a.instruction}` })
+/**
+ * A member's own scheduled instruction: the model decides what to fetch, with
+ * read-only tools. One handed to a helper runs in that helper's role and
+ * posts under its name; a helper removed since leaves the job to the bot.
+ */
+async function runCustom(a: Automation, member: Member | undefined, deadline: number): Promise<Delivered> {
+  const helper = a.helperId ? await getHelper(a.helperId).catch((): Helper | undefined => undefined) : undefined
+  noteRun({ input: `INSTRUCTION:\n${a.instruction}`, ...(helper ? { metadata: { helper: helper.name } } : {}) })
   const result = await counted(a, member, looksBefore, () => runAgent({
     chatId: a.chatId,
     chatType: isGroupChat(a.chatId) ? 'group' : 'private',
@@ -464,8 +505,13 @@ async function runCustom(a: Automation, member: Member | undefined, deadline: nu
     memberName: member?.name ?? 'the family',
     mode: 'watcher',
     history: false,
+    helper,
+    // Its own markers for what is new: a watch that looks at mail hourly
+    // would otherwise spend what the morning brief is there to report.
+    cursorScope: `auto:${a.id}`,
     text:
       `Scheduled automation "${a.label}" is due now. Carry out this instruction; whatever you write will be posted to the family chat, briefly:\n\n${a.instruction}\n\n` +
+      (a.repeat === 'until' ? UNTIL_PROMPT : '') +
       'If the instruction only wants a post under some condition and that condition is not met (nothing new, nothing to report), reply with exactly SKIP and nothing will be posted. Write nothing beside it: a quiet run needs no explanation of why it was quiet. ' +
       'If a tool fails or errors, never post the failure to the chat: write PROBLEM: followed by a one-line diagnosis, then SKIP on its own line. That, and only that, reaches the admins privately. ' +
       'Reply with the post alone: no preamble, no planning notes, no handover line such as "now the post:", no commentary about what the tools returned.',
@@ -474,7 +520,31 @@ async function runCustom(a: Automation, member: Member | undefined, deadline: nu
   const staged = () => result.cursors ?? []
   const evidence = `${clockLine(new Date())}\n\nINSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`
   noteRun({ input: evidence, metadata: { writer: result.model } })
-  await counted(a, member, staged, () => deliver(a, member, result, evidence, () => spentClean(a, staged()), deadline))
+  return counted(a, member, staged, () => deliver(a, member, result, evidence, () => spentClean(a, staged()), deadline, helper))
+}
+
+/**
+ * A check that runs until it finds what it is waiting for stops for good once
+ * it posts, so its writer is told as much, and the post ends with a line in
+ * code saying it has stopped: the family then knows to ask again if it was
+ * not the thing they meant.
+ */
+const UNTIL_PROMPT =
+  'This check stops for good once it posts anything, so post only when what the instruction is waiting for has happened. '
+const UNTIL_FOUND ="That's what I was waiting for, so I've stopped checking. Ask me to keep watching if you still want it."
+
+/**
+ * A one-off once it has had its run, and a watch-until once it has posted,
+ * has done its job and leaves the list, so Home shows only what is still to
+ * come. A failure here leaves a row that will not run again, and is logged.
+ */
+async function retire(a: Automation, why: string): Promise<void> {
+  try {
+    await deleteAutomation(a.id)
+    noteRun({ metadata: { retired: why } })
+  } catch (err) {
+    console.error(`[tick] could not remove ${a.label} after ${why}:`, describeError(err))
+  }
 }
 
 /**
@@ -702,6 +772,15 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
 }
 
 /**
+ * What became of a run's output: posted to the chat and what it read spent;
+ * a draft the checks held back, an admin told and what it read spent; spent
+ * without a post (quiet by choice); a PROBLEM;
+ * a service that was down or a draft nobody had time to judge; or held by
+ * the hourly cap.
+ */
+type Delivered = 'posted' | 'held' | 'spent' | 'problem' | 'unavailable' | 'capped'
+
+/**
  * Turn a run's output into at most one chat message. A lone SKIP line keeps
  * that part out of the chat whatever else it says; a marked PROBLEM goes to
  * the admins; the draft itself posts only once approved; tool notices report
@@ -725,7 +804,9 @@ async function deliver(
   evidence: string,
   spent: () => Promise<void>,
   deadline: number,
-): Promise<'spent' | 'problem' | 'unavailable' | 'capped'> {
+  /** The helper whose job this was, whose name the post goes out under once the checks have passed it. */
+  helper?: Helper,
+): Promise<Delivered> {
   const split = (part: string) => {
     const lines = part.split('\n')
     const skip = lines.some(isSkipLine)
@@ -776,7 +857,7 @@ async function deliver(
     // tick ran out of time to judge, leaves it for the next.
     if (!keepNew && (withheld || problems.length === 0 || result.wrote?.length)) {
       await spent()
-      return 'spent'
+      return withheld ? 'held' : 'spent'
     }
     // Counted against the stuck guard only when a problem is about what was
     // read, not a tool whose service is down or whose link has lapsed.
@@ -808,10 +889,15 @@ async function deliver(
     return 'capped'
   }
 
-  let posted = message
+  // A watch-until that posts has found what it waited for, and is retired once
+  // this is out; the family hears so in code, not in the writer's words. Not
+  // when what goes is only the notices beside a draft nobody judged.
+  const said = signed(helper, message)
+  const outgoing = a.repeat === 'until' && !keepNew ? `${said}\n\n${UNTIL_FOUND}` : said
+  let posted = outgoing
   let broken: PartlySent | null = null
   try {
-    await send(a.chatId, message)
+    await send(a.chatId, outgoing)
   } catch (err) {
     // The start is in the chat, and the next run would post it all again:
     // spent like a whole post, with what went on record and an admin told.
@@ -856,7 +942,7 @@ async function deliver(
       `Watcher **${a.label}** ran out of room: the model's output allowance cut its post short, so it went out without its unfinished end, and whatever that held was not posted. A shorter instruction, or a larger allowance for this watcher, stops it.`,
     )
   }
-  return keepNew ? 'unavailable' : 'spent'
+  return keepNew ? 'unavailable' : 'posted'
 }
 
 /**
@@ -1029,8 +1115,9 @@ async function runDue(deadline: number): Promise<{ ran: number; skipped: number 
       console.warn(`[tick] out of time: ${due.length - i} due automation(s) left for the next tick`)
       break
     }
-    // Claim before running: an overlapping tick then finds nothing to do.
-    const following = nextRun(a.cronExpr, new Date(now.getTime() + 1000))
+    // Claim before running: an overlapping tick then finds nothing to do. A
+    // one-off has no time after this one, so the claim switches it off.
+    const following = a.repeat === 'once' ? null : nextRun(a.cronExpr, new Date(now.getTime() + 1000))
     if (!(await claimAutomation(a.id, now, following))) {
       console.info(`[tick] ${a.label}: already claimed by another tick, skipped`)
       skipped++
@@ -1040,7 +1127,13 @@ async function runDue(deadline: number): Promise<{ ran: number; skipped: number 
     const outcome = await traceRun(
       'hearth.watcher',
       { sessionId: a.chatId, tags: ['watcher'], metadata: { label: a.label, kind: a.kind ?? 'custom', automation: String(a.id) } },
-      () => runClaimed(a, deadline),
+      async () => {
+        const out = await runClaimed(a, deadline)
+        // Its one run, whatever came of it: a reminder held back from a room
+        // with a stranger in it is not sent hours later, as a brief is not.
+        if (a.repeat === 'once') await retire(a, 'its one run')
+        return out
+      },
     )
     if (outcome === 'ran') ran++
     else if (outcome === 'skipped') skipped++
@@ -1104,7 +1197,17 @@ async function runClaimed(a: Automation, deadline: number): Promise<'ran' | 'ski
     const run = () => (isWatcherKind(a.kind) ? runReadyMade(a.kind, a, member, deadline) : runCustom(a, member, deadline))
     // Whoever set it up is the run's user on every call in it, the checks
     // included, not on the writer's alone.
-    await (member ? traced({ userId: member.telegramUserId }, run) : run())
+    const delivered = await (member ? traced({ userId: member.telegramUserId }, run) : run())
+    if (a.repeat === 'until' && delivered === 'posted') await retire(a, 'it found what it was waiting for')
+    // It found something, and an admin has the draft: what it read is spent,
+    // so watching on would only check for good, hourly, for what has gone by.
+    if (a.repeat === 'until' && delivered === 'held') {
+      await retire(a, 'what it found was held back')
+      await tellAdminQuietly(
+        member,
+        `**${a.label}** has stopped watching: it found something, but the checks held its post back (the draft is above). Ask again if it should keep watching.`,
+      )
+    }
     return 'ran'
   } catch (err) {
     console.error(`[tick] automation ${a.id} failed:`, err)
@@ -1192,6 +1295,8 @@ export async function POST(req: Request) {
   const result = await runDue(deadline)
   await maybeConsolidateMemory(new Date(), deadline)
   await pruneModelEvents(30)
+  // The household's record of what was changed keeps ninety days.
+  await pruneActivity(90).catch((err) => console.error('[tick] could not prune the activity log:', describeError(err)))
   // A proposal whose occasion has passed, or whose event got to the calendar
   // another way, is no longer a question for anyone. The lists already hide
   // these; this writes down why.

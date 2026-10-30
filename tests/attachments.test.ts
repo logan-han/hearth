@@ -41,6 +41,7 @@ vi.mock('@/lib/db/queries', () => ({
   connectionsFor: vi.fn(async () => []),
   deleteConnection: vi.fn(async () => {}),
   calendarToken: vi.fn(async () => 'tok'),
+  listHelpers: vi.fn(async () => []),
 }))
 vi.mock('@vercel/functions', () => ({ waitUntil: (p: Promise<unknown>) => p }))
 

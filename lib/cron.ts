@@ -17,6 +17,21 @@ export function nextRun(cronExpr: string, from: Date = new Date(), tz: string = 
   return next ?? null
 }
 
+/**
+ * The five-field cron for one moment in household time: its minute, hour, day
+ * and month. It comes round again on that date every year, so it is only for
+ * an automation that switches itself off after its first run.
+ */
+export function cronAt(at: Date, tz: string = timezone()): string {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', { timeZone: tz, hour12: false, month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric' })
+      .formatToParts(at)
+      .filter((p) => p.type !== 'literal')
+      .map((p) => [p.type, Number(p.value)]),
+  ) as Record<string, number>
+  return `${parts.minute} ${parts.hour % 24} ${parts.day} ${parts.month} *`
+}
+
 /** True when the expression parses as a cron croner accepts. */
 export function isValidCron(cronExpr: string, tz: string = timezone()): boolean {
   try {

@@ -7,6 +7,7 @@ import {
   integer,
   index,
   uniqueIndex,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core'
 import { sql } from 'drizzle-orm'
 
@@ -85,6 +86,12 @@ export const connections = pgTable(
     scopes: text('scopes'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * Linked to be read and never written from, by its owner's choice: no
+     * draft, send or calendar entry goes through it, whoever asks. Relinking
+     * the account keeps the choice.
+     */
+    readOnly: boolean('read_only').notNull().default(false),
   },
   (t) => [uniqueIndex('connections_member_provider_idx').on(t.memberId, t.provider)],
 )
@@ -186,6 +193,15 @@ export const automations = pgTable(
     lastRunAt: timestamp('last_run_at', { withTimezone: true }),
     enabled: boolean('enabled').notNull().default(true),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * always: at every time its cron gives. once: at the first of them, then
+     * it switches itself off, for "tomorrow at 5pm" and work handed over to do
+     * later. until: at every time until a run has something to post, then it
+     * switches itself off, for "tell us when the camp dates are out".
+     */
+    repeat: text('repeat').notNull().default('always'),
+    /** The helper whose job this is, who runs it and is named on what it posts; null for Hearth itself. */
+    helperId: integer('helper_id').references((): AnyPgColumn => helpers.id, { onDelete: 'set null' }),
   },
   (t) => [
     index('automations_next_run_idx').on(t.enabled, t.nextRunAt),
@@ -194,6 +210,124 @@ export const automations = pgTable(
     // posts every day; the index makes the second insert a no-op instead.
     uniqueIndex('automations_chat_kind_idx').on(t.chatId, t.kind).where(sql`${t.kind} is not null`),
   ],
+)
+
+/**
+ * Something the household wants to get done over weeks rather than in one
+ * message: a trip saved for, a party planned, a house readied for sale. Its
+ * steps are its own, never a shared list, so a goal set in a member's own
+ * chat stays theirs; a check-in automation brings it back to the chat until
+ * it is done or dropped.
+ */
+export const goals = pgTable(
+  'goals',
+  {
+    id: serial('id').primaryKey(),
+    chatId: text('chat_id').notNull(),
+    memberId: integer('member_id').references(() => members.id, { onDelete: 'set null' }),
+    title: text('title').notNull(),
+    /** What done looks like, in the household's words. */
+    outcome: text('outcome'),
+    /** The day it is meant to be done by, as YYYY-MM-DD in household time. */
+    targetDate: text('target_date'),
+    /** The check-in that brings it back to the chat; gone once the goal is closed. */
+    automationId: integer('automation_id').references(() => automations.id, { onDelete: 'set null' }),
+    status: text('status').notNull().default('active'), // active | done | dropped
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    closedAt: timestamp('closed_at', { withTimezone: true }),
+  },
+  (t) => [index('goals_status_idx').on(t.status)],
+)
+
+/** One step of a goal's plan, in the order it was planned: one thing a person can do. */
+export const goalSteps = pgTable(
+  'goal_steps',
+  {
+    id: serial('id').primaryKey(),
+    goalId: integer('goal_id')
+      .notNull()
+      .references(() => goals.id, { onDelete: 'cascade' }),
+    content: text('content').notNull(),
+    done: boolean('done').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('goal_steps_goal_idx').on(t.goalId)],
+)
+
+/** Progress on a goal as someone reported it: "booked the venue", "another $400 in the trip account". */
+export const goalUpdates = pgTable(
+  'goal_updates',
+  {
+    id: serial('id').primaryKey(),
+    goalId: integer('goal_id')
+      .notNull()
+      .references(() => goals.id, { onDelete: 'cascade' }),
+    memberId: integer('member_id').references(() => members.id, { onDelete: 'set null' }),
+    note: text('note').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('goal_updates_goal_idx').on(t.goalId, t.createdAt)],
+)
+
+/**
+ * A named specialist the family can talk to directly ("Chef, what's for
+ * dinner?") or hand a job to: a role it plays and the tool groups it starts
+ * with. One bot speaks for all of them, each reply under its helper's name.
+ */
+export const helpers = pgTable(
+  'helpers',
+  {
+    id: serial('id').primaryKey(),
+    /** As the family writes it; two helpers never share a name in any case. */
+    name: text('name').notNull(),
+    /** Who it is and what it looks after, as its standing instructions. */
+    role: text('role').notNull(),
+    /** The tool groups its turns start with, as a JSON array. */
+    groups: text('groups').notNull().default('[]'),
+    createdBy: integer('created_by').references(() => members.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('helpers_name_idx').on(sql`lower(${t.name})`)],
+)
+
+/**
+ * Something the household does the same way each time, kept once and run by
+ * name: "the Sunday reset", "getting ready for a school term". Its steps are
+ * instructions to the bot, carried out with whatever tools the turn has.
+ */
+export const routines = pgTable(
+  'routines',
+  {
+    id: serial('id').primaryKey(),
+    name: text('name').notNull(),
+    steps: text('steps').notNull(),
+    createdBy: integer('created_by').references(() => members.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('routines_name_idx').on(sql`lower(${t.name})`)],
+)
+
+/**
+ * What the bot changed, one row a change: the household's record of what it
+ * did, for whom and where, kept so anyone can look back over it rather than
+ * take its word. Pruned after ninety days.
+ */
+export const activity = pgTable(
+  'activity',
+  {
+    id: serial('id').primaryKey(),
+    chatId: text('chat_id').notNull(),
+    memberId: integer('member_id').references(() => members.id, { onDelete: 'set null' }),
+    /** chat | watcher | sweep | mcp */
+    via: text('via').notNull(),
+    tool: text('tool').notNull(),
+    /** One line a person can read: "added milk, eggs to the shopping list". */
+    summary: text('summary').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('activity_created_idx').on(t.createdAt), index('activity_chat_idx').on(t.chatId, t.createdAt)],
 )
 
 /** Outbound email held for explicit human confirmation. Never sent silently. */
@@ -322,3 +456,9 @@ export type EventProposal = typeof eventProposals.$inferSelect
 export type Memory = typeof memories.$inferSelect
 export type MemoryQuestion = typeof memoryQuestions.$inferSelect
 export type Secret = typeof secrets.$inferSelect
+export type Goal = typeof goals.$inferSelect
+export type GoalUpdate = typeof goalUpdates.$inferSelect
+export type GoalStep = typeof goalSteps.$inferSelect
+export type Helper = typeof helpers.$inferSelect
+export type Routine = typeof routines.$inferSelect
+export type Activity = typeof activity.$inferSelect

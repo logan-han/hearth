@@ -37,6 +37,8 @@ export const MANAGED_KEYS = [
   'TIMEZONE',
   'LANGUAGE',
   'UNITS',
+  'ASSISTANT_NAME',
+  'ASSISTANT_PERSONA',
 ] as const
 
 export type ManagedKey = (typeof MANAGED_KEYS)[number]
@@ -360,6 +362,14 @@ export const SETTING_META: Record<
     group: 'Behaviour', label: 'Units',
     help: 'Metric or imperial, for weather, distances and recipes.',
     options: ['metric', 'imperial'],
+  },
+  ASSISTANT_NAME: {
+    group: 'Behaviour', label: 'Name',
+    help: 'What the bot calls itself. In a group it also answers a message that opens with its name ("Pip, what\'s on today?") without an @mention. Empty means Hearth.',
+  },
+  ASSISTANT_PERSONA: {
+    group: 'Behaviour', label: 'Manner',
+    help: 'A line or two on how it talks in the chat, e.g. "warm and brief, with a dry sense of humour". Scheduled posts keep their own plain style, and the facts are never bent to suit it.',
   },
 }
 

@@ -4,6 +4,7 @@ import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
 import type { ToolContext } from '@/lib/tools/context'
 import { commitCursors } from '@/lib/tools/cursor'
+import { cronAt, localDateKey, localToUtc } from '@/lib/cron'
 
 const listMail = vi.fn()
 const readMail = vi.fn()
@@ -45,7 +46,7 @@ const { mailTools } = await import('@/lib/tools/mail')
 const { calendarTools } = await import('@/lib/tools/calendar')
 const { familyCalendarTools } = await import('@/lib/tools/familycal')
 const { memoryTools } = await import('@/lib/tools/memory')
-const { automationTools } = await import('@/lib/tools/automation')
+const { automationTools, resumeAt } = await import('@/lib/tools/automation')
 const { searchTools } = await import('@/lib/tools/search')
 const { requireMember } = await import('@/lib/tools/context')
 const { UnconfirmedError } = await import('@/lib/deadline')
@@ -1590,6 +1591,95 @@ describe('automation tools', () => {
     const r = await call(automationTools(ctx), 'create_automation', { label: 'sweep', cron: '45 7 * * *', instruction: 'i' })
     expect(r.id).toBeDefined()
     expect((await call(automationTools(ctx), 'list_automations', {})).scheduler).toBeNull()
+  })
+
+  describe('jobs that run once, or until they find something', () => {
+    // Tomorrow at 5pm in the household's zone, whenever the suite runs.
+    const now = new Date()
+    const tomorrow = localDateKey(new Date(now.getTime() + 86_400_000))
+    const at = `${tomorrow}T17:00`
+
+    it('takes a single local time for a one-off, and keeps it as that moment', async () => {
+      const r = await call(automationTools({ ...ctx, now }), 'create_automation', { label: 'plumber', at, instruction: 'Remind Rowan to call the plumber.' })
+      expect(r).toMatchObject({ repeat: 'once, then it is gone', timezone: 'Australia/Melbourne' })
+      expect(r.cron).toBeUndefined()
+      const row = (await q.getAutomation(Number(r.id)))!
+      expect(row.repeat).toBe('once')
+      expect(row.cronExpr).toBe(cronAt(localToUtc(at)))
+      expect(row.nextRunAt.getTime()).toBe(localToUtc(at).getTime())
+      const listed = (await call(automationTools({ ...ctx, now }), 'list_automations', {})).automations as Record<string, unknown>[]
+      expect(listed[0].repeat).toBe('once, then it is gone')
+    })
+
+    it('runs a cron once when asked, and until something happens when asked', async () => {
+      const once = await call(automationTools(ctx), 'create_automation', { label: 'tonight', cron: '0 20 * * *', repeat: 'once', instruction: 'Look into it.' })
+      const until = await call(automationTools(ctx), 'create_automation', {
+        label: 'camp dates', cron: '0 8-20 * * *', repeat: 'until', instruction: 'Post the camp dates once the school emails them; otherwise SKIP.',
+      })
+      expect((await q.getAutomation(Number(once.id)))!.repeat).toBe('once')
+      expect((await q.getAutomation(Number(until.id)))!.repeat).toBe('until')
+      expect(until.repeat).toBe('until it finds what it is waiting for, then it is gone')
+      // A schedule kept as it is is not called anything.
+      const plain = await call(automationTools(ctx), 'create_automation', { label: 'bins', cron: '0 19 * * 1', instruction: 'i' })
+      expect((await q.getAutomation(Number(plain.id)))!.repeat).toBe('always')
+      const listed = (await call(automationTools(ctx), 'list_automations', {})).automations as Record<string, unknown>[]
+      expect(listed.find((a) => a.id === plain.id)!.repeat).toBeUndefined()
+    })
+
+    it('refuses a time that has passed, one it cannot read, and a single time asked to repeat', async () => {
+      const past = await call(automationTools({ ...ctx, now }), 'create_automation', { label: 'x', at: '2020-01-01T09:00', instruction: 'i' })
+      expect(String(past.error)).toContain('has already passed')
+      const garbled = await call(automationTools({ ...ctx, now }), 'create_automation', { label: 'x', at: 'tomorrow arvo', instruction: 'i' })
+      expect(String(garbled.error)).toContain('is not a time')
+      const repeating = await call(automationTools({ ...ctx, now }), 'create_automation', { label: 'x', at, repeat: 'always', instruction: 'i' })
+      expect(String(repeating.error)).toContain('A single time runs once')
+      const neither = await call(automationTools(ctx), 'create_automation', { label: 'x', instruction: 'i' })
+      expect(String(neither.error)).toContain('Give a cron for a schedule, or at for a single time.')
+      expect(await q.listAutomations('-100')).toHaveLength(0)
+    })
+
+    it('holds a one-off to the tick grid like any schedule', async () => {
+      await q.recordTick(new Date('2026-08-26T22:00:00Z'))
+      await q.recordTick(new Date('2026-08-26T23:00:01Z'))
+      const r = await call(automationTools({ ...ctx, now }), 'create_automation', { label: 'x', at: `${tomorrow}T17:30`, instruction: 'i' })
+      expect(String(r.error)).toContain('hourly, on the hour')
+      expect(await q.listAutomations('-100')).toHaveLength(0)
+    })
+
+    it('keeps a one-off asked for next year to next year, though its cron has no year', async () => {
+      const nextYear = `${Number(localDateKey(now).slice(0, 4)) + 1}-12-24T09:00`
+      const r = await call(automationTools({ ...ctx, now }), 'create_automation', { label: 'carols', at: nextYear, instruction: 'i' })
+      expect((await q.getAutomation(Number(r.id)))!.nextRunAt.getTime()).toBe(localToUtc(nextYear).getTime())
+      expect(String(r.next_run_local)).toContain(nextYear.slice(0, 4))
+    })
+
+    it("resumes a paused one-off at its own time, at once if that has passed, and a schedule on its cron", () => {
+      const soon = new Date(now.getTime() + 3 * 86_400_000)
+      expect(resumeAt({ repeat: 'once', cronExpr: cronAt(soon), nextRunAt: soon }, now)).toEqual(soon)
+      const gone = new Date(now.getTime() - 86_400_000)
+      expect(resumeAt({ repeat: 'once', cronExpr: cronAt(gone), nextRunAt: gone }, now)).toEqual(now)
+      const weekly = resumeAt({ repeat: 'always', cronExpr: '0 19 * * 1', nextRunAt: gone }, now)!
+      expect(weekly.getTime()).toBeGreaterThan(now.getTime())
+    })
+
+    it('resumes a paused one-off in the chat at its own time', async () => {
+      const r = await call(automationTools({ ...ctx, now }), 'create_automation', { label: 'plumber', at, instruction: 'i' })
+      await call(automationTools(ctx), 'pause_automation', { id: r.id, enabled: false })
+      const back = await call(automationTools(ctx), 'pause_automation', { id: r.id, enabled: true })
+      expect((await q.getAutomation(Number(r.id)))!.nextRunAt.getTime()).toBe(localToUtc(at).getTime())
+      expect(back.enabled).toBe(true)
+    })
+
+    it('lists a way of repeating it does not know by what is stored', async () => {
+      await q.addAutomation({ chatId: '-100', label: 'odd', cronExpr: '0 8 * * *', instruction: 'i', nextRunAt: new Date(Date.now() + 86_400_000), repeat: 'fortnightly' as never })
+      const [listed] = (await call(automationTools(ctx), 'list_automations', {})).automations as Record<string, unknown>[]
+      expect(listed.repeat).toBe('fortnightly')
+    })
+
+    it('says a cron that can never come round again will never fire', async () => {
+      const r = await call(automationTools(ctx), 'create_automation', { label: 'x', cron: '0 9 31 2 *', instruction: 'i' })
+      expect(String(r.error)).toMatch(/not a valid|never fire/)
+    })
   })
 })
 

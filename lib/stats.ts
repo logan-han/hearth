@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm'
 import { db } from './db'
-import { formatLocal, formatLocalDate, localDateKey, dayAfter, timezone } from './cron'
+import { formatLocal, formatLocalDate, localDateKey, localToUtc, dayAfter, timezone } from './cron'
 import * as ps from './providers/pocketsmith'
 import * as notion from './providers/notion'
 import * as jira from './providers/jira'
@@ -10,6 +10,7 @@ import { chainHealth, type ChainHealth } from './model-events'
 import { getSetting } from './db/queries'
 import { schedulerPulse, tickCadence, onGrid, nextTickOnOrAfter, describeGrid, type TickGrid } from './scheduler'
 import { isBuiltinKind } from './watchers'
+import { roleInBrief } from './helpers'
 
 export type Stats = Awaited<ReturnType<typeof gatherStats>>
 export type FamilyStats = Awaited<ReturnType<typeof gatherFamilyStats>>
@@ -212,6 +213,9 @@ function safeStrangers(raw: unknown): number {
   }
 }
 
+/** How many of the latest changes Home lists; /activity in a chat has that chat's. */
+const ACTIVITY_SHOWN = 15
+
 /** How many ticked items Home carries per list, the most recently added; the rest are a click away. */
 const TICKED_SHOWN = 10
 
@@ -219,9 +223,9 @@ const TICKED_SHOWN = 10
  * The subset any recognised family member may see: shared household things
  * only. No settings, no per-chat internals, no integration wiring.
  */
-export async function gatherFamilyStats(month?: string) {
+export async function gatherFamilyStats(month?: string, viewer?: number | null) {
   const view = monthView(month, ctxNow())
-  const [counts, upcoming, automations, listRows, monthEvents, proposalRows, memoryRows, questionRows, lastTickAt, prevTickAt] = await Promise.all([
+  const [counts, upcoming, automations, listRows, monthEvents, proposalRows, memoryRows, questionRows, lastTickAt, prevTickAt, activityRows, goalRows, draftRows, helperRows] = await Promise.all([
     db().execute(sql`
       select
         (select count(*) from family_events where not cancelled) as events,
@@ -235,7 +239,7 @@ export async function gatherFamilyStats(month?: string) {
     // Every one: Home is the only place a member can pause or delete one from
     // the web, and a paused one sorts last, so a cut-off would hide it.
     db().execute(sql`
-      select id, label, cron_expr, kind, enabled, next_run_at from automations
+      select id, label, cron_expr, kind, enabled, next_run_at, repeat from automations
       order by enabled desc, next_run_at
     `),
     // Every open item, but only the latest ticked ones: a weekly shop ticks
@@ -281,6 +285,39 @@ export async function gatherFamilyStats(month?: string) {
     `),
     getSetting('last_tick_at').catch((): string | null => null),
     getSetting('prev_tick_at').catch((): string | null => null),
+    // What the bot changed lately, in the family's groups, in the viewer's
+    // own chats and in the nightly memory pass, whose facts Home already
+    // shows everyone: someone else's private chat (their drafts, their
+    // calendar) is theirs to look back over, not the household's.
+    db().execute(sql`
+      select a.id, a.summary, a.via, a.created_at, mb.name as who,
+             case when a.via = 'sweep' then 'the nightly memory pass'
+                  else coalesce(c.title, (select name from members where telegram_user_id = a.chat_id), a.chat_id) end as chat
+      from activity a
+      left join members mb on mb.id = a.member_id
+      left join chats c on c.chat_id = a.chat_id
+      where a.chat_id like '-%' or a.via = 'sweep' or a.member_id = ${viewer ?? -1}
+      order by a.created_at desc, a.id desc limit ${ACTIVITY_SHOWN}
+    `),
+    // The goals in progress, by the same rule: the groups' and the viewer's
+    // own. Each with its latest progress note.
+    db().execute(sql`
+      select g.id, g.title, g.outcome, g.target_date,
+             (select u.note from goal_updates u where u.goal_id = g.id order by u.created_at desc, u.id desc limit 1) as latest
+      from goals g
+      where g.status = 'active' and (g.chat_id like '-%' or g.member_id = ${viewer ?? -1})
+      order by g.target_date nulls last, g.id
+    `),
+    // The viewer's own email drafts waiting on their yes: nobody else's, since only the writer can send one.
+    db().execute(sql`
+      select d.id, d.recipients, d.cc, d.subject, d.body, d.provider, d.created_at,
+             coalesce(c.title, (select name from members where telegram_user_id = d.chat_id), d.chat_id) as chat
+      from email_drafts d left join chats c on c.chat_id = d.chat_id
+      where d.status = 'pending' and d.member_id = ${viewer ?? -1}
+      order by d.id desc limit 10
+    `),
+    // The household's helpers, which anyone can call by name.
+    db().execute(sql`select id, name, role from helpers order by id`),
   ])
 
   // One row per item, empty lists included; fold into per-list shapes the
@@ -292,6 +329,12 @@ export async function gatherFamilyStats(month?: string) {
     if (r.id != null) list.items.push({ id: n(r.id), content: String(r.content), done: Boolean(r.done) })
     lists.set(name, list)
   }
+
+  // Each goal's own steps, in the order they were planned.
+  const goalIds = rows(goalRows).map((r) => n(r.id))
+  const stepRows = goalIds.length
+    ? rows(await db().execute(sql`select id, goal_id, content, done from goal_steps where goal_id in (${sql.join(goalIds.map((id) => sql`${id}`), sql`, `)}) order by id`))
+    : []
 
   const c = one(counts)
   const grid = tickCadence(lastTickAt, prevTickAt)
@@ -314,6 +357,8 @@ export async function gatherFamilyStats(month?: string) {
       enabled: Boolean(r.enabled),
       // Part of the product rather than something a member set up: Home offers a pause, not a delete.
       builtin: isBuiltinKind(r.kind == null ? null : String(r.kind)),
+      // A job that goes once it has run, or once it has found what it waits for.
+      repeat: r.repeat === 'once' || r.repeat === 'until' ? (r.repeat as 'once' | 'until') : null,
       ...timing(grid, r),
     })),
     lists: [...lists.values()].map((l) => {
@@ -340,6 +385,39 @@ export async function gatherFamilyStats(month?: string) {
       question: String(r.question),
       candidate: String(r.candidate),
       since: formatLocalDate(new Date(r.created_at as string)),
+    })),
+    helpers: rows(helperRows).map((r) => ({ id: n(r.id), name: String(r.name), role: roleInBrief(String(r.role)) })),
+    drafts: rows(draftRows).map((r) => ({
+      id: n(r.id),
+      to: String(r.recipients),
+      cc: r.cc ? String(r.cc) : null,
+      subject: String(r.subject),
+      body: String(r.body),
+      from: r.provider === 'microsoft' ? 'Outlook' : 'Gmail',
+      chat: String(r.chat),
+      when: formatLocal(new Date(r.created_at as string)),
+    })),
+    goals: rows(goalRows).map((r) => {
+      const steps = stepRows.filter((i) => n(i.goal_id) === n(r.id)).map((i) => ({ id: n(i.id), content: String(i.content), done: Boolean(i.done) }))
+      const target = r.target_date ? String(r.target_date) : null
+      return {
+        id: n(r.id),
+        title: String(r.title),
+        outcome: r.outcome ? String(r.outcome) : null,
+        target: target ? formatLocalDate(localToUtc(target)) : null,
+        daysLeft: target ? Math.round((Date.parse(`${target}T00:00:00Z`) - Date.parse(`${localDateKey(new Date())}T00:00:00Z`)) / DAY_MS) : null,
+        done: steps.filter((i) => i.done).length,
+        steps,
+        latest: r.latest ? String(r.latest) : null,
+      }
+    }),
+    activity: rows(activityRows).map((r) => ({
+      id: n(r.id),
+      summary: String(r.summary),
+      // Nobody asked for a scheduled run's or the nightly pass's changes; Hearth made them on its own.
+      who: r.who ? String(r.who) : r.via === 'watcher' || r.via === 'sweep' ? 'Hearth, on its own' : 'someone',
+      chat: String(r.chat),
+      when: formatLocal(new Date(r.created_at as string)),
     })),
   }
 }

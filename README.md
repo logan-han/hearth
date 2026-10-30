@@ -7,7 +7,10 @@
 A self-hosted family assistant that lives in one Telegram chat. It answers questions
 with web search, reads and writes each member's own email and calendar (Google and
 Microsoft), publishes a shared family calendar everyone can subscribe to, and runs
-reminders on a schedule.
+reminders on a schedule. It also works on its own between messages: it keeps the
+household's goals moving with weekly check-ins, speaks up the hour mail needs
+someone, takes jobs to do in the background through named helpers, and keeps a
+record of everything it changes, so nobody has to take its word for it.
 
 Built to run on free tiers (Vercel Hobby, Neon Postgres, Upstash QStash, Tavily)
 and a local-first OpenAI-compatible LLM, with OpenRouter and then Gemini's free
@@ -21,7 +24,9 @@ quota behind it.
 - [Keeping watch](#keeping-watch)
 - [Sweeping email onto the calendar](#sweeping-email-onto-the-calendar)
 - [What it remembers](#what-it-remembers)
-- [Shared lists](#shared-lists) · [Money](#money) · [Notion](#notion) · [Jira](#jira)
+- [Goals](#goals) · [Helpers](#helpers) · [Routines](#routines) · [Jobs for later](#jobs-for-later-once-or-until-something-happens)
+- [Shared lists](#shared-lists) · [Recipes](#recipes) · [Money](#money) · [Finding a time](#finding-a-time) · [Notion](#notion) · [Jira](#jira)
+- [What it changed](#what-it-changed) · [Its name and manner](#its-name-and-manner)
 - [The web dashboard](#the-web-dashboard)
 - [Claude, and anything else that speaks MCP](#claude-and-anything-else-that-speaks-mcp)
 - [Observability](#observability)
@@ -60,10 +65,13 @@ decision that clock cuts short is held back for an admin, not posted unchecked,
 with what it read left new for the next run; and the nightly memory pass waits
 for a tick with a whole turn left.
 
-A chat turn does not see all 54 tools. The 23 in the core are always in reach
+A chat turn does not see all 70 tools. The 23 in the core are always in reach
 (search, weather, lists, the shared calendar and its proposals, memory); mail,
-personal calendar, money, Notion, Jira and automations are switched on by cues
-in the message, and the model can unlock any group itself with `more_tools`.
+personal calendar, money, Notion, Jira, automations, goals, helpers, routines
+and the kitchen are switched on by cues in the message, a helper's or a
+routine's own name among them, and by what is open in the chat (a draft brings
+the mail tools, a goal in progress the goal tools), and the model can unlock
+any group itself with `more_tools`.
 Fewer tools per call is one of the better-evidenced ways to keep a small model
 picking the right one. Watchers and the nightly memory pass get a fixed short
 list instead.
@@ -97,7 +105,7 @@ admin told the first time the cap holds something back.
 | `app/api/oauth/{google,microsoft}/` | OAuth start + callback |
 | `app/api/calendar/[token]/` | Token-protected ICS feed |
 | `app/connect/page.tsx` | Link and unlink accounts, shows the ICS URL |
-| `app/page.tsx` | Sign-in, or Home: calendar, next up, reminders, lists |
+| `app/page.tsx` | Sign-in, or Home: what waits on a yes, calendar, goals, next up, reminders, lists, what was changed |
 | `app/setup/` | Admin: first-run guide — bot, webhook, family, model, timezone |
 | `app/system/` | Admin: model chain, traffic, integrations, chats |
 | `app/settings/` | Admin: family, keys, model pickers, Telegram webhook |
@@ -108,7 +116,11 @@ admin told the first time the cap holds something back.
 | `lib/watchers.ts` | The ready-made watchers: schedule, phrasing rules, context tools |
 | `lib/builtins.ts` | Installs the built-in watchers in every household group and keeps them in step with their definitions |
 | `lib/model.ts` | Tiered model chain: local, OpenRouter, Gemini |
-| `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations |
+| `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations, goals, helpers, routines, activity |
+| `lib/activity.ts` | The household's record of every change the bot makes, one readable line each |
+| `lib/helpers.ts` | Named helpers: the ready-made ones, who a message calls, signing what they say |
+| `lib/free-time.ts` | Free time worked out from busy time, for `find_free_time` |
+| `lib/recurring.ts` | Subscriptions and regular bills found in the bank feed |
 | `lib/tools/router.ts` | Which tool groups a chat turn sees, and the `more_tools` escape hatch |
 | `app/api/mcp/route.ts` | The same tools over MCP, behind a per-member key |
 | `lib/mcp.ts` | What an MCP client is offered, and who each call runs as |
@@ -364,14 +376,19 @@ SSO redirect.
 | `/connect` | DMs a personal link to link Google or Microsoft |
 | `/accounts` | List linked accounts |
 | `/unlink google` | Remove an account |
+| `/readonly google` | Let the bot read an account but never draft, send or add events through it; `/readonly google off` allows it again |
 | `/calendar` | The family calendar subscription URL; `/calendar new` (admin) replaces it if it has got out, and DMs the new one |
+| `/pending` | Everything in this chat waiting on a yes: your own email drafts here, dates found for the family calendar, and in a group the open questions |
+| `/activity` | What the bot changed in this chat lately, newest first, with who asked and how |
 | `/mcp` | DMs a personal key for the MCP endpoint; `/mcp new` replaces it, `/mcp off` revokes it |
 | `/whoami` | Your Telegram id |
 | `/members` | Who the bot answers to |
 | `/allow <id>` | Admin: let someone in, or reply to their message with `/allow` |
 | `/deny <id>` | Admin: revoke someone |
 
-In a group, @mention the bot or reply to one of its messages. Every group message
+In a group, @mention the bot, open a message with its name ("Hearth, is it bin
+night?", or whatever the household has named it), or reply to one of its
+messages. A helper is called the same way, by its own name. Every group message
 is stored as context either way. Set `AMBIENT_MODE=on` to let the bot decide for
 itself whether an unaddressed message deserves an answer. The decision is a
 typed choice (reply, stay silent, unsure) from the head of the model chain,
@@ -500,9 +517,19 @@ parents' group for one question does not start a morning brief there.
 
 **/watch** adds one to a DM, or switches a paused one back on:
 
-- `/watch morning` — the brief, in a DM as well, where it reads your own mailbox and calendar.
-- `/watch snapshot` — the money snapshot.
-- `/watch list` — what this chat is already watching.
+- `/watch morning`: the brief, in a DM as well, where it reads your own mailbox and calendar.
+- `/watch snapshot`: the money snapshot.
+- `/watch urgent`: **Needs you now**, hourly from 8am to 8pm. It reads the mail
+  that arrived since its last look, on markers of its own so the morning brief
+  still reports the same mail, and posts only what someone has to act on before
+  tomorrow morning: a deadline today or tomorrow, a change to today's plans, a
+  payment that failed, a reply someone is waiting on. Everything else waits for
+  the brief, and an hour with no new mail costs no model call. A mailbox that
+  will not answer is left for the brief to report once a day, not every hour.
+- `/watch subscriptions`: the 1st of each month at 6pm, the subscriptions and
+  bills that changed over the month (see [Subscriptions and bills](#subscriptions-and-bills)),
+  and nothing at all in a month when none did.
+- `/watch list`: what this chat is already watching.
 
 Watchers are grounded before they are clever. Each ready-made watcher fetches
 its data in code first, so an hour with nothing new never reaches a model at
@@ -521,7 +548,9 @@ templates don't cover is a sentence away:
 describe a schedule in plain words and it becomes a custom automation with
 read-only tools, the same right to stay silent, and the same post decision.
 It reads its author's own mailbox and nobody else's, even in the group: its
-problems and held-back drafts go to its author first.
+problems and held-back drafts go to its author first. And it keeps its own
+markers for what is new, so an hourly watch over the mail never spends what the
+morning brief is there to report.
 
 What a watcher read counts as seen only once it has reached someone. A run that
 fails, reports a PROBLEM, has its post refused or runs out of time for the post
@@ -598,6 +627,116 @@ brief and the other watchers as it does for live replies.
 Home lists what is remembered with a Forget for each. Forgetting is soft, so a
 fact can be brought back by hand if a correction was wrong.
 
+## Goals
+
+Some things take weeks: a trip to save for, a birthday party, a house to ready
+for sale. A goal holds one of those, and the bot keeps it moving between
+conversations rather than waiting to be asked.
+
+> we want to save $6,000 for Bali by March
+> we booked the flights
+> how are we going with the party?
+
+`create_goal` keeps the goal, what done looks like and the date it is meant for,
+and its plan as steps of its own, ticked off in the chat ("we booked the
+venue" ticks "Book the venue") or on Home, never one of the household's shared
+lists. The bot drafts the steps itself when none are given, and shows them. A
+check-in is set up beside
+it, Sunday at 7pm unless asked otherwise: an ordinary custom automation that
+reads the goal with `goal_status` and posts the progress, the next open step and
+the days left, ending with one question that would move it forward. It goes
+through the same checks as any scheduled post, so a check-in can only say what
+the goal's record says.
+
+"We booked the flights" is progress in passing: while a goal is in progress in
+a chat, the goal tools are in reach whatever the wording, and the context names
+each goal with its id, so `update_goal` ticks the step and keeps the note on
+its record in the member's words. Done or dropped closes it and removes its
+check-in; reopening one sets the check-in up again. A group sees its own goals;
+a member's own chat, and their MCP client, sees theirs from anywhere as well. A
+goal set in a DM never turns up in the group, not even through a scheduled run
+the member set up there, which reads their mail but posts to the room; its
+steps are its own; Home shows it to its owner alone; and its check-in, listed
+with every reminder on Home, is called only "Goal check-in".
+
+## Helpers
+
+A helper is a specialist the family talks to by name: Chef for meals, Treasurer
+for the money, Planner for the calendars, Researcher for finding things out,
+Secretary for turning a meeting (a voice note, a photo of the notes) into a
+recap with who does what by when, Coach for goals. Those six come ready to add
+by name alone ("add the Chef helper"); any other needs a role, written as its
+standing instructions.
+
+> Chef, what can I make with leeks and potatoes?
+> Planner, hand the plumber quotes to Researcher for tonight
+
+A message that opens with a helper's name is that helper's to answer, in a group
+as plainly as an @mention, and so is a reply to something it said. One bot
+speaks for all of them: the turn runs with the helper's role at the head of the
+prompt and its tool groups already in reach, and the reply goes out signed with
+its name, **Chef:** first, so a group can tell who is speaking. What a helper
+schedules in its own turn is its own, and posts under its name.
+
+`hand_off` gives a helper a job to do in the background, to post when it is
+done: research to look into, a week of dinners to plan, a check to make. It is
+a one-off automation, due at the next tick unless a time is given, listed with
+the reminders until it runs. It runs as any scheduled instruction does, with
+read-only tools and its post through the claim check and the post decision,
+signed with the helper's name once the checks have passed it. Handing work from
+one helper to another is the same call, so Planner can pass a question to
+Treasurer without anyone relaying it.
+
+A helper cannot be given a family member's name, or the bot's own: a message to
+Sam across the group chat must never be taken for one to a helper called Sam.
+The family is checked again on every message, so a helper whose name someone
+has come to share since (a new member, a rename) stops answering to it.
+Removing a helper leaves the jobs already handed to it to the bot itself.
+
+## Routines
+
+Something the household does the same way each time is taught once and run by
+name after that.
+
+> keep that as the Sunday reset
+> do the Sunday reset
+
+`save_routine` writes the steps down as instructions, with the lists, people
+and details that make them repeatable; saving under a name already kept
+replaces its steps. Asked for by name, `run_routine` hands the steps back to the
+turn, which carries them out with its own tools and says what it did and what it
+skipped. A routine can run on a schedule too ("every Sunday at 5pm do the Sunday
+reset"), where it gets a scheduled run's read-only tools: anything that would
+need a yes is drafted or proposed, never done.
+
+## Jobs for later, once or until something happens
+
+A reminder used to be a schedule, and "remind me tomorrow at 5pm" became one
+that came round every year. `create_automation` now says how often:
+
+- **always**, the default: on every time its cron gives.
+- **once**: a reminder or a job for later, given as a single local time
+  (`at`) and kept as that very moment: a cron has no year, and read as one,
+  next Christmas would come round this Christmas. The claim that starts its run
+  switches it off, and once it has had its run it leaves the list, whatever came
+  of it: held back from a room with a stranger in it, it is not sent hours late.
+  Resumed after a pause, it keeps its own time, or runs at the next tick if that
+  went by while it was paused.
+- **until**: on a schedule until it finds what it is waiting for. "Let me know
+  when the school emails the camp dates" checks hourly, says nothing while there
+  is nothing, and once it posts it says in code, under the post, that it has
+  stopped, and leaves the list. Its writer is told that posting ends it, so it
+  posts only once the thing has happened; a post the hourly cap held back does
+  not count as found. A find the checks held back stops it too, with an admin
+  told: what it read is spent with the held draft, and watching on would only
+  check, hourly and for good, for what has gone by.
+
+Home marks each with **once** or **until it happens**. A watch is a model call
+each time it runs, and one that searches the web spends a search: hourly, that
+is about 720 of Tavily's 1,000 free searches a month, so a watch for something
+slow (tickets going on sale, a price dropping) is better set to a few times a
+day.
+
 ## Shared lists
 
 > add milk and eggs to the shopping list
@@ -608,6 +747,20 @@ Lists are created on first mention and addressed by name, so "packing list" and
 "hardware list" work without setup. Ticking off matches on substring, so "milk"
 ticks off "2L milk". `clear_list` removes only the ticked items unless told
 otherwise, which is the usual tidy-up after a shop.
+
+## Recipes
+
+> put the ingredients for this on the shopping list: <a recipe link>
+
+`read_recipe` reads the recipe most recipe sites publish in a standard form
+(schema.org's Recipe, in the page's JSON-LD): its name, what it serves, how long
+it takes, the ingredients exactly as written and the method, without the life
+story above it. The model then adds what the household needs to the shopping
+list. A page without one says so, and `read_url` reads it as a page instead; a
+photographed recipe is read like any photo. It opens links on the same terms as
+`read_url`: once a turn has read outside text, only a link that was there to be
+read. Talk of recipes, meals and dinner brings it into reach, and Chef starts
+with it.
 
 ## Money
 
@@ -635,6 +788,42 @@ says so, rather than passing part of it off as the whole.
 
 Financial answers are subject to the same group rule as everything else: a room
 holding anyone unrecognised gets no reply at all.
+
+### Subscriptions and bills
+
+> what subscriptions are we paying for?
+> did Netflix go up?
+> anything we could cut?
+
+`recurring_payments` finds them in the feed in code, never by a model's reading
+of a list: a payee paid again and again a steady distance apart (weekly,
+fortnightly, monthly, quarterly or yearly), three payments at least, two for a
+quarterly or yearly one, with nearly every gap fitting the same rhythm. Two
+charges on one day count as one payment, money moved between the household's
+own accounts is not a bill however steady, and a payee is known however the
+bank spells it on the day. Each comes with how often, what it usually costs and
+comes to a month, when the next is due, a price change at its last payment, new
+in the month it is first seen often enough to count, and overdue once its next
+payment is late by half an interval (cancelled, moved, or late), with the day
+it became so. The monthly total is added up in code, over the ones not overdue.
+`/watch subscriptions` posts the month's changes on the 1st, each once: a new
+price paid that month, a new bill, and one that became overdue that month,
+which for a quarterly or a yearly bill can be weeks after it was due.
+
+## Finding a time
+
+> when are we all free for a two-hour lunch next weekend?
+
+`find_free_time` reads the asker's linked calendars, or in the family group
+everyone's there, with the family calendar, and gives the stretches free for
+long enough within the hours and days asked (8am to 8pm, any day, unless told
+otherwise). The gaps are worked out in code from the busy times, so overlaps are
+never missed and no free afternoon is invented. All-day entries (a birthday,
+the holidays) do not block time; they are listed by day so they can be weighed.
+A calendar that holds more than one listing can read stops the search where its
+listing stops, and says so, rather than calling the rest free. Everyone's
+calendars are read only where everyone's mail is: in the family group, with
+nobody unrecognised there.
 
 ## Notion
 
@@ -684,6 +873,39 @@ issue currently sits.
 Free-text search terms are escaped before they reach JQL, so a quote in a
 message cannot rewrite the query or reach another project.
 
+## What it changed
+
+Every write a tool makes that goes through is kept as one line a person can
+read, with who asked, where, and how: in the chat, on a schedule, in the
+nightly memory pass, through an MCP client, or on Home. A tool that posts a line
+in the chat has already said it in the household's words, and that line is the
+record; the rest are worded from what was asked and what came back ("added
+milk, eggs to the shopping list", "drafted an email to the school office,
+waiting on a yes"). A write that failed changed nothing and is not kept, and a
+record that cannot be written never fails the turn that made the change.
+
+> what have you done today?
+> did you put the dentist in?
+
+`recent_activity` answers those from the record rather than from the model's
+memory of the conversation, and `/activity` lists the latest ten. Both keep to
+the chat they are asked in. What a member's MCP client changed is on their own
+record, never the group's, though the client acts in the group they talked in
+last. Home lists the latest fifteen from the family's groups, the nightly memory
+pass and the viewer's own chats: someone else's private chat, their drafts and
+their calendar, is theirs to look back over. The record keeps ninety days.
+
+## Its name and manner
+
+Settings → Behaviour gives the bot a name (`ASSISTANT_NAME`, Hearth until it is
+set) and a manner (`ASSISTANT_PERSONA`): "warm and brief, with a dry sense of
+humour". The name is what it calls itself, and in a group a message that opens
+with it ("Pip, what's on?", "hey Pip ...") is answered as an @mention would be;
+the name merely mentioned later ("I told Pip") is not. A name is one or two words
+of letters, so it can be called and found again. The manner shapes how a chat
+reply sounds and nothing else: it sits under the rules, the grounding above all,
+and the scheduled posts keep their own plain style.
+
 ## The web dashboard
 
 The site root is a sign-in screen, then **Home**: anything the bot has
@@ -700,7 +922,19 @@ ticked, so one that sat on the list for a while can drop behind those ten the
 moment it is ticked. The list of proposals only ever holds live questions: a
 proposal whose occasion has passed, or whose event has since reached the
 calendar another way, drops out at once, and the next tick records it as
-expired or superseded. Admins also get **System** and
+expired or superseded.
+
+Waiting on a yes also holds the signed-in member's own email drafts, as they
+will be sent, with Send and Discard. The click is the same yes as "send it" in
+the chat: the draft is claimed first so two clicks cannot send it twice, goes
+from its writer's own mailbox, and is handed back to try again if the provider
+refuses it, or kept as sent if the send ran out of time and may have gone.
+Nobody sees another member's drafts there, since only the writer can send one.
+Below the calendar come the **Goals** in progress, each with its steps to tick
+off and its latest progress, and Done or Drop to close it; the **Helpers** the
+household has, each with what it looks after; and at the foot of the page,
+**Lately**, what the bot changed and for whom (see
+[What it changed](#what-it-changed)). Admins also get **System** and
 **Settings**; for everyone else Home is the only destination, so no tabs are
 shown at all. An admin landing on a deployment with no bot token is redirected
 to **/setup**, the first-run guide.
@@ -833,7 +1067,7 @@ A key travels as a header, which is what Claude Code, Claude Desktop, Cursor and
 anything driven by `mcp-remote` take. Custom connectors on claude.ai want OAuth
 and cannot be given a header, so that one is not a way in.
 
-A client is handed 52 of the 54 tools at once rather than the routed subset a
+A client is handed 68 of the 70 tools at once rather than the routed subset a
 chat turn sees: `more_tools` exists so a small model can start from the 23 in
 the core and widen, and a capable client picks well from a long list. The two
 that mean nothing down this pipe are left out — `more_tools` itself, and the
@@ -965,6 +1199,13 @@ or *Somewhat grounded* is the next case for `evals/`.
   An address in `ADMIN_EMAILS` counts as an admin's even with no row naming
   its owner, so only an admin, or the member an admin recorded it against,
   may link it; anyone else is turned away and every admin is told.
+- A member decides what the bot may do with each account they link: read it
+  and write from it, or, after `/readonly google`, read it alone. A read-only
+  account takes no draft and no calendar entry, is never swapped for another
+  account unasked when one is named, and sends nothing even from a draft
+  written before it was made read-only, from the chat or from Home. Linking
+  it again keeps the choice, and the context tells the model which accounts
+  are read-only.
 - Refresh tokens are AES-256-GCM encrypted with `TOKEN_ENC_KEY`.
 - The ICS feed sits behind a long random token, compared without early exit.
   `/calendar new` replaces the token if the URL gets out, and sends the new one
@@ -989,8 +1230,23 @@ or *Somewhat grounded* is the next case for `evals/`.
   an attached file, so the yes has to come from a person's own message and never
   from an instruction planted in something the bot read. Over MCP each call
   stands alone, so there the client's own approval of each tool call is the gate.
-- Once a turn has read anything from outside the household, `read_url` opens
-  only a link that appears, as written, in something the turn was given or
+  On Home the yes is the writer's own click on Send, against a draft only they
+  can see there, claimed the same way.
+- Nothing that runs unattended can do what would need a yes. A job handed to a
+  helper, a goal's check-in, a watch-until and a routine run on a schedule all
+  run as scheduled instructions: read-only tools (adding to a list and proposing
+  an event aside), their author's mailbox alone, and every post through the
+  claim check and the post decision before anyone sees it.
+- A helper can never take a family member's name, or the bot's own, and the
+  family is checked again on every message, so a message calling someone across
+  the group chat is never answered by a helper.
+- A member's own goals, drafts and activity stay theirs: a scheduled run in a
+  group sees the group's goals alone, whoever set it up; `/pending` lists only
+  the asker's drafts; and what an MCP client changed is filed on its member's
+  own record.
+- Once a turn has read anything from outside the household, `read_url` (and
+  `read_recipe`, the same way) opens only a link that appears, as written, in
+  something the turn was given or
   read, and not one the model had put into a tool call first, so it requests
   no address composed in that turn to carry the household's details out. That
   holds for `read_url` in that turn only: Telegram still fetches a link in the

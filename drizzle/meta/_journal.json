@@ -57,6 +57,13 @@
       "when": 1790240744141,
       "tag": "0007_chat_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793323463790,
+      "tag": "0008_personal_agents",
+      "breakpoints": true
     }
   ]
 }

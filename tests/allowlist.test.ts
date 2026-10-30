@@ -21,6 +21,7 @@ vi.mock('@/lib/db/queries', () => ({
   connectionsFor: vi.fn(async () => []),
   deleteConnection: vi.fn(async () => {}),
   calendarToken: vi.fn(async () => 'tok'),
+  listHelpers: vi.fn(async () => []),
 }))
 // One bot instance, as in a warm lambda, so its identity is asked once; a test swaps it to act out a token change.
 const getMe = vi.fn(async () => ({ id: 1, username: 'heart_family_bot' }))

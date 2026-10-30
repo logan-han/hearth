@@ -47,6 +47,14 @@ describe('what Home shows the family', () => {
       chatId: '-100', label: 'bins', cronExpr: '0 19 * * 1', instruction: 'x',
       nextRunAt: new Date('2026-09-21T09:00:00Z'),
     })
+    await q.addAutomation({
+      chatId: '-100', label: 'plumber', cronExpr: '0 17 22 9 *', instruction: 'x', repeat: 'once',
+      nextRunAt: new Date('2026-09-22T07:00:00Z'),
+    })
+    await q.addAutomation({
+      chatId: '-100', label: 'camp dates', cronExpr: '0 8-20 * * *', instruction: 'x', repeat: 'until',
+      nextRunAt: new Date('2026-09-23T22:00:00Z'),
+    })
 
     await q.askQuestion({ question: 'Who attends Hillside Grammar?', candidate: 'Juno attends Hillside Grammar' })
     const settled = await q.askQuestion({ question: 'Does anyone attend Riverbend College?', candidate: 'Someone attends Riverbend College' })
@@ -56,7 +64,12 @@ describe('what Home shows the family', () => {
     expect(stats.memories.map((m) => [m.fact, m.who])).toEqual([['milk allergy', null], ['bin night is Monday', 'Ada']])
     expect(stats.memories[0].since).toMatch(/\d{4}$/)
     expect(stats.questions.map((qn) => [qn.question, qn.candidate])).toEqual([['Who attends Hillside Grammar?', 'Juno attends Hillside Grammar']])
-    expect(stats.automations.map((a) => [a.label, a.builtin])).toEqual([['Morning brief', true], ['bins', false]])
+    expect(stats.automations.map((a) => [a.label, a.builtin, a.repeat])).toEqual([
+      ['Morning brief', true, null],
+      ['bins', false, null],
+      ['plumber', false, 'once'],
+      ['camp dates', false, 'until'],
+    ])
   })
 })
 

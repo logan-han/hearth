@@ -16,13 +16,31 @@ import {
   listFamilyEvents,
   deleteMemory,
   answerQuestion,
+  getGoal,
+  closeGoal,
+  getGoalStep,
+  setGoalStepDone,
+  getDraft,
+  markDraft,
+  connectionsFor,
+  getHelper,
+  deleteHelper,
 } from '@/lib/db/queries'
-import { nextRun } from '@/lib/cron'
+import { clientFor } from '@/lib/providers'
+import { UnconfirmedError } from '@/lib/deadline'
+import { describeMailError, readOnlyRefusal } from '@/lib/tools/mail'
+import { noteActivity } from '@/lib/activity'
+import type { Provider } from '@/lib/oauth/providers'
+import { resumeAt } from '@/lib/tools/automation'
 import { hydrateSecrets } from '@/lib/settings'
 import { isBuiltinKind } from '@/lib/watchers'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+
+/** A group's goal is the household's; one set in a member's own chat is theirs alone. */
+const homeMaySee = (goal: { chatId: string; memberId: number | null }, viewer: number | null) =>
+  goal.chatId.startsWith('-') || (viewer !== null && goal.memberId === viewer)
 
 /**
  * One list in full, older ticked items included. Home carries only the ten
@@ -50,7 +68,7 @@ export async function POST(req: Request) {
   // which may live in the dashboard rather than this instance's environment.
   await hydrateSecrets()
 
-  let body: { action?: string; id?: number; enabled?: boolean; done?: boolean; list?: string; content?: string; fact?: string }
+  let body: { action?: string; id?: number; enabled?: boolean; done?: boolean; list?: string; content?: string; fact?: string; status?: string }
   try {
     body = await req.json()
   } catch {
@@ -100,7 +118,7 @@ export async function POST(req: Request) {
       if (!existing) return NextResponse.json({ error: `No reminder ${id}.` }, { status: 404 })
       // A paused automation's next_run_at goes stale, so recompute on resume.
       const enabled = body.enabled === true
-      const next = enabled ? nextRun(existing.cronExpr) : null
+      const next = enabled ? resumeAt(existing) : null
       await setAutomationEnabled(id, enabled, next ?? undefined)
       return NextResponse.json({ ok: true, enabled })
     }
@@ -129,6 +147,72 @@ export async function POST(req: Request) {
       const settled = await answerQuestion(id, fact || null, session.memberId)
       if (!settled) return NextResponse.json({ error: `Question ${id} is no longer open.` }, { status: 404 })
       return NextResponse.json({ ok: true, ...(settled.memory ? { kept: settled.memory.content } : { dismissed: true }) })
+    }
+
+    case 'toggle_goal_step': {
+      // As for closing: a group's goal is anyone's to tick, a member's own theirs alone.
+      const step = await getGoalStep(id)
+      const goal = step ? await getGoal(step.goalId) : undefined
+      if (!goal || !homeMaySee(goal, session.memberId)) return NextResponse.json({ error: `No step ${id}.` }, { status: 404 })
+      const row = await setGoalStepDone(id, body.done === true)
+      return NextResponse.json({ ok: true, done: row!.done })
+    }
+
+    case 'close_goal': {
+      if (body.status !== 'done' && body.status !== 'dropped') return NextResponse.json({ error: 'A goal closes as done or dropped.' }, { status: 400 })
+      // Home lists the groups' goals and the viewer's own; another member's private one is theirs to close.
+      const goal = await getGoal(id)
+      if (!goal || !homeMaySee(goal, session.memberId)) {
+        return NextResponse.json({ error: `No goal ${id}.` }, { status: 404 })
+      }
+      const closed = await closeGoal(id, body.status)
+      if (!closed) return NextResponse.json({ error: `"${goal.title}" is already closed.` }, { status: 404 })
+      // Nothing left to check in on.
+      if (goal.automationId) await deleteAutomation(goal.automationId)
+      return NextResponse.json({ ok: true, closed: goal.title, status: body.status })
+    }
+
+    case 'send_draft':
+    case 'discard_draft': {
+      // A draft is its writer's alone to send or throw away: it goes from their mailbox, in their name.
+      const draft = await getDraft(id)
+      if (!draft || draft.memberId !== session.memberId) return NextResponse.json({ error: `No draft ${id} of yours.` }, { status: 404 })
+      if (body.action === 'discard_draft') {
+        if (!(await markDraft(id, 'cancelled'))) return NextResponse.json({ error: `That draft is already ${draft.status}.` }, { status: 409 })
+        await noteActivity({ chatId: draft.chatId, memberId: draft.memberId, via: 'web', tool: 'cancel_draft', input: { draft_id: id }, result: {} })
+        return NextResponse.json({ ok: true, discarded: draft.subject })
+      }
+      // Linked read-only since the draft was written, the account sends nothing, click or no click.
+      if ((await connectionsFor(draft.memberId)).some((c) => c.provider === draft.provider && c.readOnly)) {
+        return NextResponse.json({ error: readOnlyRefusal(draft.provider as Provider) }, { status: 409 })
+      }
+      // The click is the yes. Claimed first, as in the chat, so two clicks cannot send it twice.
+      if (!(await markDraft(id, 'sent'))) return NextResponse.json({ error: `That draft is already ${draft.status}.` }, { status: 409 })
+      const to = draft.recipients.split(',').map((s) => s.trim()).filter(Boolean)
+      try {
+        await clientFor(draft.memberId, draft.provider as Provider).sendMail({
+          to,
+          cc: draft.cc?.split(',').map((s) => s.trim()).filter(Boolean),
+          subject: draft.subject,
+          body: draft.body,
+        })
+      } catch (err) {
+        // One that ran out of time may have gone, and stays claimed so it is not sent again.
+        if (err instanceof UnconfirmedError) {
+          return NextResponse.json({ error: 'The send took too long to be confirmed, so it may or may not have gone. Check your Sent folder.' }, { status: 504 })
+        }
+        await markDraft(id, 'pending', 'sent')
+        return NextResponse.json({ error: describeMailError(err) }, { status: 502 })
+      }
+      await noteActivity({ chatId: draft.chatId, memberId: draft.memberId, via: 'web', tool: 'send_email', input: { draft_id: id }, result: { to: draft.recipients, subject: draft.subject } })
+      return NextResponse.json({ ok: true, sent: draft.subject })
+    }
+
+    case 'remove_helper': {
+      // Anyone can, as in the chat; jobs already handed to it are left to the bot itself.
+      const helper = await getHelper(id)
+      if (!helper || !(await deleteHelper(id))) return NextResponse.json({ error: `No helper ${id}.` }, { status: 404 })
+      return NextResponse.json({ ok: true, removed: helper.name })
     }
 
     case 'toggle_item': {

@@ -3,6 +3,7 @@ import { z } from 'zod'
 import * as ps from '../providers/pocketsmith'
 import type { PsCategoryBudget, PsTransaction } from '../providers/pocketsmith'
 import { localDateKey } from '../cron'
+import { findRecurring, daysBetween, MONTH_OF_CHANGES } from '../recurring'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
 import { describeError } from '../errors'
@@ -60,8 +61,66 @@ const readShort = (read: number) =>
 const searchable = (t: PsTransaction) =>
   [t.payee, t.originalPayee, t.note, t.memo, ...t.labels, t.category, t.account].filter(Boolean).join('\n').toLowerCase()
 
+/** The same day `months` earlier, as YYYY-MM-DD; the 31st of a shorter month runs into the next, which a look-back can bear. */
+function monthsBack(date: string, months: number): string {
+  const [y, m, d] = date.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1 - months, d)).toISOString().slice(0, 10)
+}
+
+
 export function moneyTools(ctx: ToolContext) {
   return {
+    recurring_payments: tool({
+      description:
+        'Subscriptions and regular bills found in the PocketSmith feed: each payee paid on a steady rhythm, how often, what it usually costs and comes to a month, when the next is due, ' +
+        'whether its price changed at the last payment, whether it is new, and whether the next is overdue (cancelled, moved or late). ' +
+        'Use it for "what subscriptions do we have", "what do we pay every month", "did that go up", "anything we could cut". Found in code, not guessed: quote it as given.',
+      inputSchema: z.object({
+        months: z.number().int().min(3).max(18).default(12).describe('How far back to look'),
+        search: z.string().optional().describe('Only payees containing this'),
+      }),
+      execute: async ({ months, search }) => {
+        if (!ps.pocketsmithConfigured()) return { error: 'PocketSmith is not configured.' }
+        const end = localDateKey(ctx.now)
+        const start = monthsBack(end, months ?? 12)
+        try {
+          const txns = await ps.listTransactions({ startDate: start, endDate: end, limit: ps.MAX_TRANSACTIONS })
+          // Money out, not moved between the household's own accounts.
+          const paid = txns
+            .filter((t) => t.amount < 0 && !t.isTransfer && !t.categoryIsTransfer)
+            .map((t) => ({ date: t.date, payee: t.payee, amount: -t.amount }))
+          const needle = search?.trim().toLowerCase()
+          const found = findRecurring(paid, end).filter((r) => !needle || r.payee.toLowerCase().includes(needle))
+          const live = found.filter((r) => !r.overdue)
+          return {
+            from: start,
+            to: end,
+            ...(txns.length >= ps.MAX_TRANSACTIONS ? { incomplete: readShort(txns.length) } : {}),
+            monthly_total: money(live.reduce((sum, r) => sum + r.monthly, 0)),
+            recurring: found.map((r) => ({
+              payee: r.payee,
+              how_often: r.cadence,
+              usually: money(r.typical),
+              a_month: money(r.monthly),
+              last_paid_on: r.last,
+              last_amount: money(r.lastAmount),
+              next_due: r.next,
+              payments_seen: r.count,
+              ...(r.previousAmount !== undefined ? { price_change: `${money(r.previousAmount)} to ${money(r.lastAmount)} at the last payment` } : {}),
+              // New in the month it was first seen often enough to count, whatever its rhythm.
+              ...(r.fresh && daysBetween(r.last, end) <= MONTH_OF_CHANGES ? { new: `first paid ${r.first}` } : {}),
+              ...(r.overdue
+                ? { overdue: `due by ${r.next} and not seen since; it may have been cancelled, moved, or be late`, overdue_since: r.overdueSince }
+                : {}),
+            })),
+            note: 'monthly_total adds up the ones not overdue, each at what it usually costs, worked out in code: quote it as given.',
+          }
+        } catch (e) {
+          return { error: describeError(e) }
+        }
+      },
+    }),
+
     list_bank_accounts: tool({
       description: 'Show the household bank accounts connected to PocketSmith and their balances.',
       inputSchema: z.object({}),

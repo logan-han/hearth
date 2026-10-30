@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { nextRun, isValidCron, localToUtc, tzOffsetMs, localDateKey, lastDay } from '@/lib/cron'
+import { nextRun, isValidCron, localToUtc, tzOffsetMs, localDateKey, lastDay, cronAt } from '@/lib/cron'
 
 const MEL = 'Australia/Melbourne'
 
@@ -107,3 +107,17 @@ function localHour(d: Date): number {
     new Intl.DateTimeFormat('en-GB', { timeZone: MEL, hour: '2-digit', hour12: false }).format(d),
   )
 }
+
+describe('cronAt', () => {
+  it('names one moment by its local minute, hour, day and month', () => {
+    // 5pm on Sat 31 Oct 2026 in Melbourne is 06:00 UTC, daylight saving being on.
+    expect(cronAt(new Date('2026-10-31T06:00:00Z'), MEL)).toBe('0 17 31 10 *')
+    // Midnight is hour 0, never 24.
+    expect(cronAt(localToUtc('2026-11-02T00:05', MEL), MEL)).toBe('5 0 2 11 *')
+  })
+
+  it('comes round at that very moment, and not before', () => {
+    const at = localToUtc('2026-12-24T18:00', MEL)
+    expect(nextRun(cronAt(at, MEL), new Date('2026-10-30T00:00:00Z'), MEL)!.getTime()).toBe(at.getTime())
+  })
+})

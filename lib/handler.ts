@@ -2,7 +2,7 @@ import type { Update, Message } from 'grammy/types'
 import { waitUntil } from '@vercel/functions'
 import { send, typing, bot, downloadFile, mediaTypeFor, type Attachment } from './telegram'
 import { runAgent, shouldChimeIn, unconfirmedLine } from './agent'
-import { idSet, appUrl, ambientMode } from './env'
+import { idSet, appUrl, ambientMode, assistantName, opensWithName } from './env'
 import {
   upsertMember,
   memberByTelegramId,
@@ -19,6 +19,7 @@ import {
   pruneMessages,
   connectionsFor,
   deleteConnection,
+  setConnectionReadOnly,
   calendarToken,
   rotateCalendarToken,
   FEED_EDGE_SECONDS,
@@ -27,18 +28,26 @@ import {
   setAutomationEnabled,
   issueMcpKey,
   revokeMcpKey,
+  recentActivity,
+  listHelpers,
+  pendingDrafts,
+  pendingProposals,
+  openQuestions,
 } from './db/queries'
+import { spanLabel } from './tools/familycal'
 import { nextRun, formatLocal } from './cron'
 import { connectLink } from './oauth/state'
 import { WATCHERS, isWatcherKind, watcherInstruction } from './watchers'
 import { flushTelemetry, traceRun, noteRun } from './telemetry'
 import { maybeSummarise } from './summary'
-import type { Member } from './db/schema'
+import type { Member, Helper } from './db/schema'
+import { calledHelper, repliedHelper, signed, callable } from './helpers'
 import { describeError } from './errors'
 import { unsaid } from './notices'
 import { commitCursors } from './tools/cursor'
 import { flagRevoked } from './headcount'
 import { awaitTurn, endTurn, noteAlbumItem, takeAlbum } from './turns'
+import { activityLine } from './tools/activity'
 
 /**
  * Authorisation is per person, never per room. `ALLOWED_TELEGRAM_IDS` seeds the
@@ -77,6 +86,8 @@ type TelegramContext = {
   /** Author of the message being replied to, for `/allow` without an id. */
   replyToUserId?: string
   replyToUserName?: string
+  /** What the bot's own message being replied to said, which names the helper that signed it. */
+  replyToBotText?: string
 }
 
 /**
@@ -194,7 +205,8 @@ async function parse(update: Update): Promise<TelegramContext | null> {
   const self = await me()
   const replyAuthor = msg.reply_to_message?.from
   const mentionTag = self.username ? `@${self.username}`.toLowerCase() : ''
-  const isMention = Boolean(mentionTag) && text.toLowerCase().includes(mentionTag)
+  // Called by its name at the start, as a person is across the room, counts as an @mention.
+  const isMention = (Boolean(mentionTag) && text.toLowerCase().includes(mentionTag)) || opensWithName(text, assistantName())
   // In a group with several bots, Telegram's menu names the bot a command is
   // for. Only a bare command, or one naming this bot, is Hearth's.
   const addressee = /^\/\w+@(\w+)/.exec(text.trimStart())?.[1]?.toLowerCase()
@@ -216,6 +228,7 @@ async function parse(update: Update): Promise<TelegramContext | null> {
     albumId: msg.media_group_id,
     replyToUserId: replyAuthor && !replyAuthor.is_bot ? String(replyAuthor.id) : undefined,
     replyToUserName: replyAuthor && !replyAuthor.is_bot ? displayName(replyAuthor) : undefined,
+    replyToBotText: replyAuthor?.id === self.id ? (msg.reply_to_message?.text ?? msg.reply_to_message?.caption) : undefined,
   }
 }
 
@@ -260,6 +273,10 @@ async function handleWatch(c: TelegramContext, member: Member): Promise<void> {
           ? "/watch morning — a brief each day at 7am: what is on today and tomorrow, on the family calendar and on everyone's own; everyone's new mail worth knowing about (dates proposed for the calendar); the board, the day's reminders, proposals waiting on a yes, and the weather"
           : "/watch morning — a brief each day at 7am: what is on today and tomorrow, on the family calendar and on your own; your new mail worth knowing about (dates proposed for the calendar); the board, the day's reminders, proposals waiting on a yes, and the weather",
         "/watch snapshot — Sunday 6pm: the week's spending, the month so far, and how the budget is tracking",
+        '/watch subscriptions — the 1st of each month: subscriptions and bills that changed price, started, or seem to have stopped',
+        inGroup
+          ? "/watch urgent — hourly, 8am to 8pm: anyone's new mail that needs someone today or tomorrow, as it lands; the rest waits for the brief"
+          : '/watch urgent — hourly, 8am to 8pm: your new mail that needs you today or tomorrow, as it lands; the rest waits for the brief',
         '/watch list — what this chat is already watching',
         '',
         ...(inGroup ? ['The brief and the snapshot are already on in a family group; pause either from Home if it is not wanted.', ''] : []),
@@ -307,16 +324,19 @@ async function handleWatch(c: TelegramContext, member: Member): Promise<void> {
   )
 }
 
-const HELP = [
-  '**Hearth** — your family assistant.',
+const help = () => [
+  `**${assistantName()}** — your family assistant.`,
   '',
-  'Just talk to me. In the group, @mention me or reply to one of my messages.',
+  `Just talk to me. In the group, @mention me, start with my name ("${assistantName()}, ..."), or reply to one of my messages.`,
   '',
   '**Commands**',
-  "/watch — have me keep an eye on the day ahead or the week's money, and post only when it matters",
+  "/watch — have me keep an eye on the day ahead, the week's money, mail that needs you now, or the month's subscriptions, and post only when it matters",
   '/connect — link your Google or Microsoft account',
   '/accounts — see and unlink your linked accounts',
+  '/readonly google — let me read an account but never draft, send or add events through it',
   '/calendar — the shared family calendar subscription link',
+  '/pending — everything here waiting on a yes: drafts, dates for the calendar, questions',
+  '/activity — what I have changed in this chat lately, and for whom',
   '/mcp — let Claude use my tools on your behalf',
   '/whoami — your Telegram id',
   '/members — who I answer to',
@@ -336,7 +356,12 @@ const HELP = [
   '· track household jobs on the Jira board: "what\'s overdue?"',
   '· read your email and calendar, and draft replies (I never send without a yes)',
   '· keep the shared family calendar everyone subscribes to',
-  '· remember household facts, and run reminders on a schedule',
+  '· remember household facts, and run reminders on a schedule, once, or until something happens',
+  '· keep a goal moving: a plan of steps, and a check-in each week until it is done',
+  '· helpers you call by name ("Chef, ...") and hand jobs to, to do in the background',
+  '· routines: show me once, then just say its name',
+  '· find a time everyone is free, and spot subscriptions and bills that go up',
+  '· turn a recipe link into the shopping list',
 ].join('\n')
 
 /** The command word, without any @botname: `/Calendar@hearth_bot new` is `/calendar`. */
@@ -353,7 +378,7 @@ async function handleCommand(c: TelegramContext, member: Member): Promise<boolea
   switch (cmd) {
     case '/start':
     case '/help':
-      await send(c.chatId, HELP)
+      await send(c.chatId, help())
       return true
 
     case '/connect': {
@@ -377,7 +402,7 @@ async function handleCommand(c: TelegramContext, member: Member): Promise<boolea
       await send(
         c.chatId,
         conns.length
-          ? `Linked accounts:\n${conns.map((x) => `· ${x.provider}${x.email ? ` — ${x.email}` : ''}`).join('\n')}\n\nUnlink with /unlink google or /unlink microsoft.`
+          ? `Linked accounts:\n${conns.map((x) => `· ${x.provider}${x.email ? ` — ${x.email}` : ''}${x.readOnly ? ' (read only)' : ''}`).join('\n')}\n\nUnlink with /unlink google or /unlink microsoft. /readonly google makes one read only.`
           : 'You have no linked accounts. Send /connect to add one.',
       )
       return true
@@ -391,6 +416,29 @@ async function handleCommand(c: TelegramContext, member: Member): Promise<boolea
       }
       await deleteConnection(member.id, which)
       await send(c.chatId, `Unlinked your ${which} account.`)
+      return true
+    }
+
+    case '/readonly': {
+      // Per account, as a person chooses what each app may do: read it, or read it and write from it.
+      const [, which, state] = c.text.trim().split(/\s+/).map((w) => w.toLowerCase())
+      if (which !== 'google' && which !== 'microsoft') {
+        await send(
+          c.chatId,
+          'Usage: /readonly google (or microsoft) to let me read that account but never draft, send or add events through it; /readonly google off to allow it again.',
+        )
+        return true
+      }
+      const on = state !== 'off'
+      const row = await setConnectionReadOnly(member.id, which, on)
+      await send(
+        c.chatId,
+        !row
+          ? `You have no ${which} account linked. Send /connect to link one.`
+          : on
+            ? `Your ${which} account is read only now: I read its mail and calendar, and draft, send and add nothing through it.`
+            : `Your ${which} account is writable again: drafts still wait for your yes before anything is sent.`,
+      )
       return true
     }
 
@@ -491,6 +539,23 @@ async function handleCommand(c: TelegramContext, member: Member): Promise<boolea
       return true
     }
 
+    case '/pending': {
+      await send(c.chatId, await waitingHere(c, member))
+      return true
+    }
+
+    case '/activity': {
+      // This chat's own: what was changed elsewhere is that chat's business.
+      const rows = await recentActivity({ chatId: c.chatId, limit: 10 })
+      await send(
+        c.chatId,
+        rows.length
+          ? `What I have changed here lately, newest first:\n${rows.map((r) => `· ${activityLine(r)}`).join('\n')}`
+          : 'I have not changed anything in this chat yet.',
+      )
+      return true
+    }
+
     default:
       return false
   }
@@ -545,12 +610,40 @@ async function handleMcp(c: TelegramContext, member: Member): Promise<void> {
   }
 }
 
+/**
+ * Everything in this chat waiting on someone's yes: the asker's own email
+ * drafts here, which only they can send, the dates found for the family
+ * calendar, and in a group the questions the nightly pass put to everyone.
+ * Another member's draft is left out: one written from their MCP client is
+ * filed under the room it acts in without ever having been shown there.
+ * Home carries the same, with a button for each.
+ */
+async function waitingHere(c: TelegramContext, member: Member): Promise<string> {
+  const [drafts, proposals, questions] = await Promise.all([
+    pendingDrafts(c.chatId).then((all) => all.filter((d) => d.memberId === member.id)),
+    pendingProposals(c.chatId),
+    c.chatType === 'private' ? Promise.resolve([]) : openQuestions(),
+  ])
+  if (!drafts.length && !proposals.length && !questions.length) return 'Nothing is waiting on a yes here.'
+  return [
+    'Waiting on a yes here:',
+    ...(drafts.length
+      ? ['', '**Your email drafts**, sent only once you say so (here, or on Home):', ...drafts.map((d) => `· to ${d.recipients}, "${d.subject}"`)]
+      : []),
+    ...(proposals.length
+      ? ['', '**For the family calendar**, added once anyone says yes:', ...proposals.map((p) => `· ${p.title}, ${spanLabel(p.startsAt, p.endsAt, p.allDay)}`)]
+      : []),
+    ...(questions.length ? ['', '**Not sure about**, anyone can answer:', ...questions.map((qn) => `· ${qn.question}`)] : []),
+  ].join('\n')
+}
+
 /** Decide whether this message deserves a full agent run. */
-async function shouldRespond(c: TelegramContext, messageId: number): Promise<boolean> {
+async function shouldRespond(c: TelegramContext, messageId: number, helper?: Helper): Promise<boolean> {
   // Even as a reply to one of ours: the command names who it is for.
   if (c.forAnotherBot) return false
   if (c.chatType === 'private') return true
-  if (c.isMention || c.isReplyToBot || c.isCommand) return true
+  // A helper called by its name is spoken to as plainly as an @mention.
+  if (c.isMention || c.isReplyToBot || c.isCommand || helper) return true
   if (!ambientMode()) return false
   return shouldChimeIn({
     chatId: c.chatId,
@@ -743,7 +836,13 @@ export async function processUpdate(update: Update): Promise<void> {
   // answers has all of them.
   const part = { messageId: c.messageId, text, media: c.media }
   if (c.albumId) await noteAlbumItem(c.chatId, c.albumId, part)
-  if (!(await shouldRespond(c, storedId))) {
+  // A message that opens with a helper's name is that helper's to answer, and
+  // so is a reply to something it signed.
+  // Checked against the family now, not only when the helper was made: someone may have joined since under its name.
+  const [helpers, family] = await Promise.all([listHelpers().catch((): Helper[] => []), allowedMembers().catch((): Member[] => [])])
+  const crew = callable(helpers, family)
+  const helper = calledHelper(text, crew) ?? (c.isReplyToBot ? repliedHelper(c.replyToBotText, crew) : undefined)
+  if (!(await shouldRespond(c, storedId, helper))) {
     await housekeeping(c.chatId)
     return
   }
@@ -780,7 +879,10 @@ export async function processUpdate(update: Update): Promise<void> {
   const traceAttrs = { sessionId: c.chatId, userId: member.telegramUserId, tags: ['chat', c.chatType] }
   try {
     await traceRun('hearth.chat', traceAttrs, async () => {
-      noteRun({ input: said || `[sent ${attachments.map((a) => a.filename ?? a.kind).join(', ')}]`, metadata: { attachments: attachments.length } })
+      noteRun({
+        input: said || `[sent ${attachments.map((a) => a.filename ?? a.kind).join(', ')}]`,
+        metadata: { attachments: attachments.length, ...(helper ? { helper: helper.name } : {}) },
+      })
       try {
         const result = await runAgent({
           chatId: c.chatId,
@@ -791,9 +893,11 @@ export async function processUpdate(update: Update): Promise<void> {
           excludeMessageId: storedId,
           attachments,
           deadline,
+          helper,
         })
 
-        const reply = [result.text, ...unsaid(result.text, result.notices)]
+        // A helper's words go out under its name; a tool's own line is the house's.
+        const reply = [signed(helper, result.text), ...unsaid(result.text, result.notices)]
           .filter(Boolean)
           .join('\n\n')
           .trim()

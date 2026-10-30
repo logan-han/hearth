@@ -219,8 +219,122 @@ async function renderViaTavily(url: string): Promise<string | null> {
   return data.results?.[0]?.raw_content ?? null
 }
 
+/** Where a page keeps its machine-readable description: schema.org JSON-LD blocks. */
+const JSON_LD = /<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script\s*>/gi
+
+type Node = Record<string, unknown>
+
+const isType = (node: Node, type: string) => {
+  const t = node['@type']
+  return t === type || (Array.isArray(t) && t.includes(type))
+}
+
+/** The first Recipe anywhere in a JSON-LD value: at its top, in a list, or in an @graph. */
+function findRecipe(value: unknown, depth = 0): Node | null {
+  if (depth > 6 || !value || typeof value !== 'object') return null
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      const found = findRecipe(v, depth + 1)
+      if (found) return found
+    }
+    return null
+  }
+  const node = value as Node
+  if (isType(node, 'Recipe')) return node
+  return findRecipe(node['@graph'], depth + 1)
+}
+
+/** The Recipe a page describes, if it describes one in JSON-LD; a block that will not parse is passed over. */
+export function recipeIn(html: string): Node | null {
+  for (const m of html.matchAll(JSON_LD)) {
+    try {
+      const found = findRecipe(JSON.parse(m[1].trim()))
+      if (found) return found
+    } catch {
+      // Not JSON after all; the next block may be.
+    }
+  }
+  return null
+}
+
+/** A schema.org duration (PT1H30M) the way a person says it, or null. */
+export function duration(value: unknown): string | null {
+  const m = typeof value === 'string' ? /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$/i.exec(value.trim()) : null
+  if (!m) return null
+  const [, d = '0', h = '0', min = '0'] = m
+  const hours = Number(d) * 24 + Number(h)
+  const parts = [hours ? `${hours} hr` : '', Number(min) ? `${Number(min)} min` : ''].filter(Boolean)
+  return parts.length ? parts.join(' ') : null
+}
+
+const MAX_STEPS = 30
+const MAX_STEP_CHARS = 400
+
+/** Text as a person reads it: no tags, entities decoded, spaces collapsed. */
+const plainText = (value: unknown) => decodeEntities(stripTags(String(value ?? ''))).replace(/\s+/g, ' ').trim()
+
+/** The method as numbered steps, whatever shape the page gave it: a string, steps, or sections of steps. */
+function methodOf(value: unknown, out: string[] = []): string[] {
+  if (out.length >= MAX_STEPS) return out
+  if (typeof value === 'string') {
+    for (const line of value.split(/\n+/).map(plainText).filter(Boolean)) if (out.length < MAX_STEPS) out.push(line.slice(0, MAX_STEP_CHARS))
+  } else if (Array.isArray(value)) {
+    for (const v of value) methodOf(v, out)
+  } else if (value && typeof value === 'object') {
+    const node = value as Node
+    if (node.itemListElement) methodOf(node.itemListElement, out)
+    else if (node.text ?? node.name) methodOf(node.text ?? node.name, out)
+  }
+  return out
+}
+
+const firstOf = (value: unknown) => plainText(Array.isArray(value) ? value[0] : value) || null
+
 export function browseTools(_ctx: ToolContext) {
   return {
+    read_recipe: tool({
+      description:
+        'Read a recipe from a link: its name, how many it serves, how long it takes, the ingredients exactly as written and the method. ' +
+        'Use it to put a recipe on the shopping list (add_to_list with the ingredients the household does not have) or into a meal plan. ' +
+        'It reads the recipe most recipe sites publish in a standard form; for a page without one it says so, and read_url reads the page instead.',
+      inputSchema: z.object({ url: z.string().describe('The full http(s) address of the recipe') }),
+      execute: async ({ url }) => {
+        let target: URL
+        try {
+          target = new URL(url)
+        } catch {
+          return { error: `"${url}" is not a valid address.` }
+        }
+        try {
+          const fetched = await fetchPublic(target)
+          if ('error' in fetched) return fetched
+          const { res } = fetched
+          if (!res.ok) return { error: `The page answered ${res.status}.` }
+          const buf = await readBody(res)
+          if (!buf) return { error: 'That page is too large to read here.' }
+          const recipe = recipeIn(new TextDecoder().decode(buf))
+          if (!recipe) return { error: 'That page has no recipe in the standard form recipe sites use. Read it with read_url instead.' }
+          const ingredients = (Array.isArray(recipe.recipeIngredient) ? recipe.recipeIngredient : []).map(plainText).filter(Boolean)
+          return {
+            url: fetched.url.href,
+            name: plainText(recipe.name) || null,
+            serves: firstOf(recipe.recipeYield),
+            ...Object.fromEntries(
+              [['total_time', recipe.totalTime], ['prep_time', recipe.prepTime], ['cook_time', recipe.cookTime]]
+                .map(([k, v]) => [k, duration(v)])
+                .filter(([, v]) => v),
+            ),
+            ingredients,
+            method: methodOf(recipe.recipeInstructions),
+          }
+        } catch (e) {
+          const reason = describeError(e instanceof Error && e.cause instanceof Error ? e.cause : e)
+          if (reason.includes('ENOTFOUND')) return { error: 'That address could not be found.' }
+          return { error: reason.includes('timeout') || reason.includes('timed out') ? 'The page took too long to answer.' : reason }
+        }
+      },
+    }),
+
     read_url: tool({
       description:
         'Open a link and read it: web pages and PDFs both work. Use this whenever a message, email or page points ' +

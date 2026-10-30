@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { required, optional, appUrl, idSet, reasoningLevel, timezone, isTimeZone, canonicalTimeZone } from '@/lib/env'
+import { required, optional, appUrl, idSet, reasoningLevel, timezone, isTimeZone, canonicalTimeZone, isAssistantName, assistantName, assistantPersona, opensWithName } from '@/lib/env'
 
 const KEYS = ['APP_URL', 'VERCEL_PROJECT_PRODUCTION_URL', 'VERCEL_URL', 'SOME_KEY', 'LLM_REASONING']
 
@@ -110,5 +110,46 @@ describe('reasoningLevel', () => {
     expect(reasoningLevel()).toBeUndefined()
     process.env.LLM_REASONING = 'extreme'
     expect(reasoningLevel()).toBeUndefined()
+  })
+})
+
+describe('the assistant\'s name and manner', () => {
+  beforeEach(() => {
+    delete process.env.ASSISTANT_NAME
+    delete process.env.ASSISTANT_PERSONA
+  })
+
+  it('is Hearth until the household names it, and only by a name it can answer to', () => {
+    expect(assistantName()).toBe('Hearth')
+    process.env.ASSISTANT_NAME = ' Pip '
+    expect(assistantName()).toBe('Pip')
+    process.env.ASSISTANT_NAME = 'R2-D2!'
+    expect(assistantName()).toBe('Hearth')
+  })
+
+  it('takes one or two words of letters, in any script', () => {
+    for (const ok of ['Pip', 'Aunty Bot', "O'Brien", 'Zoë', 'ハル']) expect(isAssistantName(ok), ok).toBe(true)
+    for (const bad of ['', 'a b c', 'Pip!', '42', 'x'.repeat(25), '-Pip']) expect(isAssistantName(bad), bad).toBe(false)
+  })
+
+  it('keeps the manner to a line or two', () => {
+    expect(assistantPersona()).toBe('')
+    process.env.ASSISTANT_PERSONA = `  warm ${'x'.repeat(400)}`
+    expect(assistantPersona()).toHaveLength(300)
+  })
+
+  it('hears its name called at the start, not talked about', () => {
+    for (const called of ['Pip, what is on today?', 'pip: bins?', 'Pip?', 'Pip', 'hey Pip what is on', 'Hi, Pip.', 'ok @Pip add milk', '  PIP, hi']) {
+      expect(opensWithName(called, 'Pip'), called).toBe(true)
+    }
+    for (const about of ['Pip is great', 'I told Pip about it', 'Pippa, come here', 'pipe the water', 'hey Pippa']) {
+      expect(opensWithName(about, 'Pip'), about).toBe(false)
+    }
+    expect(opensWithName('Aunty Bot, hello', 'Aunty Bot')).toBe(true)
+    expect(opensWithName('Aunty, hello', 'Aunty Bot')).toBe(false)
+    expect(opensWithName('anything', ' ')).toBe(false)
+    // A name with a character a pattern would read as its own is found as written.
+    expect(opensWithName('Dr.Who, hi', 'Dr.Who')).toBe(true)
+    expect(opensWithName('DrxWho, hi', 'Dr.Who')).toBe(false)
   })
 })

@@ -131,7 +131,7 @@ export async function callTool(name: string, input: unknown, member: Member): Pr
     if (!(MCP_TOOLS as string[]).includes(name)) return answer(`Hearth has no tool called ${name}.`, true)
     // Not shared, whatever the room: the result is read by one member's
     // client, not by the family, so it never reaches into another's mailbox.
-    const ctx: ToolContext = { chatId, member, memberName: member.name, now: new Date(), notices: [], cursorScope: `mcp:${member.id}` }
+    const ctx: ToolContext = { chatId, member, memberName: member.name, now: new Date(), notices: [], cursorScope: `mcp:${member.id}`, via: 'mcp' }
     const entry = registry(ctx)[name]
     if (!entry?.execute) return answer(`Hearth has no tool called ${name}.`, true)
 
@@ -168,7 +168,8 @@ async function speak(ctx: ToolContext, where: string): Promise<string> {
 }
 
 async function context(member: Member, chatId: string, where: string): Promise<string> {
-  const ambient = await ambientContext(chatId, member, 'chat')
+  // What a member's own client reads, so their own goals from anywhere are in it.
+  const ambient = await ambientContext(chatId, member, 'chat', 'mcp')
   return [
     `You are acting as ${member.name}${member.isAdmin ? ', an admin of this household' : ''}.`,
     `Anything Hearth posts on your behalf lands in ${where}.`,

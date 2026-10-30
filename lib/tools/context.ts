@@ -1,5 +1,6 @@
-import type { Member } from '../db/schema'
+import type { Member, Helper } from '../db/schema'
 import type { ParsedIcs } from '../ics-parse'
+import type { ActivityVia } from '../activity'
 import type { StagedCursor } from './cursor'
 import { UnconfirmedError } from '../deadline'
 import { describeError } from '../errors'
@@ -72,6 +73,10 @@ export type ToolContext = {
    * morning brief.
    */
   cursorScope?: string
+  /** How this run came to be, for the household's record of what was changed; a chat turn when unsaid. */
+  via?: ActivityVia
+  /** The helper this turn speaks as, when a message called one by name; what it schedules is its own. */
+  helper?: Helper | null
   /**
    * Whether what comes back is read in a room the family shares: a group chat,
    * where everyone sees what was asked for and what it turned up. A private

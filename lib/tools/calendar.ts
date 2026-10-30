@@ -4,10 +4,12 @@ import { clientFor, clientsFor, MAX_EVENTS } from '../providers'
 import { NotConnectedError, ReconnectNeededError } from '../providers/token'
 import type { CalendarEvent } from '../providers/types'
 import type { Member } from '../db/schema'
-import { allowedMembers, strangersIn } from '../db/queries'
+import { allowedMembers, strangersIn, listFamilyEvents, connectionsFor } from '../db/queries'
+import { readOnlyRefusal } from './mail'
 import { presentIn } from '../headcount'
 import { providerConfig, type Provider } from '../oauth/providers'
-import { localToUtc, formatLocal, formatLocalDate, resolveSpan, rangeEnd, lastDay } from '../cron'
+import { localToUtc, formatLocal, formatLocalDate, formatLocalTime, resolveSpan, rangeEnd, lastDay, localDateKey, daysAfter, dayAfter } from '../cron'
+import { freeSpans, nextQuarter, type Span } from '../free-time'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
 import { requireMember, writeFailure } from './context'
@@ -97,6 +99,118 @@ export function calendarTools(ctx: ToolContext) {
       },
     }),
 
+    find_free_time: tool({
+      description:
+        'Find when people are free, to book something in: reads the calendars of the asker, or of everyone in this chat with one linked, and the family calendar, ' +
+        'and gives the stretches free for long enough within the hours and days asked. All-day entries (a birthday, holidays) do not block time; they are listed by day so they can be weighed. ' +
+        'Offer times from what it returns, never one of your own.',
+      inputSchema: z.object({
+        from: z.string().optional().describe('First day to look at, YYYY-MM-DD; defaults to today'),
+        to: z.string().optional().describe('Last day, YYYY-MM-DD; defaults to six days after the first'),
+        minutes: z.number().int().min(15).max(720).default(60).describe('How long it needs'),
+        everyone: z.boolean().default(false).describe('Everyone in this chat with a linked calendar, for a shared chat; off for the asker alone'),
+        earliest: z.string().default('08:00').describe('HH:mm, the earliest it may start on a day'),
+        latest: z.string().default('20:00').describe('HH:mm, the latest it may end on a day'),
+        days: z.enum(['any', 'weekdays', 'weekends']).default('any'),
+        family_calendar: z.boolean().default(true).describe('Count what is on the family calendar as busy'),
+      }),
+      execute: async ({ from, to, minutes, everyone, earliest, latest, days, family_calendar }) => {
+        const first = from ?? localDateKey(ctx.now)
+        if (!DATE.test(first) || (to !== undefined && !DATE.test(to))) return { error: 'Give the days as YYYY-MM-DD.' }
+        const last = to ?? daysAfter(first, 6)
+        if (last < first) return { error: 'The last day comes before the first.' }
+        if (daysBetween(first, last) > MAX_FREE_DAYS) return { error: `Look at ${MAX_FREE_DAYS + 1} days at most at a time.` }
+        if (!TIME.test(earliest) || !TIME.test(latest) || earliest >= latest) {
+          return { error: 'Give earliest and latest as HH:mm, earliest first, such as 08:00 and 20:00.' }
+        }
+        if (everyone && !ctx.shared) {
+          return { error: 'Everyone\'s calendars are read only in the family group. Here, leave everyone off for your own.' }
+        }
+        if (everyone && (await strangersIn(ctx.chatId)).length > 0) {
+          return { error: 'Not while someone unrecognised is in this chat. An admin can vouch for them with /allow.' }
+        }
+        let members: Member[]
+        try {
+          members = everyone ? await presentIn(ctx.chatId, await allowedMembers()) : [requireMember(ctx)]
+        } catch (e) {
+          if (!everyone) throw e
+          return { error: `Could not check who is in this chat: ${describe(e)}` }
+        }
+
+        const rangeStart = localToUtc(`${first}T00:00`)
+        const rangeStop = localToUtc(`${dayAfter(last)}T00:00`)
+        const busy: Span[] = []
+        const allDay = new Map<string, string[]>()
+        const noteAllDay = (day: string, title: string) => allDay.set(day, [...(allDay.get(day) ?? []), title])
+        const checked: string[] = []
+        const unread: string[] = []
+        // A listing cut short leaves the time after its last event unknown, not free.
+        let knownUntil = rangeStop
+        for (const member of members) {
+          for (const c of await clientsFor(member.id)) {
+            const name = calendarName(member.name, c.provider)
+            try {
+              const { events, more } = await c.listEvents(rangeStart, rangeStop)
+              checked.push(name)
+              for (const e of events) {
+                if (e.allDay) noteAllDay(e.start.slice(0, 10), `${e.title} (${name})`)
+                else if (e.start && e.end) busy.push({ start: new Date(e.start), end: new Date(e.end) })
+              }
+              const lastStart = events.at(-1)?.start
+              if (more && lastStart) {
+                const at = events.at(-1)!.allDay ? localToUtc(lastStart.slice(0, 10)) : new Date(lastStart)
+                if (at < knownUntil) knownUntil = at
+              }
+            } catch (e) {
+              unread.push(`${name}: ${describe(e)}`)
+            }
+          }
+        }
+        if (family_calendar) {
+          checked.push('the family calendar')
+          for (const e of await listFamilyEvents(rangeStart, rangeStop)) {
+            if (e.cancelled) continue
+            if (e.allDay) noteAllDay(localDateKey(e.startsAt), `${e.title} (family calendar)`)
+            else busy.push({ start: e.startsAt, end: e.endsAt })
+          }
+        }
+        if (checked.length === 0) {
+          return { error: everyone ? 'Nobody in this chat has linked a calendar yet. Send /connect to link one.' : 'No calendar linked. Send /connect to link one.' }
+        }
+
+        // Each day's searchable hours, from now on, no further than the listings were read.
+        const soonest = nextQuarter(ctx.now)
+        const windows: Span[] = []
+        for (let day = first; day <= last; day = dayAfter(day)) {
+          const weekday = new Date(`${day}T12:00:00Z`).getUTCDay()
+          if (days === 'weekdays' && (weekday === 0 || weekday === 6)) continue
+          if (days === 'weekends' && weekday !== 0 && weekday !== 6) continue
+          const start = maxDate(localToUtc(`${day}T${earliest}`), soonest)
+          const end = minDate(localToUtc(`${day}T${latest}`), knownUntil)
+          if (start < end) windows.push({ start, end })
+        }
+        const free = freeSpans(windows, busy, minutes)
+        return {
+          timezone: timezone(),
+          checked,
+          ...(unread.length ? { could_not_read: unread } : {}),
+          free: free.slice(0, MAX_FREE_SPANS).map((s) => ({
+            day: formatLocalDate(s.start),
+            from: formatLocalTime(s.start),
+            until: formatLocalTime(s.end),
+            minutes: Math.round((s.end.getTime() - s.start.getTime()) / 60_000),
+          })),
+          ...(free.length > MAX_FREE_SPANS ? { more_not_shown: free.length - MAX_FREE_SPANS } : {}),
+          ...(allDay.size
+            ? { all_day: [...allDay].sort(([a], [b]) => a.localeCompare(b)).map(([day, titles]) => ({ day: formatLocalDate(localToUtc(day)), on: titles })) }
+            : {}),
+          ...(knownUntil < rangeStop
+            ? { note: `A calendar held more events than could be read, so nothing after ${formatLocal(knownUntil)} is offered: ask about the days after that separately.` }
+            : {}),
+        }
+      },
+    }),
+
     create_calendar_event: tool({
       description:
         "Add an event to the asker's OWN personal calendar. For something the whole family should see, use add_family_event instead.",
@@ -121,8 +235,13 @@ export function calendarTools(ctx: ToolContext) {
               'must not be sent on its say-so. Add the event without attendees, or ask the member to confirm who to invite in their next message.',
           }
         }
-        const clients = provider ? [clientFor(member.id, provider)] : await clientsFor(member.id)
-        if (clients.length === 0) return { error: 'No calendar linked. Send /connect to link one.' }
+        // An account its owner linked to be read only takes no events, and is not swapped for another unasked.
+        const readOnly = new Set((await connectionsFor(member.id)).filter((c) => c.readOnly).map((c) => c.provider))
+        if (provider && readOnly.has(provider)) return { error: readOnlyRefusal(provider) }
+        const linked = provider ? [clientFor(member.id, provider)] : await clientsFor(member.id)
+        if (linked.length === 0) return { error: 'No calendar linked. Send /connect to link one.' }
+        const clients = linked.filter((c) => !readOnly.has(c.provider))
+        if (clients.length === 0) return { error: readOnlyRefusal(linked[0].provider) }
 
         // Read as add_family_event reads it. The instants are local midnights
         // for an all-day event, which the providers turn back into dates.
@@ -175,6 +294,16 @@ function asShown(e: CalendarEvent) {
     end_local: formatLocalDate(localToUtc(last)),
   }
 }
+
+const DATE = /^\d{4}-\d{2}-\d{2}$/
+const TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/
+/** How many days past the first one look takes in, and how many free stretches it lists. */
+const MAX_FREE_DAYS = 30
+const MAX_FREE_SPANS = 12
+
+const daysBetween = (a: string, b: string) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000)
+const maxDate = (a: Date, b: Date) => (a > b ? a : b)
+const minDate = (a: Date, b: Date) => (a < b ? a : b)
 
 function describe(e: unknown): string {
   if (e instanceof NotConnectedError) {

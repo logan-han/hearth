@@ -11,14 +11,19 @@ import { memoryTools } from './memory'
 import { automationTools } from './automation'
 import { weatherTools } from './weather'
 import { browseTools } from './browse'
+import { activityTools } from './activity'
+import { goalTools } from './goals'
+import { helperTools } from './helpers'
+import { routineTools } from './routines'
 import { routerTools, CORE_TOOLS, TOOL_GROUPS } from './router'
 import type { ToolContext } from './context'
+import { noteActivity } from '../activity'
 
 /** Tools whose results carry text written outside the household. See ToolContext.readUntrusted. */
 const UNTRUSTED_SOURCES = new Set([
-  'web_search', 'read_url',
+  'web_search', 'read_url', 'read_recipe',
   'list_email', 'new_mail', 'read_email', 'read_attachment',
-  'list_calendar',
+  'list_calendar', 'find_free_time',
   'notion_search', 'notion_read_page', 'notion_query_database',
   'jira_search', 'jira_board_summary', 'jira_read_issue',
 ])
@@ -38,6 +43,10 @@ export function buildTools(ctx: ToolContext) {
     ...automationTools(ctx),
     ...weatherTools(ctx),
     ...browseTools(ctx),
+    ...activityTools(ctx),
+    ...goalTools(ctx),
+    ...helperTools(ctx),
+    ...routineTools(ctx),
     ...routerTools(),
   })
 }
@@ -50,6 +59,7 @@ export function buildTools(ctx: ToolContext) {
 const UNREPEATABLE: ReadonlySet<string> = new Set([
   'add_to_list', 'create_automation', 'create_calendar_event',
   'jira_create_issue', 'jira_comment', 'jira_attach_email_file', 'notion_append_to_page',
+  'create_goal', 'update_goal', 'hand_off',
 ])
 
 /** A link as it would be written anywhere: no scheme, no closing slash. */
@@ -100,6 +110,9 @@ function linkSeen(ctx: ToolContext, url: string): boolean {
   )
 }
 
+/** The tools that open a link: once the turn has read outside text, only a link that was there to be read. */
+const LINK_READERS: ReadonlySet<string> = new Set(['read_url', 'read_recipe'])
+
 /** What a second call to an unrepeatable write gets, once an earlier one this turn may have gone through. */
 const unconfirmedAgain = (name: string) =>
   `Not tried again: ${name} ran out of time earlier this turn and may have gone through, so a second call could do it twice. ` +
@@ -115,7 +128,7 @@ const UNSEEN_LINK =
  * each call and what came back (see ToolContext.seen). An outside-content
  * tool also marks the turn as having read something untrusted, and a write
  * records itself once it has succeeded (a result with an `error` changed
- * nothing), or once it may have: one with `maybe_done` ran out of time and
+ * nothing), in the turn and in the household's activity log, or once it may have: one with `maybe_done` ran out of time and
  * could have gone through all the same, and is kept apart from those that
  * did. Once something untrusted has been read, read_url opens only a link
  * that was there to be read. An unrepeatable write that may have gone
@@ -137,7 +150,7 @@ function instrument<T extends Record<string, { execute?: (...args: never[]) => u
         const typed = (ctx.typed ??= [])
         typed.push(JSON.stringify(input) ?? '')
         if (unrepeatable && ctx.unconfirmed?.includes(name)) return { error: unconfirmedAgain(name) }
-        if (name === 'read_url') {
+        if (LINK_READERS.has(name)) {
           const url = String((input as { url?: unknown } | undefined)?.url ?? '')
           if (ctx.readUntrusted && !linkSeen(ctx, url)) return { error: UNSEEN_LINK }
           // Opened before anything untrusted was read, it came from the family's words alone, and may be read again.
@@ -148,7 +161,13 @@ function instrument<T extends Record<string, { execute?: (...args: never[]) => u
         ;(ctx.seen ??= []).push({ text: JSON.stringify(result) ?? '', typed: typed.length })
         const failed = typeof result === 'object' && result !== null && 'error' in result
         const maybe = failed && (result as { maybe_done?: unknown }).maybe_done === true
-        if (writes && !failed) (ctx.changed ??= []).push(name)
+        if (writes && !failed) {
+          ;(ctx.changed ??= []).push(name)
+          // An MCP client is one member's, whichever room it acts in: what it
+          // changed is on their own record, never a group's for all to read.
+          const where = ctx.via === 'mcp' && ctx.member ? ctx.member.telegramUserId : ctx.chatId
+          await noteActivity({ chatId: where, memberId: ctx.member?.id ?? null, via: ctx.via ?? 'chat', tool: name, input, result })
+        }
         if (writes && maybe) (ctx.maybeChanged ??= []).push(name)
         if (unrepeatable && (!failed || maybe)) (ctx.wrote ??= []).push(name)
         if (unrepeatable && maybe) (ctx.unconfirmed ??= []).push(name)
@@ -170,13 +189,15 @@ export type ToolName = keyof ReturnType<typeof buildTools>
  * with nobody watching and cannot ask for a yes.
  */
 export const CUSTOM_AUTOMATION_TOOLS: ToolName[] = [
-  'web_search', 'read_url', 'weather', 'recall',
+  'web_search', 'read_url', 'read_recipe', 'weather', 'recall',
   'list_email', 'new_mail', 'read_email', 'read_attachment',
   'list_calendar', 'list_family_events', 'propose_family_event', 'list_event_proposals',
   'show_list', 'show_lists', 'add_to_list',
-  'list_bank_accounts', 'list_transactions', 'spending_summary', 'budget_summary',
+  'list_bank_accounts', 'list_transactions', 'spending_summary', 'budget_summary', 'recurring_payments',
   'notion_search', 'notion_read_page', 'notion_query_database',
   'jira_search', 'jira_board_summary', 'jira_read_issue',
+  'list_goals', 'goal_status',
+  'run_routine', 'list_routines',
 ]
 
 /** The nightly memory pass files and corrects facts, and asks about the ones it cannot stand behind. */
@@ -208,6 +229,9 @@ export const WRITE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   'draft_email', 'send_email', 'cancel_draft', 'create_calendar_event',
   'notion_append_to_page', 'jira_create_issue', 'jira_update_issue', 'jira_move_issue', 'jira_comment', 'jira_attach_email_file',
   'create_automation', 'delete_automation', 'pause_automation',
+  'create_goal', 'update_goal',
+  'create_helper', 'remove_helper', 'hand_off',
+  'save_routine', 'delete_routine',
 ])
 
 /**

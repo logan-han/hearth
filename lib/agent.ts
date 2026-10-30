@@ -10,11 +10,15 @@ import {
 import { z } from 'zod'
 import { withModelFallback, structuredChain, modelChain, EndOnFailure, type ModelSlot } from './model'
 import { buildTools, CUSTOM_AUTOMATION_TOOLS, SWEEP_TOOLS, PENDING_WRITES, routeGroups, groupsAfter, activeToolsFor, type ToolName } from './tools'
+import { GROUP_NAMES } from './tools/router'
+import { goalScope, goalSummary } from './tools/goals'
 import type { ToolContext } from './tools/context'
+import type { ActivityVia } from './activity'
 import type { StagedCursor } from './tools/cursor'
-import { recentMessages, listMemories, openQuestions, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals, chatSummary } from './db/queries'
-import type { Member } from './db/schema'
-import { timezone, language, units, reasoningLevel } from './env'
+import { recentMessages, listMemories, openQuestions, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals, chatSummary, goalsIn, listHelpers, listRoutines } from './db/queries'
+import type { Member, Helper } from './db/schema'
+import { helperGroups, roleInBrief } from './helpers'
+import { timezone, language, units, reasoningLevel, assistantName, assistantPersona } from './env'
 import { traced, traceRun, noteRun, callTelemetry } from './telemetry'
 import { clockLine } from './cron'
 import { spanLabel } from './tools/familycal'
@@ -71,6 +75,10 @@ export type AgentInput = {
   deadline?: number
   /** Whether the tools may read into a room the family shares; see ToolContext.shared. Defaults to any chat but a private one. */
   shared?: boolean
+  /** The helper this turn speaks as: its role in the prompt, its tool groups switched on from the start. */
+  helper?: Helper | null
+  /** Whose "what's new" markers the tools read and move, when not the chat's own; see ToolContext.cursorScope. */
+  cursorScope?: string
 }
 
 export type AgentResult = {
@@ -144,14 +152,14 @@ function defaultTools(mode: AgentMode): ToolName[] | undefined {
  * with it in view; the sweep gets every memory, because deduplicating
  * against them is its job.
  */
-type Ambient = { text: string; pendingDrafts: boolean }
+type Ambient = { text: string; pendingDrafts: boolean; activeGoals?: boolean; helperNames?: string[]; routineNames?: string[] }
 
 /**
  * Everything the model is told before a word of the conversation: who the
  * family is, what is known, what is still open. Exported because an MCP client
  * gets none of it for free and has to ask; see lib/mcp.ts.
  */
-export async function ambientContext(chatId: string, member: Member | null, mode: AgentMode): Promise<Ambient> {
+export async function ambientContext(chatId: string, member: Member | null, mode: AgentMode, via: ActivityVia = mode): Promise<Ambient> {
   if (mode === 'watcher') {
     const memories = await listMemories(CHAT_MEMORY_LIMIT).catch(() => [])
     const lines = memories.length ? ['Known household facts:', ...memories.map((m) => `- [${m.id}] ${m.content}`)] : []
@@ -169,7 +177,7 @@ export async function ambientContext(chatId: string, member: Member | null, mode
     return { text: lines.join('\n'), pendingDrafts: false }
   }
 
-  const [memories, questions, members, connections, drafts, proposals, summary] = await Promise.all([
+  const [memories, questions, members, connections, drafts, proposals, summary, goals, crew, routines] = await Promise.all([
     listMemories(CHAT_MEMORY_LIMIT).catch(() => []),
     openQuestions().catch(() => []),
     allMembersWithLinks().catch(() => []),
@@ -177,6 +185,12 @@ export async function ambientContext(chatId: string, member: Member | null, mode
     pendingDrafts(chatId).catch(() => []),
     pendingProposals(chatId).catch(() => []),
     chatSummary(chatId).catch(() => ({ summary: null, through: 0 })),
+    // A group's own goals; in a member's own chat or client, theirs from anywhere too.
+    goalsIn(goalScope({ chatId, member, via }))
+      .then((rows) => Promise.all(rows.map((g) => goalSummary(g, new Date()))))
+      .catch(() => []),
+    listHelpers().catch(() => []),
+    listRoutines().catch(() => []),
   ])
 
   const lines: string[] = []
@@ -193,7 +207,7 @@ export async function ambientContext(chatId: string, member: Member | null, mode
     lines.push(
       'Family members and their linked accounts: ' +
         family
-          .map((m) => `${m.name}${m.linked.length ? ` (${m.linked.map((l) => `${l.provider}: ${l.email ?? 'linked'}`).join(', ')})` : ' (nothing linked)'}`)
+          .map((m) => `${m.name}${m.linked.length ? ` (${m.linked.map((l) => `${l.provider}: ${l.email ?? 'linked'}${l.readOnly ? ', read only' : ''}`).join(', ')})` : ' (nothing linked)'}`)
           .join('; ') +
         '.',
     )
@@ -216,11 +230,38 @@ export async function ambientContext(chatId: string, member: Member | null, mode
     lines.push('Questions the nightly pass put to the family, still open (settle with answer_question and the id: pass the fact in their words for a yes or a correction, nothing for a no):')
     lines.push(...questions.map((qn) => `- question_id ${qn.id}: ${qn.question} (would keep: "${qn.candidate}")`))
   }
+  if (goals.length) {
+    // So "we booked the venue" lands on the goal it moves forward.
+    lines.push('Goals in progress here (goal_status for the detail; update_goal to tick steps off or add them, log progress, move the target or close one):')
+    lines.push(
+      ...goals.map(
+        (g) =>
+          `- goal_id ${g.goal_id}: "${g.title}", ${g.steps_done} of ${g.steps_total} steps done` +
+          (g.target_date ? `, target ${g.target_date} (${g.days_left} days)` : '') +
+          (g.next_step ? `, next: ${g.next_step}` : ''),
+      ),
+    )
+  }
+  if (crew.length) {
+    // Who else there is to talk to, and to hand a job to.
+    lines.push('Helpers (each answers when a message opens with its name; hand_off gives one a job to do in the background and post here):')
+    lines.push(...crew.map((h) => `- ${h.name}: ${roleInBrief(h.role)}`))
+  }
+  if (routines.length) {
+    // Asked for by name, a routine is run_routine and then its steps.
+    lines.push(`Routines kept (run_routine by name when one is asked for, then carry out its steps): ${routines.map((r) => r.name).join('; ')}.`)
+  }
   if (memories.length) {
     lines.push('Known household facts:')
     lines.push(...memories.map((m) => `- [${m.id}] ${m.content}`))
   }
-  return { text: lines.join('\n'), pendingDrafts: drafts.length > 0 }
+  return {
+    text: lines.join('\n'),
+    pendingDrafts: drafts.length > 0,
+    activeGoals: goals.length > 0,
+    helperNames: crew.map((h) => h.name),
+    routineNames: routines.map((r) => r.name),
+  }
 }
 
 type AgentAttachment = NonNullable<AgentInput['attachments']>[number]
@@ -300,11 +341,15 @@ export function systemPrompt(input: {
   memberName: string
   now: Date
   context: string
+  /** The helper speaking, when it is one: who it is and its role, ahead of everything else. */
+  helper?: Pick<Helper, 'name' | 'role'> | null
 }): string {
   const mode = input.mode ?? 'chat'
   const tz = timezone()
   const head = [
-    'You are Hearth, the household assistant for one family, on Telegram.',
+    input.helper
+      ? `You are ${input.helper.name}, one of ${assistantName()}'s helpers for one family, on Telegram. Your replies are signed with your name, so never sign them yourself.\nROLE: ${input.helper.role}`
+      : `You are ${assistantName()}, the household assistant for one family, on Telegram.`,
     clockLine(input.now),
   ]
   const body = mode === 'sweep' ? sweepPrompt() : mode === 'watcher' ? watcherPrompt(tz) : chatPrompt(input, tz)
@@ -325,9 +370,10 @@ function chatPrompt(input: { chatType: string; memberName: string }, tz: string)
     }.`,
     '',
     'REPLY: a couple of sentences, the answer only. No preamble, no restating the question, no account of what you searched or discarded.',
+    ...voice(),
     `FORMAT: **bold**, *italic*, \`code\` and - bullets only; no headings or tables. Write in ${language()} with ${units()} units, and read and write every time as ${tz}.`,
     'GROUNDING: state only what a tool result, the chat history or a Known household fact says. When a detail is missing, say it is not stated and offer to find it. Search when a current fact matters (hours, prices, news); weather questions go to the weather tool.',
-    'TOOLS: when a tool covers a request, call it rather than saying you cannot. If the tool you need is not in your list, call more_tools with its group (mail, personal_calendar, money, notion, jira, automations) and use it in the next step. Email and personal calendar tools act on the person who just spoke. Household-wide events go on the SHARED calendar with add_family_event. Running lists live in the list tools. Open links with read_url and read what is there. An email missing from the inbox may be archived: search with list_email and a query.',
+    `TOOLS: when a tool covers a request, call it rather than saying you cannot. If the tool you need is not in your list, call more_tools with its group (${GROUP_NAMES.join(', ')}) and use it in the next step. Email and personal calendar tools act on the person who just spoke. Household-wide events go on the SHARED calendar with add_family_event. Running lists live in the list tools. Open links with read_url and read what is there. An email missing from the inbox may be archived: search with list_email and a query.`,
     'FOUND EVENTS: a date you found in an email, photo or page goes through propose_family_event so a person confirms first. A date you were told directly can go straight on.',
     'PHOTOS, SCANS AND VOICE: read what is sent and report what you actually see. If it is unreadable or carries no date, say so.',
     'FILES: a photo, PDF, voice note or file can be read only in the message it arrives with. A calendar file (.ics) arrives as a listing, and import_calendar_file puts its events on the family calendar in one call. If someone refers to a file from an earlier message, ask them to send it again with the request as its caption. A file attached to an email is different: read_email lists its attachments, and read_attachment reads one by the email id and its filename.',
@@ -335,7 +381,7 @@ function chatPrompt(input: { chatType: string; memberName: string }, tz: string)
     'ACTIONS: something is done only when a tool has returned. Never say added, replaced, cancelled, updated or sent unless the tool result in this turn says so; "replace" or "move" an event means update_family_event with its id from list_family_events.',
     'MONEY: it all comes from PocketSmith. Quote figures and totals exactly as the tools give them, never a sum of your own. A payee string is a trading name and a registered city, not where the household went. Where a booking goes, or what a payment was for, comes only from its note, a confirmation email or a Known fact; otherwise say the feed does not say.',
     'MEMORY: Known household facts are already in your context, so use them without announcing them. Call remember when someone asks you to remember something, or corrects a Known fact (pass the old id as replaces). Do not file facts on your own initiative; a nightly pass does that. When someone answers one of the open questions in your context, settle it with answer_question, with the fact in their words for a yes and nothing for a no.',
-    'COMMANDS the app answers before you see them: /watch (the morning brief or the money snapshot), /connect, /accounts, /unlink, /calendar, /whoami, /members, /help, and for admins /allow and /deny. Point people at them rather than improvising.',
+    'COMMANDS the app answers before you see them: /watch (the morning brief, the money snapshot, mail that needs someone now, or the monthly subscriptions check), /pending, /activity, /connect, /accounts, /unlink, /calendar, /whoami, /members, /help, and for admins /allow and /deny. Point people at them rather than improvising.',
     "EMAIL is the one irreversible action: draft_email first and show the draft; send_email only in a LATER turn, after the draft's owner says yes, with the draft_id from Context. Never call both in one response. \"Send it\" or \"yes\" from the owner means call send_email NOW with that draft_id; do not draft again or ask again. A revision is a new draft_email with the full text, and the old draft is superseded.",
     '',
     'EXAMPLES, where <angle brackets> stand for the real values:',
@@ -344,6 +390,16 @@ function chatPrompt(input: { chatType: string; memberName: string }, tz: string)
     'Bad: "Looks like someone booked a trip to <the city in the payee string>!" No source names a trip.',
     'Bad: "Let me check the calendar first... Now the answer:" Working shown; give the answer alone.',
   ]
+}
+
+/**
+ * The manner the household chose for its assistant, in their words. It
+ * shapes how a chat reply sounds and nothing else: the rules after it, and the
+ * grounding above all, still decide what is said.
+ */
+function voice(): string[] {
+  const persona = assistantPersona()
+  return persona ? [`VOICE: ${persona}. That is how you sound, never what you say: the facts and every rule here come first.`] : []
 }
 
 function watcherPrompt(tz: string): string[] {
@@ -596,6 +652,9 @@ export function collectEvidence(steps: ReadonlyArray<{ toolResults?: ReadonlyArr
  */
 const DONE: Partial<Record<ToolName, string>> = {
   add_to_list: 'added to a list',
+  hand_off: 'handed a job to a helper',
+  create_goal: 'set up a goal',
+  update_goal: 'updated a goal',
   create_automation: 'set up a reminder',
   create_calendar_event: 'added an event to your calendar',
   jira_comment: 'commented on a board ticket',
@@ -657,6 +716,9 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     // A photo, PDF or file sent with the message is outside text as much as an email is.
     readUntrusted: (input.attachments?.length ?? 0) > 0,
     shared: input.shared ?? input.chatType !== 'private',
+    via: mode,
+    helper: input.helper ?? null,
+    ...(input.cursorScope ? { cursorScope: input.cursorScope } : {}),
   }
 
   const [ambient, history] = await Promise.all([
@@ -692,7 +754,18 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   // widened by any more_tools call the model makes along the way. The import
   // tool is offered only while there is a calendar file to import.
   const routing = mode === 'chat' && !input.tools
-  const initialGroups = routing ? routeGroups(input.text, { pendingDrafts: ambient.pendingDrafts }) : []
+  // A helper starts with its own line of work in reach, whatever the wording.
+  const initialGroups = routing
+    ? [...new Set([
+        ...routeGroups(input.text, {
+          pendingDrafts: ambient.pendingDrafts,
+          activeGoals: ambient.activeGoals,
+          helperNames: ambient.helperNames,
+          routineNames: ambient.routineNames,
+        }),
+        ...(input.helper ? helperGroups(input.helper) : []),
+      ])]
+    : []
   const withFiles: ToolName[] = calendarFiles.length ? ['import_calendar_file'] : []
   const settings = MODE_SETTINGS[mode]
   const reasoning = reasoningLevel()
@@ -710,13 +783,17 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         sessionId: input.chatId,
         ...(input.member ? { userId: input.member.telegramUserId } : {}),
         tags: [mode, input.chatType],
-        metadata: { model: slot.name, ...(routing ? { tool_groups: initialGroups.join(',') || 'core' } : {}) },
+        metadata: {
+          model: slot.name,
+          ...(routing ? { tool_groups: initialGroups.join(',') || 'core' } : {}),
+          ...(input.helper ? { helper: input.helper.name } : {}),
+        },
       },
       async () => {
         const call = (msgs: ModelMessage[]) =>
           generateText({
             model: slot.model,
-            system: systemPrompt({ mode, chatType: input.chatType, memberName: input.memberName, now, context }),
+            system: systemPrompt({ mode, chatType: input.chatType, memberName: input.memberName, now, context, helper: input.helper }),
             messages: msgs,
             tools: buildTools(ctx),
             ...(activeTools ? { activeTools } : {}),

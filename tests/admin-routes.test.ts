@@ -121,6 +121,17 @@ describe('the settings API respects the allowlist', () => {
     expect(process.env.TAVILY_API_KEY).toBe('tvly-pasted')
   })
 
+  it("takes a name the bot can answer to, and a manner of a line or two", async () => {
+    const bad = await post({ key: 'ASSISTANT_NAME', value: 'Pip the Great!' })
+    expect(bad.status).toBe(400)
+    expect((await bad.json()).error).toContain('one or two words of letters')
+    expect((await post({ key: 'ASSISTANT_NAME', value: ' Pip ' })).status).toBe(200)
+    expect(process.env.ASSISTANT_NAME).toBe('Pip')
+    const long = await post({ key: 'ASSISTANT_PERSONA', value: 'x'.repeat(301) })
+    expect(long.status).toBe(400)
+    expect((await post({ key: 'ASSISTANT_PERSONA', value: 'warm and brief' })).status).toBe(200)
+  })
+
   it('accepts the Telegram settings, which are dashboard-managed now', async () => {
     const res = await post({ key: 'ALLOWED_TELEGRAM_IDS', value: '111, 222' })
     expect(res.status).toBe(200)
