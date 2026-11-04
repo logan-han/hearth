@@ -33,7 +33,7 @@ describe('the built-in watchers', () => {
     const rows = await q.listAutomations('-100')
     expect(rows.map((a) => a.kind).sort()).toEqual(['morning', 'snapshot'])
     expect(rows.every((a) => a.memberId === null && a.enabled)).toBe(true)
-    expect(rows.find((a) => a.kind === 'morning')!.instruction).toContain('whose mailbox')
+    expect(rows.find((a) => a.kind === 'morning')!.instruction).toContain('"(<name>)"')
     expect(rows.find((a) => a.kind === 'morning')!.nextRunAt.toISOString()).toBe('2026-09-15T21:00:00.000Z')
     expect(await q.listAutomations('-200')).toHaveLength(0)
     expect(await q.listAutomations('111')).toHaveLength(0)
@@ -137,7 +137,7 @@ describe('the built-in watchers', () => {
     expect(report.synced).toBe(2)
     const brief = (await q.getAutomation(stale.id))!
     expect(brief.cronExpr).toBe(WATCHERS.morning.cron)
-    expect(brief.instruction).toContain('whose mailbox')
+    expect(brief.instruction).toContain('"(<name>)"')
     // A daily brief from a Tuesday morning is next due Wednesday 7am, not Thursday.
     expect(brief.nextRunAt.toISOString()).toBe('2026-09-15T21:00:00.000Z')
     const snapshot = (await q.getAutomation(worded.id))!
@@ -183,7 +183,7 @@ describe('the built-in watchers', () => {
     expect(converted.label).toBe('Morning brief')
     expect(converted.cronExpr).toBe(WATCHERS.morning.cron)
     expect(converted.memberId).toBe(ada.id)
-    expect(converted.instruction).not.toContain('whose mailbox')
+    expect(converted.instruction).not.toContain('"(<name>)"')
     expect(converted.nextRunAt.toISOString()).toBe('2026-09-15T21:00:00.000Z')
     expect((await q.listAutomations('-100')).map((a) => a.kind).sort()).toEqual(['morning', 'snapshot'])
     expect(await q.listAutomations()).toHaveLength(3)

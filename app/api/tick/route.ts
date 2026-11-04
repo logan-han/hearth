@@ -160,6 +160,16 @@ const isUnconfigured = (err: string | null) => Boolean(err && /not configured/i.
 /** Nobody having linked a mailbox or calendar yet is a setting too; one that will not answer is a fault. */
 const isUnlinked = (err: string | null) => Boolean(err && /linked a (?:mailbox|calendar)|no (?:email account|calendar) linked/i.test(err))
 
+/**
+ * An account as a post names it: by whose it is, under member. The names the
+ * tools also give it ("Rowan's Gmail", "Rowan's Google Calendar") are the app
+ * as well as the person, and a brief handed them copied them onto every line.
+ * An admin's fault message still names the mailbox, from the tool's own result.
+ */
+const byMember = ({ mailbox: _mailbox, calendar: _calendar, ...acct }: Record<string, unknown>) => acct
+const accountsByMember = (r: Record<string, unknown>) =>
+  Array.isArray(r.accounts) ? { ...r, accounts: (r.accounts as Record<string, unknown>[]).map(byMember) } : r
+
 /** The local day an event as list_calendar shows it starts on: its date for an all-day one, its instant's day for a timed one. */
 function startDay(e: Record<string, unknown>): string | null {
   const start = typeof e.start === 'string' ? e.start : ''
@@ -323,15 +333,15 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
       // Coming is a reason to post, as a due date is; a reminder speaks for itself when it goes off, so on its own it only rides along.
       const ahead = comingFamily.length + days.comingCount + dueSoon.length
       const data: Record<string, unknown> = { events }
-      if (!calendarsErr) data.calendars = { ...calendars, accounts: days.today }
+      if (!calendarsErr) data.calendars = { ...calendars, accounts: days.today.map(byMember) }
       if (startsTomorrow.length || days.tomorrow.length) {
         data.tomorrow = {
           date: formatLocalDate(localToUtc(next)),
           ...(startsTomorrow.length ? { events: startsTomorrow } : {}),
-          ...(days.tomorrow.length ? { calendars: days.tomorrow } : {}),
+          ...(days.tomorrow.length ? { calendars: days.tomorrow.map(byMember) } : {}),
         }
       }
-      if (!mailErr) data.mail = mail
+      if (!mailErr) data.mail = accountsByMember(mail)
       // The board's due dates within the fortnight are under coming, so its own list of next dues is left out here.
       if (!errorOf(board)) data.board = { ...board, due_next: undefined }
       if (todaysReminders.length) data.reminders = todaysReminders
@@ -339,7 +349,7 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
         data.coming = {
           through: formatLocalDate(localToUtc(horizon)),
           ...(comingFamily.length ? { events: comingFamily } : {}),
-          ...(days.coming.length ? { calendars: days.coming } : {}),
+          ...(days.coming.length ? { calendars: days.coming.map(byMember) } : {}),
           ...(dueSoon.length ? { board: dueSoon } : {}),
           ...(laterReminders.length ? { reminders: laterReminders } : {}),
         }
@@ -376,7 +386,7 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
       const failed = [errorOf(mail), ...accounts.map(errorOf)].filter((e): e is string => Boolean(e) && !isUnlinked(e))
       if (failed.length) console.warn(`[tick] ${a.label}: ${failed.join(' | ')}`)
       const arrived = accounts.reduce((n, acct) => n + (Array.isArray(acct.messages) ? acct.messages.length : 0), 0)
-      return { data: { mail }, empty: arrived === 0, problems }
+      return { data: { mail: accountsByMember(mail) }, empty: arrived === 0, problems }
     }
     case 'subscriptions': {
       // A month's changes, found in code: a new price, a new payee, a payment that has not come.

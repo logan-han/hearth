@@ -249,7 +249,8 @@ const PROMO = { id: 'm2', from: 'deals@bigretailer.example', subject: '48 hours 
 const briefInstruction = watcherInstruction('morning', base.chatId)
 // The tick heads every piece of evidence with the household's clock, so the checks can tell today from tomorrow.
 const clock = clockLine(new Date())
-const mailbox = (messages: object[]) => ({ accounts: [{ member: 'Rowan', mailbox: "Rowan's Gmail", provider: 'google', first_check: false, messages }] })
+// As the tick hands mail to a brief: each account by whose it is, not by its mailbox's name.
+const mailbox = (messages: object[]) => ({ accounts: [{ member: 'Rowan', provider: 'google', first_check: false, messages }] })
 
 describe.skipIf(!liveChainConfigured())('morning brief, the mail half', () => {
   it('proposes the date it read, and does not invent one', async () => {
@@ -297,7 +298,7 @@ const briefDraft = [
   '**Today**',
   '- Last day of term, all day.',
   '**To do**',
-  "- Rowan's Gmail: the parents' association trivia night is Friday 23 October 2026 from 7pm in the college hall. Tickets $20 each; book by Friday 16 October.",
+  "- Riverbend College (Rowan): the parents' association trivia night is Friday 23 October 2026 from 7pm in the college hall. Tickets $20 each; book by Friday 16 October.",
 ].join('\n')
 const briefEvidence = `${clock}\n\nINSTRUCTION:\n${briefInstruction}\n\nDATA:\n${briefData}\n\nTOOL RESULTS:\n(none)`
 
@@ -338,10 +339,10 @@ describe.skipIf(!liveChainConfigured())('morning brief, the post check', () => {
     const data = plainData({ events: { timezone: 'Australia/Melbourne', events: [] }, mail: mailbox(TRIAGE) })
     const draft = [
       '**To do**',
-      `- In Rowan's Gmail, Sign Desk asks for a signature on the lease renewal for 12 Elm Street by ${DAYS.due}.`,
+      `- Sign Desk (Rowan) asks for a signature on the lease renewal for 12 Elm Street by ${DAYS.due}.`,
       '**Heads up**',
-      "- In Rowan's Gmail, Northbank Broadband says the connection at 12 Elm Street is active and the plan has started.",
-      `- In Rowan's Gmail, Surplus Bites says the Mystery Box from Corner Bakery Hillside is ready for collection on ${DAYS.stale} between 6:00 pm and 6:30 pm at 18 Station Street, Hillside.`,
+      '- Northbank Broadband (Rowan) says the connection at 12 Elm Street is active and the plan has started.',
+      `- Surplus Bites (Rowan) says the Mystery Box from Corner Bakery Hillside is ready for collection on ${DAYS.stale} between 6:00 pm and 6:30 pm at 18 Station Street, Hillside.`,
     ].join('\n')
     const d = await decideWatcherPost({ label: 'Morning brief', draft, evidence: `${clock}\n\nINSTRUCTION:\n${briefInstruction}\n\nDATA:\n${data}\n\nTOOL RESULTS:\n(none)` })
     const hard = d.decision === 'post'
@@ -374,9 +375,9 @@ const answeredData = plainData({ events: { timezone: 'Australia/Melbourne', even
 const answeredEvidence = `${clock}\n\nINSTRUCTION:\n${briefInstruction}\n\nDATA:\n${answeredData}\n\nTOOL RESULTS:\n(none)`
 const staleDraft = [
   '**To do**',
-  `- In Rowan's Gmail, Riverbend College asks for a response to the Year 1 Swimming Program online form for Juno by ${DAYS.due}.`,
+  `- Riverbend College (Rowan) asks for a response to the Year 1 Swimming Program online form for Juno by ${DAYS.due}.`,
   '**Heads up**',
-  "- In Rowan's Gmail, Northbank Broadband says the connection at 12 Elm Street is active and the plan has started.",
+  '- Northbank Broadband (Rowan) says the connection at 12 Elm Street is active and the plan has started.',
 ].join('\n')
 
 describe.skipIf(!liveChainConfigured())('morning brief, a request answered since', () => {
@@ -510,17 +511,17 @@ const DAY = {
     timezone: 'Australia/Melbourne',
     accounts: [
       {
-        member: 'Sam', calendar: "Sam's Outlook Calendar", provider: 'microsoft',
+        member: 'Sam', provider: 'microsoft',
         events: [{ id: 'e1', title: 'Dentist', start: iso(today, '09:00'), end: iso(today, '10:00'), allDay: false, location: 'Hillside Dental', start_local: at(today, '09:00'), end_local: at(today, '10:00') }],
       },
-      { member: 'Rowan', calendar: "Rowan's Google Calendar", provider: 'google', events: [] },
+      { member: 'Rowan', provider: 'google', events: [] },
     ],
   },
   tomorrow: {
     date: formatLocalDate(localToUtc(next)),
     calendars: [
       {
-        member: 'Sam', calendar: "Sam's Outlook Calendar", provider: 'microsoft',
+        member: 'Sam', provider: 'microsoft',
         events: [{ id: 'e2', title: 'Flight to Sydney', start: iso(next, '06:10'), end: iso(next, '07:40'), allDay: false, start_local: at(next, '06:10'), end_local: at(next, '07:40') }],
       },
     ],
@@ -569,7 +570,11 @@ describe.skipIf(!liveChainConfigured())('morning brief, the day half', () => {
     const dueRight = /HTL-351|excursion/i.test(part(all, /due today/))
     const reminderRight = /bins/i.test(part(all, /later today/)) && /7:00 pm/i.test(part(all, /later today/))
     const waitingRight = /athletics carnival/i.test(part(all, /waiting on a yes/))
-    const byName = !/\((?:microsoft|google)\)/i.test(text)
+    // Sam's own items say "(Sam)", the family calendar's say nothing, and no line names a provider or an app.
+    const byName =
+      /\(sam\)/i.test(todayPart) &&
+      !/family calendar/i.test(todayPart + tomorrowPart) &&
+      !/\((?:microsoft|google)\)|gmail|outlook|google calendar/i.test(text)
     const hard = todayRight && tomorrowRight && dueRight && reminderRight && waitingRight && byName && noLeak(text)
     const g = await judgeGroundedness({ answer: text, context: dayData })
     record({ case: "brief: everyone's day, tomorrow, due today, reminders, waiting", hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: text.slice(0, 80) })
@@ -587,10 +592,10 @@ describe.skipIf(!liveChainConfigured())('morning brief, the day half', () => {
     const label = 'Morning brief'
     const draft = [
       '**Today**',
-      "- Sam's Outlook Calendar: Dentist, 9:00 am to 10:00 am, at Hillside Dental.",
+      '- Dentist (Sam), 9:00 am to 10:00 am, at Hillside Dental.',
       '- After School Care, 3:00 pm to 6:00 pm, Riverbend College, Hillside.',
       '**Tomorrow**',
-      "- Sam's Outlook Calendar: Flight to Sydney, 6:10 am.",
+      '- Flight to Sydney (Sam), 6:10 am.',
     ].join('\n')
     const review = await reviewDraft({ label, draft, evidence: dayEvidence })
     const kept = review.message !== null && /dentist/i.test(review.message) && /after school care/i.test(review.message)
@@ -606,5 +611,45 @@ describe.skipIf(!liveChainConfigured())('morning brief, the day half', () => {
     expect(review.unsupported).toEqual([])
     expect(kept).toBe(true)
     expect(d.decision).toBe('post')
+  })
+
+  // A term break on two family feeds and on a member's own calendar once took
+  // three bullets under Today, each saying which calendar it was on.
+  it('lists an event that is on more than one calendar once', async () => {
+    calls.length = 0
+    const on = formatLocalDate(localToUtc(today))
+    const data = plainData({
+      events: {
+        timezone: 'Australia/Melbourne',
+        events: [
+          { id: 70, title: 'Mid-Term Break', start_local: on, end_local: on, all_day: true, location: null },
+          { id: 71, title: 'Mid-Term Break, no school (Riverbend)', start_local: on, end_local: on, all_day: true, location: null },
+        ],
+      },
+      calendars: {
+        timezone: 'Australia/Melbourne',
+        accounts: [{
+          member: 'Sam', provider: 'google',
+          events: [
+            { id: 'e7', title: 'Mid term break', start: today, end: today, allDay: true, start_local: on, end_local: on },
+            { id: 'e8', title: 'Dentist', start: iso(today, '09:00'), end: iso(today, '10:00'), allDay: false, start_local: at(today, '09:00'), end_local: at(today, '10:00') },
+          ],
+        }],
+      },
+      mail: mailbox([]),
+    })
+    const r = await runAgent({ ...base, tools: WATCHERS.morning.tools, text: `Scheduled check "Morning brief".\n\n${briefInstruction}\n\nDATA (fetched just now):\n${data}` })
+    const text = r.text
+    if (process.env.EVAL_PRINT) console.log(`\n----- doubled-event brief -----\n${text}\n-----`)
+    const todayPart = part(parts(text), /^today\b/)
+    const once = (todayPart.match(/break/gi) ?? []).length === 1
+    const dentistKept = /dentist/i.test(todayPart)
+    const hard = once && dentistKept && noLeak(text)
+    const g = await judgeGroundedness({ answer: text, context: data })
+    record({ case: 'brief: an event on several calendars is one bullet', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: todayPart.slice(0, 80) })
+    expect(once).toBe(true)
+    expect(dentistKept).toBe(true)
+    expect(noLeak(text)).toBe(true)
+    if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
   })
 })

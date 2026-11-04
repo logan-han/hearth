@@ -1375,7 +1375,9 @@ describe('ready-made watchers', () => {
       const asked = runAgent.mock.calls[0][0] as { tools: string[]; text: string }
       expect(asked.tools).toEqual(['recall', 'read_email'])
       expect(asked.text).toContain('before tomorrow morning')
-      expect(asked.text).toContain('Say whose mailbox or calendar each item came from')
+      expect(asked.text).toContain('"(<name>)", the name alone')
+      expect(asked.text).toContain('member: Rowan')
+      expect(asked.text).not.toContain("Rowan's Gmail")
       expect(send).toHaveBeenCalledWith('-100999', expect.stringContaining('permission slip'))
     })
 
@@ -1792,19 +1794,24 @@ describe('ready-made watchers', () => {
     expect(runAgent).not.toHaveBeenCalled()
   })
 
-  it('briefs on new mail alone, with the mail tools, and asks whose mailbox it came from in a group', async () => {
+  it('briefs on new mail alone, with the mail tools, and in a group has each item say whose it is by name alone', async () => {
     dueAutomations.mockResolvedValue([brief()])
     newMail.mockResolvedValue({
       accounts: [{ member: 'Sam', mailbox: "Sam's Outlook", provider: 'microsoft', first_check: false, messages: [{ id: 'm1', from: 'school', subject: 'Athletics carnival', snippet: 'Thu 15 Oct', date: '2026-09-01' }] }],
     })
-    runAgent.mockResolvedValue({ text: 'Sam: school says the athletics carnival is Thu 15 Oct.', notices: [], model: 'primary:test' })
+    runAgent.mockResolvedValue({ text: 'School (Sam): the athletics carnival is Thu 15 Oct.', notices: [], model: 'primary:test' })
     await authed()
     const call = runAgent.mock.calls[0][0] as { tools: string[]; text: string }
     expect(call.tools).toEqual(['recall', 'read_email', 'propose_family_event', 'list_family_events'])
-    expect(call.text).toContain('whose mailbox')
-    expect(call.text).toContain('a person, never a provider')
+    expect(call.text).toContain('"(<name>)", the name alone')
+    expect(call.text).toContain('family calendar is everyone\'s and carries none')
     expect(call.text).toContain('Athletics carnival')
-    expect(send).toHaveBeenCalledWith('-100999', 'Sam: school says the athletics carnival is Thu 15 Oct.')
+    // The account goes to the model by whose it is, and the checks see the same.
+    expect(call.text).toContain('member: Sam')
+    expect(call.text).toContain('provider: microsoft')
+    expect(call.text).not.toContain("Sam's Outlook")
+    expect((decideWatcherPost.mock.calls[0][0] as { evidence: string }).evidence).not.toContain("Sam's Outlook")
+    expect(send).toHaveBeenCalledWith('-100999', 'School (Sam): the athletics carnival is Thu 15 Oct.')
   })
 
   it('hands the brief its mail as plain lines, so a quoted subject or sender reaches the model without escapes', async () => {
@@ -1920,7 +1927,7 @@ describe('ready-made watchers', () => {
     expect(runAgent).not.toHaveBeenCalled()
   })
 
-  it("briefs the day on a member's own calendar alone, and asks whose calendar each item is from in a group", async () => {
+  it("briefs the day on a member's own calendar alone, and in a group has each item say whose it is by name alone", async () => {
     dueAutomations.mockResolvedValue([brief()])
     listCalendar.mockResolvedValue({
       timezone: 'Australia/Melbourne',
@@ -1928,12 +1935,13 @@ describe('ready-made watchers', () => {
         { id: 'e1', title: 'Dentist', start: `${todayKey()}T09:00:00+10:00`, end: '', allDay: false, start_local: 'today, 9:00 am', end_local: 'today, 10:00 am' },
       ] }],
     })
-    runAgent.mockResolvedValue({ text: "**Today**\n- Sam's Outlook Calendar: Dentist, 9:00 am to 10:00 am.", notices: [], model: 'primary:test' })
+    runAgent.mockResolvedValue({ text: '**Today**\n- Dentist (Sam), 9:00 am to 10:00 am.', notices: [], model: 'primary:test' })
     await authed()
     const call = runAgent.mock.calls[0][0] as { text: string }
-    expect(call.text).toContain("calendar: Sam's Outlook Calendar")
+    expect(call.text).toContain('member: Sam')
+    expect(call.text).not.toContain("Sam's Outlook Calendar")
     expect(call.text).toContain('title: Dentist')
-    expect(call.text).toContain('whose mailbox or calendar')
+    expect(call.text).toContain('"(<name>)", the name alone')
     expect(call.text).not.toContain('tomorrow:')
     expect(send).toHaveBeenCalledWith('-100999', expect.stringContaining('Dentist'))
   })
@@ -1960,6 +1968,8 @@ describe('ready-made watchers', () => {
       expect(call.text.indexOf(title)).toBeGreaterThan(call.text.indexOf('tomorrow:'))
     }
     expect(call.text.indexOf('Piano')).toBeLessThan(call.text.indexOf('tomorrow:'))
+    expect(call.text).toContain('member: Sam')
+    expect(call.text).not.toContain("Sam's Google Calendar")
   })
 
   it('looks ahead through the fortnight, so what is coming is in the brief, and a quiet day with something coming still gets one', async () => {
@@ -1987,6 +1997,7 @@ describe('ready-made watchers', () => {
     expect(call.text).toContain('coming:')
     expect(call.text).toContain('through:')
     for (const title of ['Swimming carnival', 'Dentist', 'Renew passports', 'pick up the cake']) expect(call.text).toContain(title)
+    expect(call.text).not.toContain("Sam's Google Calendar")
     expect(call.text).not.toContain('Book the vet')
   })
 

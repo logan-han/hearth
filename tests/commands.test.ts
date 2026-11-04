@@ -593,7 +593,7 @@ describe('/watch', () => {
     expect(a.kind).toBe('morning')
     expect(a.label).toBe('Morning brief')
     expect(a.cronExpr).toBe('0 7 * * *')
-    expect(a.instruction).not.toContain('whose mailbox')
+    expect(a.instruction).not.toContain('"(<name>)"')
   })
 
   it('binds a personal brief to whoever switched it on', async () => {
@@ -657,12 +657,12 @@ describe('/watch', () => {
     },
   }) as never
 
-  it('has the group brief say whose mailbox each item came from', async () => {
+  it('has the group brief name whose mail or calendar each item came from', async () => {
     await processUpdate(group('/watch inbox'))
     const [a] = await q.listAutomations('-100')
     expect(a.label).toBe('Morning brief')
     expect(a.kind).toBe('morning')
-    expect(a.instruction).toContain('whose mailbox')
+    expect(a.instruction).toContain('"(<name>)"')
   })
 
   it('tells a group the built-in watchers are already on', async () => {

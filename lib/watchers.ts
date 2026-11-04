@@ -40,6 +40,7 @@ export const WATCHERS: Record<WatcherKind, Watcher> = {
       '**Today**: what is on, from the family calendar and from each calendar under calendars, with its time and place as given, and a flag only where the data supports one: an early start, rain in the forecast.',
       '**Tomorrow**: what starts tomorrow, with its time as given, so the household can get ready tonight.',
       '**Coming up**: the items under coming, up to the date given as through, one bullet each in date order: its day first, then its time and place as given, and for a board item its due date. Reminders are listed with their day and time. Say nothing about a date after through.',
+      'An event listed more than once, on one calendar or on several, is one bullet.',
       'Mail: first set aside what gets no bullet: newsletters and promotions, the mail with nothing in it to attend, book, pay or reply to; mail whose moment has passed by NOW, however recently it arrived: a collection, a booking or an event timed earlier than NOW, an order already delivered; and a request that is done, which is one a later email from the same sender answers: a thank-you for the response to that form, a receipt for that payment, a confirmation of that booking or reply. Look for that later email for every request before sorting, whichever of the two the list shows first; a done request gets no To do, only a Heads up line that it was done, if that. Then sort the rest into two parts.',
       '**To do**: mail asking the household for something still open, with no later email saying it was done: a payment, a signature, a reply, a form, a booking to make, an appointment or a deadline still ahead, whoever sent it and however many people it went to.',
       '**Heads up**: mail that only tells the household something worth knowing: an order or a connection confirmed, a delivery on its way, a change to an account or a service.',
@@ -121,12 +122,14 @@ export const isGroupChat = (chatId: string) => chatId.startsWith('-')
 /**
  * The instruction as stored and as prompted: in a group the brief reads
  * several people's mail and calendars into one room, so each item says whose
- * it was. Whose means the person: a brief once labelled its mail "(google)"
- * and "(microsoft)", which names nobody.
+ * it was. Whose means the person, by name alone: a brief once labelled its
+ * mail "(google)" and "(microsoft)", which names nobody, and later put
+ * "(Rowan's Gmail)", "(Rowan's Google Calendar)" and "(family calendar)" on
+ * nearly every line, which is the app and the calendar as well as the person.
  */
 export function watcherInstruction(kind: WatcherKind, chatId: string): string {
   const base = WATCHERS[kind].instruction
   return (kind === 'morning' || kind === 'urgent') && isGroupChat(chatId)
-    ? `${base} Say whose mailbox or calendar each item came from, as its mailbox or calendar field names it: a person, never a provider.`
+    ? `${base} Each item from someone's own mail or calendar carries their name in brackets after its sender or title, as its member field gives it: "(<name>)", the name alone. An item from the family calendar is everyone's and carries none.`
     : base
 }

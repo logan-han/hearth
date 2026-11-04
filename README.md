@@ -475,8 +475,10 @@ worth saying**:
   later in the day; the events proposed but still waiting on a yes; and the
   weather. In the group it sweeps the linked mailbox and calendar of every
   member Telegram says is in it, each mailbox on its own cursor via
-  `new_mail`, and says whose each item was by name (Sam's Outlook, Sam's
-  Google Calendar), never by provider. It reads exactly what arrived since
+  `new_mail`, and marks each item from someone's own mail or calendar with
+  their name alone, "Dentist (Sam), 9:00 am", never the mailbox, the app or
+  the provider; the family calendar's items carry no name, and an event on
+  more than one calendar is listed once. It reads exactly what arrived since
   the last brief, up to 20 a mailbox, and says how many more there were
   rather than dropping them without a word. "Today" means anything on during
   the day, so the third day of a camp is on it too; tomorrow is only what
