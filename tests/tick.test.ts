@@ -1401,6 +1401,16 @@ describe('ready-made watchers', () => {
       await authed()
       expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining('Needs you now'))
     })
+
+    it('keeps a mailbox that will not answer out of what the writer reads, so the rest is still looked at', async () => {
+      dueAutomations.mockResolvedValue([urgent()])
+      const timedOut = 'The operation was aborted due to timeout'
+      newMail.mockResolvedValue({ accounts: [{ member: 'Sam', mailbox: "Sam's Outlook", provider: 'microsoft', error: timedOut }, ...mailWaiting.accounts] })
+      await authed()
+      const { text } = runAgent.mock.calls[0][0] as { text: string }
+      expect(text).toContain('Permission slip due Friday')
+      expect(text).not.toContain(timedOut)
+    })
   })
 
   it('spends the mail it read only once the brief has gone out', async () => {
@@ -1842,6 +1852,24 @@ describe('ready-made watchers', () => {
     await authed()
     expect(send).toHaveBeenCalledWith('900', expect.stringContaining("new_mail (Sam's Outlook): token revoked"))
     expect(runAgent).toHaveBeenCalled()
+  })
+
+  it('hands the writer only what answered, so an account that timed out costs the brief nothing else', async () => {
+    dueAutomations.mockResolvedValue([brief()])
+    const timedOut = 'The operation was aborted due to timeout'
+    listEvents.mockResolvedValueOnce({ error: 'family calendar down' })
+    listCalendar.mockResolvedValue({ accounts: [{ member: 'Sam', calendar: "Sam's Outlook Calendar", provider: 'microsoft', error: timedOut }] })
+    newMail.mockResolvedValue({ accounts: [{ member: 'Sam', mailbox: "Sam's Outlook", provider: 'microsoft', error: timedOut }, ...mailWaiting.accounts] })
+    await authed()
+    const report = String(send.mock.calls.find(([to]) => to === '900')?.[1])
+    expect(report).toContain('list_family_events: family calendar down')
+    expect(report).toContain(`list_calendar (Sam's Outlook Calendar): ${timedOut}`)
+    expect(report).toContain(`new_mail (Sam's Outlook): ${timedOut}`)
+    const { text } = runAgent.mock.calls[0][0] as { text: string }
+    expect(text).toContain('Permission slip due Friday')
+    expect(text).not.toContain(timedOut)
+    expect(text).not.toContain('family calendar down')
+    expect(send).toHaveBeenCalledWith('-100999', expect.stringContaining('Bins out tonight.'))
   })
 
   it('treats nobody having linked a mailbox yet as a setting, not a fault', async () => {

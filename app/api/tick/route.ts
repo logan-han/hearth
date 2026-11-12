@@ -167,8 +167,17 @@ const isUnlinked = (err: string | null) => Boolean(err && /linked a (?:mailbox|c
  * An admin's fault message still names the mailbox, from the tool's own result.
  */
 const byMember = ({ mailbox: _mailbox, calendar: _calendar, ...acct }: Record<string, unknown>) => acct
+
+/**
+ * A sweep's mailboxes as the writer is handed them: by member, and only those
+ * that answered. One that failed is reported in code. Left in DATA, its error
+ * reads to the writer as a tool that failed, which it answers with PROBLEM and
+ * SKIP, so one mailbox timing out would cost the household the whole post.
+ */
 const accountsByMember = (r: Record<string, unknown>) =>
-  Array.isArray(r.accounts) ? { ...r, accounts: (r.accounts as Record<string, unknown>[]).map(byMember) } : r
+  Array.isArray(r.accounts)
+    ? { ...r, accounts: (r.accounts as Record<string, unknown>[]).filter((acct) => !errorOf(acct)).map(byMember) }
+    : r
 
 /** The local day an event as list_calendar shows it starts on: its date for an all-day one, its instant's day for a timed one. */
 function startDay(e: Record<string, unknown>): string | null {
@@ -190,7 +199,8 @@ const LOOK_AHEAD_DAYS = 13
  * starts: an account's events that began by `day` are today's, whatever began
  * earlier and runs on included; those that start on `next` are its tomorrow;
  * and the rest of the fortnight is coming. An account that answered with an
- * error is kept as it came, so the brief sees that it could not be read.
+ * error is in none of them, as a mailbox that did is left out of the mail;
+ * `accounts` keeps it, for the run to report.
  */
 function splitCalendars(r: Record<string, unknown>, day: string, next: string) {
   const accounts = Array.isArray(r.accounts) ? (r.accounts as Record<string, unknown>[]) : []
@@ -200,10 +210,7 @@ function splitCalendars(r: Record<string, unknown>, day: string, next: string) {
   let onToday = 0
   let comingCount = 0
   for (const acct of accounts) {
-    if (!Array.isArray(acct.events)) {
-      today.push(acct)
-      continue
-    }
+    if (!Array.isArray(acct.events)) continue
     const events = acct.events as Record<string, unknown>[]
     // An event with no readable start counts as today, as it always has.
     const startsOn = (e: Record<string, unknown>) => startDay(e) ?? day
@@ -332,7 +339,8 @@ async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tool
       const laterReminders = reminders.filter((r) => r.date !== day).map(({ label, at }) => ({ label, at }))
       // Coming is a reason to post, as a due date is; a reminder speaks for itself when it goes off, so on its own it only rides along.
       const ahead = comingFamily.length + days.comingCount + dueSoon.length
-      const data: Record<string, unknown> = { events }
+      // What failed is reported above and left out, so the rest of the brief still goes.
+      const data: Record<string, unknown> = eventsErr ? {} : { events }
       if (!calendarsErr) data.calendars = { ...calendars, accounts: days.today.map(byMember) }
       if (startsTomorrow.length || days.tomorrow.length) {
         data.tomorrow = {

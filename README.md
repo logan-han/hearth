@@ -480,7 +480,9 @@ worth saying**:
   the provider; the family calendar's items carry no name, and an event on
   more than one calendar is listed once. It reads exactly what arrived since
   the last brief, up to 20 a mailbox, and says how many more there were
-  rather than dropping them without a word. "Today" means anything on during
+  rather than dropping them without a word. A mailbox or calendar that will
+  not answer is left out and reported to an admin, and its mail waits for the
+  next brief, so one account timing out never holds back the rest. "Today" means anything on during
   the day, so the third day of a camp is on it too; tomorrow is only what
   starts then, and coming up is what starts after it, to the end of the
   fortnight counting today. A day with nothing on anyone's calendar, nothing
