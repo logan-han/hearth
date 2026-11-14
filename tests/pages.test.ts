@@ -5,6 +5,7 @@ import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
 import { recordModelEvent } from '@/lib/model-events'
+import { jar } from './helpers/next-headers'
 
 /**
  * The dashboard's pages, awaited and rendered to HTML as the server would.
@@ -13,18 +14,7 @@ import { recordModelEvent } from '@/lib/model-events'
  * whoever asked; these hold every page to its gate.
  */
 
-const jar = vi.hoisted(() => {
-  const store = new Map<string, string>()
-  return {
-    store,
-    cookies: async () => ({
-      get: (k: string) => (store.has(k) ? { value: store.get(k) } : undefined),
-      set: (k: string, v: string) => void store.set(k, v),
-      delete: (k: string) => void store.delete(k),
-    }),
-  }
-})
-vi.mock('next/headers', () => ({ cookies: jar.cookies }))
+vi.mock('next/headers', async () => ({ cookies: (await import('./helpers/next-headers')).jar.cookies }))
 // Home's panels refresh through the app router, which only a real Next mounts.
 vi.mock('next/navigation', async (orig) => ({
   ...(await orig<typeof import('next/navigation')>()),

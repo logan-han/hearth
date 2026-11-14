@@ -2,19 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
+import { jar } from './helpers/next-headers'
 
-const jar = vi.hoisted(() => {
-  const store = new Map<string, string>()
-  return {
-    store,
-    cookies: async () => ({
-      get: (k: string) => (store.has(k) ? { value: store.get(k) } : undefined),
-      set: (k: string, v: string) => void store.set(k, v),
-      delete: (k: string) => void store.delete(k),
-    }),
-  }
-})
-vi.mock('next/headers', () => ({ cookies: jar.cookies }))
+vi.mock('next/headers', async () => ({ cookies: (await import('./helpers/next-headers')).jar.cookies }))
 // The mailbox a draft goes from; sending is the provider's, and stands in here.
 const sendMail = vi.hoisted(() => vi.fn())
 const clientFor = vi.hoisted(() => vi.fn((_id: number, provider: string) => ({ provider, sendMail })))
