@@ -85,11 +85,7 @@ export async function gatherStats(month?: string) {
       from lists l left join list_items i on i.list_id = l.id
       group by l.name order by l.name
     `),
-    db().execute(sql`
-      select title, starts_at, ends_at, all_day from family_events
-      where not cancelled and ends_at >= ${view.from} and starts_at <= ${view.to}
-      order by starts_at
-    `),
+    eventsInView(view),
     // Both are diagnostics; a hiccup reading them must not take the page down.
     chainHealth(7).catch((): ChainHealth | null => null),
     getSetting('last_tick_at').catch((): string | null => null),
@@ -257,11 +253,7 @@ export async function gatherFamilyStats(month?: string, viewer?: number | null) 
       where not coalesce(done, false) or nth <= ${TICKED_SHOWN}
       order by name, done, id
     `),
-    db().execute(sql`
-      select title, starts_at, ends_at, all_day from family_events
-      where not cancelled and ends_at >= ${view.from} and starts_at <= ${view.to}
-      order by starts_at
-    `),
+    eventsInView(view),
     // What the bot found and is waiting for a yes on, with the chat it was
     // proposed in: a group's title, or the person whose DM it is.
     db().execute(sql`
@@ -459,6 +451,17 @@ function monthView(month: string | undefined, now: Date) {
   return { key, year: y, month: m, from, to }
 }
 
+/** The family events on any day of the month being shown, for its grid. */
+function eventsInView(view: ReturnType<typeof monthView>) {
+  return db().execute(
+    sql`
+      select title, starts_at, ends_at, all_day from family_events
+      where not cancelled and ends_at >= ${view.from} and starts_at <= ${view.to}
+      order by starts_at
+    `,
+  )
+}
+
 function shiftMonth(key: string, by: number): string {
   const [y, m] = key.split('-').map(Number)
   const d = new Date(Date.UTC(y, m - 1 + by, 1))
@@ -537,11 +540,7 @@ function timeOnly(d: Date): string {
 export async function gatherCalendar(month?: string) {
   const view = monthView(month, ctxNow())
   const [monthEvents, upcoming] = await Promise.all([
-    db().execute(sql`
-      select title, starts_at, ends_at, all_day from family_events
-      where not cancelled and ends_at >= ${view.from} and starts_at <= ${view.to}
-      order by starts_at
-    `),
+    eventsInView(view),
     db().execute(sql`
       select title, starts_at, all_day from family_events
       where not cancelled and ends_at > now() order by starts_at limit 5

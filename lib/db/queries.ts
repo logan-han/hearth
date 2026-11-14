@@ -157,14 +157,27 @@ export async function strangersIn(chatId: string): Promise<Stranger[]> {
   return parseStrangers(row?.strangers)
 }
 
+/** A group the bot is still in, with who there is unrecognised. */
+export type Room = { chatId: string; title: string | null; strangers: Stranger[] }
+
+/** The chats that are a group or supergroup the bot has not left. */
+const liveGroup = () => and(inArray(chats.type, ['group', 'supergroup']), isNull(chats.leftAt))
+
+/** A chat row as a room, its strangers parsed. */
+const toRoom = (r: { chatId: string; title: string | null; strangers: string }): Room => ({
+  chatId: r.chatId,
+  title: r.title,
+  strangers: parseStrangers(r.strangers),
+})
+
 /** The household's rooms: every group the bot is still in, with who there is unrecognised. */
-export async function groupChats(): Promise<{ chatId: string; title: string | null; strangers: Stranger[] }[]> {
+export async function groupChats(): Promise<Room[]> {
   const rows = await db()
     .select()
     .from(chats)
-    .where(and(inArray(chats.type, ['group', 'supergroup']), isNull(chats.leftAt)))
+    .where(liveGroup())
     .orderBy(asc(chats.id))
-  return rows.map((r) => ({ chatId: r.chatId, title: r.title, strangers: parseStrangers(r.strangers) }))
+  return rows.map(toRoom)
 }
 
 /**
@@ -173,16 +186,16 @@ export async function groupChats(): Promise<{ chatId: string; title: string | nu
  * holds that they belong to the room, and the room they spoke in last is the
  * one they are using.
  */
-export async function roomsOf(memberId: number): Promise<{ chatId: string; title: string | null; strangers: Stranger[] }[]> {
+export async function roomsOf(memberId: number): Promise<Room[]> {
   const last = sql`max(${messages.id})`
   const rows = await db()
     .select({ chatId: chats.chatId, title: chats.title, strangers: chats.strangers })
     .from(chats)
     .innerJoin(messages, and(eq(messages.chatId, chats.chatId), eq(messages.memberId, memberId)))
-    .where(and(inArray(chats.type, ['group', 'supergroup']), isNull(chats.leftAt)))
+    .where(liveGroup())
     .groupBy(chats.id)
     .orderBy(desc(last))
-  return rows.map((r) => ({ chatId: r.chatId, title: r.title, strangers: parseStrangers(r.strangers) }))
+  return rows.map(toRoom)
 }
 
 function parseStrangers(raw: string | undefined | null): Stranger[] {
@@ -839,22 +852,12 @@ export async function setGoalStepDone(id: number, done: boolean): Promise<GoalSt
 
 /** Tick steps off, or back on, by what they say: "venue" ticks "Book the venue", as a list item is matched. */
 export async function markGoalSteps(goalId: number, needles: string[], done: boolean): Promise<GoalStep[]> {
-  const steps = await goalStepsOf(goalId)
-  const matched = new Set<number>()
-  for (const needle of needles) {
-    const n = needle.trim().toLowerCase()
-    if (!n) continue
-    const hit =
-      steps.find((st) => st.content.toLowerCase() === n) ??
-      steps.find((st) => st.content.toLowerCase().includes(n)) ??
-      steps.find((st) => n.includes(st.content.toLowerCase()))
-    if (hit) matched.add(hit.id)
-  }
-  if (matched.size === 0) return []
+  const matched = matchedIds(await goalStepsOf(goalId), needles)
+  if (matched.length === 0) return []
   return db()
     .update(goalSteps)
     .set({ done })
-    .where(and(eq(goalSteps.goalId, goalId), inArray(goalSteps.id, [...matched])))
+    .where(and(eq(goalSteps.goalId, goalId), inArray(goalSteps.id, matched)))
     .returning()
 }
 
@@ -1134,23 +1137,32 @@ export async function listContents(listId: number): Promise<ListItem[]> {
 
 /** Match items by substring, so "milk" ticks off "2L milk". */
 export async function markListItems(listId: number, needles: string[], done: boolean) {
-  const items = await listContents(listId)
+  const matched = matchedIds(await listContents(listId), needles)
+  if (matched.length === 0) return []
+  return db()
+    .update(listItems)
+    .set({ done })
+    .where(and(eq(listItems.listId, listId), inArray(listItems.id, matched)))
+    .returning()
+}
+
+/**
+ * The ids of the rows some words name, in the order the words came: each
+ * word takes the row that says it exactly, else the first containing it,
+ * else the first it contains.
+ */
+function matchedIds(rows: readonly { id: number; content: string }[], needles: readonly string[]): number[] {
   const matched = new Set<number>()
   for (const needle of needles) {
     const n = needle.trim().toLowerCase()
     if (!n) continue
     const hit =
-      items.find((i) => i.content.toLowerCase() === n) ??
-      items.find((i) => i.content.toLowerCase().includes(n)) ??
-      items.find((i) => n.includes(i.content.toLowerCase()))
+      rows.find((row) => row.content.toLowerCase() === n) ??
+      rows.find((row) => row.content.toLowerCase().includes(n)) ??
+      rows.find((row) => n.includes(row.content.toLowerCase()))
     if (hit) matched.add(hit.id)
   }
-  if (matched.size === 0) return []
-  return db()
-    .update(listItems)
-    .set({ done })
-    .where(and(eq(listItems.listId, listId), inArray(listItems.id, [...matched])))
-    .returning()
+  return [...matched]
 }
 
 export async function setListItemDone(id: number, done: boolean): Promise<ListItem | undefined> {
