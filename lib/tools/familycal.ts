@@ -7,7 +7,7 @@ import { localToUtc, localDateKey, formatLocal, formatLocalDate, formatLocalTime
 import { timezone, appUrl } from '../env'
 import { announce, type ToolContext } from './context'
 
-const LOCAL_DATETIME = z
+export const LOCAL_DATETIME = z
   .string()
   .describe(`Local ${timezone()} time as YYYY-MM-DDTHH:mm (or YYYY-MM-DD for all-day)`)
 

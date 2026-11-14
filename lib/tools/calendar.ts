@@ -5,7 +5,7 @@ import { NotConnectedError, ReconnectNeededError } from '../providers/token'
 import type { CalendarEvent } from '../providers/types'
 import type { Member } from '../db/schema'
 import { allowedMembers, strangersIn, listFamilyEvents, connectionsFor } from '../db/queries'
-import { readOnlyRefusal } from './mail'
+import { readOnlyRefusal, providerEnum } from './mail'
 import { presentIn } from '../headcount'
 import { providerConfig, type Provider } from '../oauth/providers'
 import { localToUtc, formatLocal, formatLocalDate, formatLocalTime, resolveSpan, rangeEnd, lastDay, localDateKey, daysAfter, dayAfter } from '../cron'
@@ -13,14 +13,8 @@ import { freeSpans, nextQuarter, type Span } from '../free-time'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
 import { requireMember, writeFailure } from './context'
-import { ALL_DAY_END } from './familycal'
+import { ALL_DAY_END, LOCAL_DATETIME } from './familycal'
 import { describeError } from '../errors'
-
-const providerEnum = z.enum(['google', 'microsoft'])
-
-const LOCAL_DATETIME = z
-  .string()
-  .describe(`Local ${timezone()} time as YYYY-MM-DDTHH:mm (or YYYY-MM-DD for all-day)`)
 
 /** A calendar as the family names it, owner first, the way a mailbox is named. */
 const calendarName = (owner: string, provider: Provider) => `${owner}'s ${providerConfig(provider).calendar}`

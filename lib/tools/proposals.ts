@@ -6,11 +6,7 @@ import {
 import { localToUtc, localDateKey, resolveSpan, nextLocalMidnight } from '../cron'
 import { timezone } from '../env'
 import { announce, type ToolContext } from './context'
-import { FEED_LAG, ALL_DAY_END, whenLabel, spanLabel } from './familycal'
-
-const LOCAL_DATETIME = z
-  .string()
-  .describe(`Local ${timezone()} time as YYYY-MM-DDTHH:mm (or YYYY-MM-DD for all-day)`)
+import { FEED_LAG, ALL_DAY_END, LOCAL_DATETIME, whenLabel, spanLabel } from './familycal'
 
 /**
  * Whether two differently-worded notices describe the same occasion is a

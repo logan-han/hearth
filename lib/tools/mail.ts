@@ -14,7 +14,7 @@ import { describeError } from '../errors'
 import { timezone } from '../env'
 import { UnconfirmedError } from '../deadline'
 
-const providerEnum = z.enum(['google', 'microsoft'])
+export const providerEnum = z.enum(['google', 'microsoft'])
 
 /**
  * A recipient as both providers take one: a bare address. A line break could

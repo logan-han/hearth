@@ -20,7 +20,7 @@ import type { ToolContext } from './context'
 import { noteActivity } from '../activity'
 
 /** Tools whose results carry text written outside the household. See ToolContext.readUntrusted. */
-const UNTRUSTED_SOURCES = new Set([
+const UNTRUSTED_SOURCES: ReadonlySet<string> = new Set<ToolName>([
   'web_search', 'read_url', 'read_recipe',
   'list_email', 'new_mail', 'read_email', 'read_attachment',
   'list_calendar', 'find_free_time',
@@ -56,7 +56,7 @@ export function buildTools(ctx: ToolContext) {
  * checks for an earlier copy. Every other write tool supersedes, dedupes or
  * claims before it writes (see ToolContext.wrote).
  */
-const UNREPEATABLE: ReadonlySet<string> = new Set([
+const UNREPEATABLE: ReadonlySet<string> = new Set<ToolName>([
   'add_to_list', 'create_automation', 'create_calendar_event',
   'jira_create_issue', 'jira_comment', 'jira_attach_email_file', 'notion_append_to_page',
   'create_goal', 'update_goal', 'hand_off',
@@ -111,7 +111,7 @@ function linkSeen(ctx: ToolContext, url: string): boolean {
 }
 
 /** The tools that open a link: once the turn has read outside text, only a link that was there to be read. */
-const LINK_READERS: ReadonlySet<string> = new Set(['read_url', 'read_recipe'])
+const LINK_READERS: ReadonlySet<string> = new Set<ToolName>(['read_url', 'read_recipe'])
 
 /** What a second call to an unrepeatable write gets, once an earlier one this turn may have gone through. */
 const unconfirmedAgain = (name: string) =>

@@ -4,7 +4,7 @@ import * as jira from '../providers/jira'
 import { clientFor } from '../providers'
 import { localDateKey } from '../cron'
 import { announce, requireMember, writeFailure, type ToolContext } from './context'
-import { mailboxOwner, describeMailError } from './mail'
+import { mailboxOwner, describeMailError, providerEnum } from './mail'
 import { describeError } from '../errors'
 
 const NOT_CONFIGURED = 'Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).'
@@ -165,7 +165,7 @@ export function jiraTools(ctx: ToolContext) {
       inputSchema: z.object({
         key: z.string().describe(`Issue key, e.g. ${defaultProject()}-346`),
         email_id: z.string(),
-        provider: z.enum(['google', 'microsoft']),
+        provider: providerEnum,
         filename: z.string().describe("The attachment's filename, exactly as read_email listed it"),
         of: z.string().optional().describe("Family member the mailbox belongs to; omit for the asker's own"),
       }),
