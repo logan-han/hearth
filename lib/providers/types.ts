@@ -51,11 +51,11 @@ export type DraftMail = {
 /** Everything the agent can do against one member's linked account. */
 export interface AccountClient {
   provider: Provider
-  /** scope 'all' spans the whole mailbox (archive included); default is the inbox. */
   /**
    * Newest first. With `since`, only mail received at or after it, so a sweep
    * reads exactly what arrived since it last looked rather than the newest
-   * few of a fortnight. At most 50.
+   * few of a fortnight. At most 50. `scope` 'all' spans the whole mailbox
+   * (archive included); default is the inbox.
    */
   listMail(opts: { query?: string; limit?: number; scope?: 'inbox' | 'all'; since?: Date }): Promise<MailSummary[]>
   readMail(id: string): Promise<MailBody>

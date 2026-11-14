@@ -354,7 +354,6 @@ export function systemPrompt(input: {
   ]
   const body = mode === 'sweep' ? sweepPrompt() : mode === 'watcher' ? watcherPrompt(tz) : chatPrompt(input, tz)
   return [...head, ...body, input.context ? `\nContext:\n${input.context}` : '']
-    .filter((line) => line !== '' || true)
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
@@ -1166,7 +1165,6 @@ export type DraftReview = {
 async function checkEach(
   claims: string[],
   evidence: string,
-  label: string,
   chain: ModelSlot[],
   meta: (step: string, model: string) => Parameters<typeof traced>[0],
   deadline?: number,
@@ -1233,7 +1231,7 @@ export async function reviewDraft(input: { label: string; draft: string; evidenc
   ).slice(0, MAX_CLAIMS)
   if (claims.length === 0) return { claims, unsupported: [], message: input.draft }
 
-  const checks = await checkEach(claims, evidence, input.label, chain, meta, input.deadline)
+  const checks = await checkEach(claims, evidence, chain, meta, input.deadline)
   const unsupported = claims.filter((_, i) => !checks[i])
   if (unsupported.length === 0) return { claims, unsupported, message: input.draft }
 

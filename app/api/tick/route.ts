@@ -640,8 +640,7 @@ type Delivered = 'posted' | 'held' | 'spent' | 'problem' | 'unavailable' | 'capp
  * that part out of the chat whatever else it says; a marked PROBLEM goes to
  * the admins; the draft itself posts only once approved; tool notices report
  * actions already taken, so they always post.
- */
-/**
+ *
  * Post a watcher's result, checked, capped and with its problems routed to an
  * admin. `spent` marks what the run read as seen, and is called only once that
  * has reached the chat, or was deliberately kept from it: a plain SKIP, or a

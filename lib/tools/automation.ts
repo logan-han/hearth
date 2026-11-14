@@ -24,14 +24,6 @@ export const REPEAT_WORDS: Record<Repeat, string> = {
 }
 
 /**
- * When a cron first fires, or why it cannot be used as it stands: one that
- * does not parse, never fires, or would not land on one of the scheduler's
- * ticks. An automation fires at the first tick on or after its time, so a
- * schedule the ticks cannot land on would quietly run late, or, if finer than
- * the ticks, at their pace. It is refused while the request is still a
- * conversation, with the nearest schedule that would work.
- */
-/**
  * When a paused automation runs once it is resumed: on its schedule's next
  * turn, or for a one-off at its own time, straight away (at the next tick)
  * when that time went by while it was paused. Its cron has no year, and read
@@ -42,6 +34,14 @@ export function resumeAt(a: Pick<Automation, 'repeat' | 'cronExpr' | 'nextRunAt'
   return nextRun(a.cronExpr, now)
 }
 
+/**
+ * When a cron first fires, or why it cannot be used as it stands: one that
+ * does not parse, never fires, or would not land on one of the scheduler's
+ * ticks. An automation fires at the first tick on or after its time, so a
+ * schedule the ticks cannot land on would quietly run late, or, if finer than
+ * the ticks, at their pace. It is refused while the request is still a
+ * conversation, with the nearest schedule that would work.
+ */
 export async function schedule(cron: string, now: Date): Promise<{ next: Date } | { error: string; scheduler?: string; suggestion?: string }> {
   if (!isValidCron(cron)) return { error: `"${cron}" is not a valid 5-field cron expression.` }
   const next = nextRun(cron)
