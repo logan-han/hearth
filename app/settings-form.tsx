@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react'
 import type { SettingView } from '@/lib/settings'
-import { GROUP_NOTES } from '@/lib/settings'
 import { ModelPicker, providerFor } from './model-picker'
 import { TelegramPanel } from './telegram-panel'
 
@@ -43,10 +42,13 @@ export function summarise(rows: SettingView[]): string {
 export function SettingsForm({
   initial,
   groups,
+  notes,
   status,
 }: {
   initial: SettingView[]
   groups: readonly string[]
+  /** A word about the group as a whole, shown once above its settings. */
+  notes: Readonly<Partial<Record<string, string>>>
   /** Live integration state, shown under the group whose keys drive it. */
   status?: GroupStatus[]
 }) {
@@ -150,9 +152,7 @@ export function SettingsForm({
                 </span>
               </summary>
               <div className="panel">
-                {GROUP_NOTES[group as keyof typeof GROUP_NOTES] ? (
-                  <p className="group-note">{GROUP_NOTES[group as keyof typeof GROUP_NOTES]}</p>
-                ) : null}
+                {notes[group] ? <p className="group-note">{notes[group]}</p> : null}
                 {rows.map((s) => (
                   <div className="setting" key={s.key}>
                     <div>
@@ -292,29 +292,25 @@ export function SettingsForm({
                     </div>
                   </div>
                 ))}
-                {(() => {
-                  const live = status?.find((s) => s.group === group)
-                  if (!live) return null
-                  return (
-                    <div className="hook">
-                      <ul className="rows">
-                        {live.items.map((i) => {
-                          const probe = health[i.name]
-                          const failing = i.on && probe?.ok === false
-                          return (
-                            <li key={i.name} className={i.on && !failing ? '' : 'is-off'}>
-                              <span className={`dot ${failing ? 'bad' : i.on ? 'on' : 'off'}`} />
-                              <span className="what">{i.name}</span>
-                              <span className={`note${failing ? ' warn' : ''}`}>
-                                {failing ? (probe?.error ?? 'not answering') : i.on ? i.note : 'off'}
-                              </span>
-                            </li>
-                          )
-                        })}
-                      </ul>
-                    </div>
-                  )
-                })()}
+                {live ? (
+                  <div className="hook">
+                    <ul className="rows">
+                      {live.items.map((i) => {
+                        const probe = health[i.name]
+                        const failing = i.on && probe?.ok === false
+                        return (
+                          <li key={i.name} className={i.on && !failing ? '' : 'is-off'}>
+                            <span className={`dot ${failing ? 'bad' : i.on ? 'on' : 'off'}`} />
+                            <span className="what">{i.name}</span>
+                            <span className={`note${failing ? ' warn' : ''}`}>
+                              {failing ? (probe?.error ?? 'not answering') : i.on ? i.note : 'off'}
+                            </span>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </div>
+                ) : null}
                 {group === 'Telegram' ? <TelegramPanel changed={telegramSaves} /> : null}
               </div>
             </details>

@@ -1,5 +1,5 @@
 import { requireAdmin } from '@/lib/auth/session'
-import { hydrateSecrets, listSettings, SETTING_GROUPS } from '@/lib/settings'
+import { hydrateSecrets, listSettings, SETTING_GROUPS, GROUP_NOTES } from '@/lib/settings'
 import { allMembersWithLinks } from '@/lib/db/queries'
 import { gatherStats } from '@/lib/stats'
 import { Shell } from '../shell'
@@ -39,7 +39,7 @@ export default async function SettingsPage() {
         </div>
       </section>
       <ChainForm initial={stats.chain} shares={stats.models} />
-      <SettingsForm initial={settings} groups={SETTING_GROUPS} status={stats.connected} />
+      <SettingsForm initial={settings} groups={SETTING_GROUPS} notes={GROUP_NOTES} status={stats.connected} />
     </Shell>
   )
 }
