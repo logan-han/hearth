@@ -28,7 +28,7 @@ import {
 } from '@/lib/db/queries'
 import { clientFor } from '@/lib/providers'
 import { UnconfirmedError } from '@/lib/deadline'
-import { describeMailError, readOnlyRefusal } from '@/lib/tools/mail'
+import { describeAccountError, readOnlyRefusal } from '@/lib/tools/mail'
 import { noteActivity } from '@/lib/activity'
 import type { Provider } from '@/lib/oauth/providers'
 import { resumeAt } from '@/lib/tools/automation'
@@ -202,7 +202,7 @@ export async function POST(req: Request) {
           return NextResponse.json({ error: 'The send took too long to be confirmed, so it may or may not have gone. Check your Sent folder.' }, { status: 504 })
         }
         await markDraft(id, 'pending', 'sent')
-        return NextResponse.json({ error: describeMailError(err) }, { status: 502 })
+        return NextResponse.json({ error: describeAccountError(err) }, { status: 502 })
       }
       await noteActivity({ chatId: draft.chatId, memberId: draft.memberId, via: 'web', tool: 'send_email', input: { draft_id: id }, result: { to: draft.recipients, subject: draft.subject } })
       return NextResponse.json({ ok: true, sent: draft.subject })

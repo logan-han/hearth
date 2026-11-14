@@ -40,6 +40,8 @@ export const readOnlyRefusal = (provider: Provider) =>
   `Your ${providerConfig(provider).label} account is linked read-only, so nothing is drafted, sent or put on its calendar through it. ` +
   `Send /readonly ${provider} off to allow it again.`
 
+const STRANGERS_HERE = 'Not while someone unrecognised is in this chat. An admin can vouch for them with /allow.'
+
 /**
  * Whose mailbox a tool reads: the asker's, or a named family member's when
  * the message came up in a family sweep. Reading someone else's mail follows
@@ -58,12 +60,30 @@ export async function mailboxOwner(ctx: ToolContext, of?: string): Promise<{ own
     return { error: `${target.name}'s mail is read only in the family group, where everyone can see it asked for. Here, only your own.` }
   }
   if ((await strangersIn(ctx.chatId)).length > 0) {
-    return { error: 'Not while someone unrecognised is in this chat. An admin can vouch for them with /allow.' }
+    return { error: STRANGERS_HERE }
   }
   if ((await presentIn(ctx.chatId, [target])).length === 0) {
     return { error: `${target.name} is not in this chat, so their mail is not read here. Only in a group they are in, or your own.` }
   }
   return { owner: target }
+}
+
+/**
+ * Whom a family-wide look reads for: the allowed members Telegram says are
+ * in this room, and only in a room the family shares with nobody
+ * unrecognised in it.
+ */
+export async function everyoneHere(ctx: ToolContext, notShared: string): Promise<{ members: Member[] } | { error: string }> {
+  if (!ctx.shared) return { error: notShared }
+  if ((await strangersIn(ctx.chatId)).length > 0) return { error: STRANGERS_HERE }
+  try {
+    return { members: await presentIn(ctx.chatId, await allowedMembers()) }
+  } catch (e) {
+    // Telegram hiccuping over who is here (a 429, a 5xx) fails this look
+    // and nothing else: thrown, it would take everything the brief fetches
+    // beside it down too, on the run's one try.
+    return { error: `Could not check who is in this chat: ${describeAccountError(e)}` }
+  }
 }
 
 export function mailTools(ctx: ToolContext) {
@@ -95,7 +115,7 @@ export function mailTools(ctx: ToolContext) {
             try {
               return { mailbox: mailboxName(member.name, c.provider), provider: c.provider, messages: await c.listMail({ query, limit, scope }) }
             } catch (e) {
-              return { mailbox: mailboxName(member.name, c.provider), provider: c.provider, error: describe(e) }
+              return { mailbox: mailboxName(member.name, c.provider), provider: c.provider, error: describeAccountError(e) }
             }
           }),
         )
@@ -120,22 +140,11 @@ export function mailTools(ctx: ToolContext) {
         // A family-wide sweep reads several people's mail into one room, so the
         // same house rules as live questions apply: only a room the family
         // shares, not in front of strangers, and only the mail of those there.
-        if (everyone && !ctx.shared) {
-          return { error: 'A family-wide sweep is only for the family group. Here, leave everyone off for your own mail.' }
-        }
-        if (everyone && (await strangersIn(ctx.chatId)).length > 0) {
-          return { error: 'Not while someone unrecognised is in this chat. An admin can vouch for them with /allow.' }
-        }
-        let members: Member[]
-        try {
-          members = everyone ? await presentIn(ctx.chatId, await allowedMembers()) : [requireMember(ctx)]
-        } catch (e) {
-          // Telegram hiccuping over who is here (a 429, a 5xx) fails this
-          // sweep and nothing else: thrown, it would take the brief's
-          // calendar, board and weather down with it, on the run's one try.
-          if (!everyone) throw e
-          return { error: `Could not check who is in this chat: ${describe(e)}` }
-        }
+        const here = everyone
+          ? await everyoneHere(ctx, 'A family-wide sweep is only for the family group. Here, leave everyone off for your own mail.')
+          : { members: [requireMember(ctx)] }
+        if ('error' in here) return here
+        const members = here.members
         const max = limit ?? 10
 
         const accounts: object[] = []
@@ -189,7 +198,7 @@ export function mailTools(ctx: ToolContext) {
                   : {}),
               })
             } catch (e) {
-              accounts.push({ member: member.name, mailbox: mailboxName(member.name, c.provider), provider: c.provider, error: describe(e) })
+              accounts.push({ member: member.name, mailbox: mailboxName(member.name, c.provider), provider: c.provider, error: describeAccountError(e) })
             }
           }
         }
@@ -219,7 +228,7 @@ export function mailTools(ctx: ToolContext) {
             ? { ...mail, note: 'Read an attachment with read_attachment, giving this email id, the provider and the filename as listed.' }
             : mail
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeAccountError(e) }
         }
       },
     }),
@@ -242,7 +251,7 @@ export function mailTools(ctx: ToolContext) {
           const file = await clientFor(who.owner.id, provider).readAttachment(email_id, filename)
           return await fileToText(file)
         } catch (e) {
-          return { error: describe(e) }
+          return { error: describeAccountError(e) }
         }
       },
     }),
@@ -369,7 +378,7 @@ export function mailTools(ctx: ToolContext) {
           }
           // Hand the draft back so the member can retry rather than lose it.
           await markDraft(draft_id, 'pending', 'sent')
-          return { error: describe(e) }
+          return { error: describeAccountError(e) }
         }
       },
     }),
@@ -387,7 +396,8 @@ export function mailTools(ctx: ToolContext) {
   }
 }
 
-function describe(e: unknown): string {
+/** What a member is told when one of their linked accounts fails: not linked, its link expired, or the error itself. */
+export function describeAccountError(e: unknown): string {
   if (e instanceof NotConnectedError) {
     return `No ${e.provider} account linked. Send /connect to link one.`
   }
@@ -396,8 +406,6 @@ function describe(e: unknown): string {
   }
   return describeError(e)
 }
-
-export const describeMailError = describe
 
 /** How much new mail one look reads per mailbox; the most a provider hands back in one page. */
 const MAIL_WINDOW = 50

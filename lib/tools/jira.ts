@@ -4,7 +4,7 @@ import * as jira from '../providers/jira'
 import { clientFor } from '../providers'
 import { localDateKey } from '../cron'
 import { announce, requireMember, writeFailure, type ToolContext } from './context'
-import { mailboxOwner, describeMailError, providerEnum } from './mail'
+import { mailboxOwner, describeAccountError, providerEnum } from './mail'
 import { describeError } from '../errors'
 
 const NOT_CONFIGURED = 'Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).'
@@ -179,7 +179,7 @@ export function jiraTools(ctx: ToolContext) {
           const made = await jira.attachFile(key, file)
           return { key, attached: made.filename, size: made.size }
         } catch (e) {
-          return writeFailure(e, describeMailError)
+          return writeFailure(e, describeAccountError)
         }
       },
     }),

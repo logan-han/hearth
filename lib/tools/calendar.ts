@@ -1,12 +1,9 @@
 import { tool } from 'ai'
 import { z } from 'zod'
 import { clientFor, clientsFor, MAX_EVENTS } from '../providers'
-import { NotConnectedError, ReconnectNeededError } from '../providers/token'
 import type { CalendarEvent } from '../providers/types'
-import type { Member } from '../db/schema'
-import { allowedMembers, strangersIn, listFamilyEvents, connectionsFor } from '../db/queries'
-import { readOnlyRefusal, providerEnum } from './mail'
-import { presentIn } from '../headcount'
+import { listFamilyEvents, connectionsFor } from '../db/queries'
+import { readOnlyRefusal, providerEnum, everyoneHere, describeAccountError } from './mail'
 import { providerConfig, type Provider } from '../oauth/providers'
 import { localToUtc, formatLocal, formatLocalDate, formatLocalTime, resolveSpan, rangeEnd, lastDay, localDateKey, daysAfter, dayAfter } from '../cron'
 import { freeSpans, nextQuarter, type Span } from '../free-time'
@@ -14,7 +11,6 @@ import { timezone } from '../env'
 import type { ToolContext } from './context'
 import { requireMember, writeFailure } from './context'
 import { ALL_DAY_END, LOCAL_DATETIME } from './familycal'
-import { describeError } from '../errors'
 
 /** A calendar as the family names it, owner first, the way a mailbox is named. */
 const calendarName = (owner: string, provider: Provider) => `${owner}'s ${providerConfig(provider).calendar}`
@@ -38,21 +34,11 @@ export function calendarTools(ctx: ToolContext) {
         // Several people's days read into one room follow the mail sweep's
         // house rules: only a room the family shares, not in front of
         // strangers, and only the calendars of those there to see it asked for.
-        if (everyone && !ctx.shared) {
-          return { error: 'A family-wide look is only for the family group. Here, leave everyone off for your own calendar.' }
-        }
-        if (everyone && (await strangersIn(ctx.chatId)).length > 0) {
-          return { error: 'Not while someone unrecognised is in this chat. An admin can vouch for them with /allow.' }
-        }
-        let members: Member[]
-        try {
-          members = everyone ? await presentIn(ctx.chatId, await allowedMembers()) : [requireMember(ctx)]
-        } catch (e) {
-          // As for mail: Telegram hiccuping over who is here fails this look
-          // and nothing else a brief fetches beside it.
-          if (!everyone) throw e
-          return { error: `Could not check who is in this chat: ${describe(e)}` }
-        }
+        const here = everyone
+          ? await everyoneHere(ctx, 'A family-wide look is only for the family group. Here, leave everyone off for your own calendar.')
+          : { members: [requireMember(ctx)] }
+        if ('error' in here) return here
+        const members = here.members
 
         const start = localToUtc(from)
         // A date alone as `to` is the whole of that day, not its first minute.
@@ -82,7 +68,7 @@ export function calendarTools(ctx: ToolContext) {
                   : {}),
               })
             } catch (e) {
-              accounts.push({ ...whose, provider: c.provider, error: describe(e) })
+              accounts.push({ ...whose, provider: c.provider, error: describeAccountError(e) })
             }
           }
         }
@@ -117,19 +103,11 @@ export function calendarTools(ctx: ToolContext) {
         if (!TIME.test(earliest) || !TIME.test(latest) || earliest >= latest) {
           return { error: 'Give earliest and latest as HH:mm, earliest first, such as 08:00 and 20:00.' }
         }
-        if (everyone && !ctx.shared) {
-          return { error: 'Everyone\'s calendars are read only in the family group. Here, leave everyone off for your own.' }
-        }
-        if (everyone && (await strangersIn(ctx.chatId)).length > 0) {
-          return { error: 'Not while someone unrecognised is in this chat. An admin can vouch for them with /allow.' }
-        }
-        let members: Member[]
-        try {
-          members = everyone ? await presentIn(ctx.chatId, await allowedMembers()) : [requireMember(ctx)]
-        } catch (e) {
-          if (!everyone) throw e
-          return { error: `Could not check who is in this chat: ${describe(e)}` }
-        }
+        const here = everyone
+          ? await everyoneHere(ctx, "Everyone's calendars are read only in the family group. Here, leave everyone off for your own.")
+          : { members: [requireMember(ctx)] }
+        if ('error' in here) return here
+        const members = here.members
 
         const rangeStart = localToUtc(`${first}T00:00`)
         const rangeStop = localToUtc(`${dayAfter(last)}T00:00`)
@@ -156,7 +134,7 @@ export function calendarTools(ctx: ToolContext) {
                 if (at < knownUntil) knownUntil = at
               }
             } catch (e) {
-              unread.push(`${name}: ${describe(e)}`)
+              unread.push(`${name}: ${describeAccountError(e)}`)
             }
           }
         }
@@ -259,7 +237,7 @@ export function calendarTools(ctx: ToolContext) {
             start_local: span.allDay ? formatLocalDate(span.startsAt) : formatLocal(span.startsAt),
           }
         } catch (e) {
-          return writeFailure(e, describe)
+          return writeFailure(e, describeAccountError)
         }
       },
     }),
@@ -298,13 +276,3 @@ const MAX_FREE_SPANS = 12
 const daysBetween = (a: string, b: string) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000)
 const maxDate = (a: Date, b: Date) => (a > b ? a : b)
 const minDate = (a: Date, b: Date) => (a < b ? a : b)
-
-function describe(e: unknown): string {
-  if (e instanceof NotConnectedError) {
-    return `No ${e.provider} account linked. Send /connect to link one.`
-  }
-  if (e instanceof ReconnectNeededError) {
-    return `The ${e.provider} link has expired or been revoked. Send /connect to link it again.`
-  }
-  return describeError(e)
-}
