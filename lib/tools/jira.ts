@@ -3,8 +3,8 @@ import { z } from 'zod'
 import * as jira from '../providers/jira'
 import { clientFor } from '../providers'
 import { localDateKey } from '../cron'
-import { announce, requireMember, writeFailure, type ToolContext } from './context'
-import { mailboxOwner, describeAccountError, providerEnum } from './mail'
+import { requireMember, writeFailure, type ToolContext } from './context'
+import { describeAccountError, providerEnum } from './mail'
 import { describeError } from '../errors'
 
 const NOT_CONFIGURED = 'Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).'
@@ -126,7 +126,7 @@ export function jiraTools(ctx: ToolContext) {
           const made = await jira.createIssue({
             projectKey: defaultProject(), summary, description, dueDate: due_date, issueType: issue_type,
           })
-          return { ...made, summary, due: due_date ?? null, ...announce(ctx, `Added to the board: **${made.key}** ${summary}`) }
+          return { ...made, summary, due: due_date ?? null, added: `Added to the board: ${made.key} ${summary}` }
         } catch (e) {
           return writeFailure(e)
         }
@@ -160,22 +160,19 @@ export function jiraTools(ctx: ToolContext) {
 
     jira_attach_email_file: tool({
       description:
-        'Copy a file attached to an email onto an issue, so a renewal notice or an invoice sits with its job on the board. ' +
+        'Copy a file attached to one of your emails onto an issue, so a renewal notice or an invoice sits with its job on the board. ' +
         'Give the email id and provider from list_email and the filename as read_email lists it.',
       inputSchema: z.object({
         key: z.string().describe(`Issue key, e.g. ${defaultProject()}-346`),
         email_id: z.string(),
         provider: providerEnum,
         filename: z.string().describe("The attachment's filename, exactly as read_email listed it"),
-        of: z.string().optional().describe("Family member the mailbox belongs to; omit for the asker's own"),
       }),
-      execute: async ({ key, email_id, provider, filename, of }) => {
+      execute: async ({ key, email_id, provider, filename }) => {
         if (!jira.jiraConfigured()) return { error: NOT_CONFIGURED }
-        requireMember(ctx)
+        const member = requireMember(ctx)
         try {
-          const who = await mailboxOwner(ctx, of)
-          if ('error' in who) return who
-          const file = await clientFor(who.owner.id, provider).readAttachment(email_id, filename)
+          const file = await clientFor(member.id, provider).readAttachment(email_id, filename)
           const made = await jira.attachFile(key, file)
           return { key, attached: made.filename, size: made.size }
         } catch (e) {

@@ -32,12 +32,15 @@ afterEach(async () => closeDb(client))
 describe('the managed-key allowlist', () => {
   it('accepts only known settings', () => {
     expect(isManaged('TAVILY_API_KEY')).toBe(true)
-    expect(isManaged('AMBIENT_MODE')).toBe(true)
-    expect(isManaged('TELEGRAM_BOT_TOKEN')).toBe(true)
-    expect(isManaged('TELEGRAM_WEBHOOK_SECRET')).toBe(true)
-    expect(isManaged('ALLOWED_TELEGRAM_IDS')).toBe(true)
     expect(isManaged('LANGUAGE')).toBe(true)
     expect(isManaged('UNITS')).toBe(true)
+    expect(isManaged('ASSISTANT_NAME')).toBe(true)
+  })
+
+  it('has nothing left of the chat bot or its manner', () => {
+    for (const gone of ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET', 'ALLOWED_TELEGRAM_IDS', 'AMBIENT_MODE', 'ASSISTANT_PERSONA']) {
+      expect(isManaged(gone), gone).toBe(false)
+    }
   })
 
   it('refuses the settings that would let a session take over the deployment', () => {
@@ -49,11 +52,10 @@ describe('the managed-key allowlist', () => {
   it('classifies credentials as secret and plain settings as not', () => {
     expect(isSecretShaped('OPENROUTER_API_KEY')).toBe(true)
     expect(isSecretShaped('NOTION_TOKEN')).toBe(true)
-    expect(isSecretShaped('TELEGRAM_BOT_TOKEN')).toBe(true)
-    expect(isSecretShaped('TELEGRAM_WEBHOOK_SECRET')).toBe(true)
+    expect(isSecretShaped('QSTASH_CURRENT_SIGNING_KEY')).toBe(true)
     expect(isSecretShaped('GEMINI_MODEL')).toBe(false)
-    expect(isSecretShaped('AMBIENT_MODE')).toBe(false)
-    expect(isSecretShaped('ALLOWED_TELEGRAM_IDS')).toBe(false)
+    expect(isSecretShaped('JIRA_PROJECT_KEY')).toBe(false)
+    expect(isSecretShaped('ASSISTANT_NAME')).toBe(false)
   })
 
   it('never lets TOKEN_ENC_KEY be managed, since it decrypts the rest', () => {
@@ -355,7 +357,7 @@ describe('admin sessions', () => {
   it('ends every session when everyone is signed out, and leaves what is stored readable', async () => {
     const { signOutEverywhere } = await import('@/lib/auth/keys')
     await setSecret('TAVILY_API_KEY', 'tvly-secret', 'rowan@hearth.example')
-    const m = await q.upsertMember('555', 'Linked', { allowed: true })
+    const m = await q.saveMember({ name: 'Linked', email: null, allowed: true, isAdmin: false })
     await q.saveConnection({ memberId: m.id, provider: 'google', email: 'linked@hearth.example', refreshToken: 'r3fr3sh', scopes: null })
     await createSession({ email: 'rowan@hearth.example', name: 'Rowan', provider: 'google', role: 'admin' })
 
@@ -404,31 +406,31 @@ describe('what an address is allowed to see', () => {
   })
 
   it('gives an ordinary member the member role, not admin', async () => {
-    await q.saveMember({ telegramUserId: '222', name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
+    await q.saveMember({ name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
     expect((await resolveRole('ada@hearth.example'))?.role).toBe('member')
   })
 
   it('recognises an address an admin recorded, before any mailbox is linked', async () => {
-    await q.saveMember({ telegramUserId: '444', name: 'Kid', email: 'kid@hearth.example', allowed: true, isAdmin: false })
+    await q.saveMember({ name: 'Kid', email: 'kid@hearth.example', allowed: true, isAdmin: false })
     const resolved = await resolveRole('kid@hearth.example')
     expect(resolved?.role).toBe('member')
     expect(resolved?.member?.name).toBe('Kid')
   })
 
   it('recognises an address from a linked mailbox', async () => {
-    const m = await q.upsertMember('555', 'Linked', { allowed: true })
+    const m = await q.saveMember({ name: 'Linked', email: null, allowed: true, isAdmin: false })
     await q.saveConnection({ memberId: m.id, provider: 'google', email: 'linked@hearth.example', refreshToken: 'r', scopes: null })
     expect((await resolveRole('linked@hearth.example'))?.role).toBe('member')
   })
 
   it('gives an admin family member the admin role', async () => {
-    await q.saveMember({ telegramUserId: '666', name: 'Boss', email: 'boss@hearth.example', allowed: true, isAdmin: true })
+    await q.saveMember({ name: 'Boss', email: 'boss@hearth.example', allowed: true, isAdmin: true })
     expect((await resolveRole('boss@hearth.example'))?.role).toBe('admin')
   })
 
   it('refuses a member whose access was revoked', async () => {
-    await q.saveMember({ telegramUserId: '333', name: 'Old', email: 'old@hearth.example', allowed: true, isAdmin: true })
-    await q.saveMember({ telegramUserId: '333', name: 'Old', email: 'old@hearth.example', allowed: false, isAdmin: true })
+    await q.saveMember({ name: 'Old', email: 'old@hearth.example', allowed: true, isAdmin: true })
+    await q.saveMember({ name: 'Old', email: 'old@hearth.example', allowed: false, isAdmin: true })
     expect(await resolveRole('old@hearth.example')).toBeNull()
   })
 
@@ -464,18 +466,18 @@ describe('requireAdmin', () => {
 
   it('takes the role from the members table on every request, not from the cookie', async () => {
     const q = await import('@/lib/db/queries')
-    await q.saveMember({ telegramUserId: '222', name: 'Mal', email: 'mal@hearth.example', allowed: true, isAdmin: true })
+    const mal = await q.saveMember({ name: 'Mal', email: 'mal@hearth.example', allowed: true, isAdmin: true })
     await createSession({ email: 'mal@hearth.example', name: 'Mal', provider: 'google', role: 'admin' })
     expect(await requireAdmin()).not.toBeNull()
 
     // Demoted: the cookie still says admin, the table no longer does.
-    await q.saveMember({ telegramUserId: '222', name: 'Mal', email: 'mal@hearth.example', allowed: true, isAdmin: false })
+    await q.saveMember({ id: mal.id, name: 'Mal', email: 'mal@hearth.example', allowed: true, isAdmin: false })
     expect((await readSession())?.role).toBe('admin')
     expect(await requireAdmin()).toBeNull()
     expect((await requireMember())?.role).toBe('member')
 
     // Revoked: nothing at all, for the rest of the cookie's twelve hours.
-    await q.setMemberAllowed('222', false)
+    await q.saveMember({ id: mal.id, name: 'Mal', email: 'mal@hearth.example', allowed: false, isAdmin: false })
     expect(await requireMember()).toBeNull()
     expect(await requireAdmin()).toBeNull()
   })

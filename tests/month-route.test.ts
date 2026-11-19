@@ -31,15 +31,15 @@ describe('the month API', () => {
   })
 
   it('turns away a cookie whose member has since been revoked', async () => {
-    await q.saveMember({ telegramUserId: '222', name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
+    const ada = await q.saveMember({ name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
     await createSession({ email: 'ada@hearth.example', name: 'Ada', provider: 'google', role: 'member' })
     expect((await get('2026-09')).status).toBe(200)
-    await q.setMemberAllowed('222', false)
+    await q.saveMember({ id: ada.id, name: 'Ada', email: ada.email, allowed: false, isAdmin: false })
     expect((await get('2026-09')).status).toBe(401)
   })
 
   it('serves a month to any recognised member, not just admins', async () => {
-    await q.saveMember({ telegramUserId: '222', name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
+    await q.saveMember({ name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
     await createSession({ email: 'ada@hearth.example', name: 'Ada', provider: 'google', role: 'member' })
     const res = await get('2026-09')
     expect(res.status).toBe(200)

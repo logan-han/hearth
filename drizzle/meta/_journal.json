@@ -64,6 +64,20 @@
       "when": 1793323463790,
       "tag": "0008_personal_agents",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795124684544,
+      "tag": "0009_web_keys_and_reports",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1795124786480,
+      "tag": "0010_mcp_only",
+      "breakpoints": true
     }
   ]
 }

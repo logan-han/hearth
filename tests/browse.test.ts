@@ -13,7 +13,7 @@ const { browseTools, htmlToText, looksLikeShell, lookupPublic } = await import('
 /** Node's own fetch, for the tests that go as far as a connection. */
 const realFetch = globalThis.fetch
 const fetchMock = vi.fn()
-const ctx: ToolContext = { chatId: '-1', member: null, memberName: 'Rowan', now: new Date(), notices: [] }
+const ctx: ToolContext = { member: null, memberName: 'Rowan', now: new Date() }
 const read = (url: string) =>
   (browseTools(ctx).read_url.execute as unknown as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)({ url }, {})
 

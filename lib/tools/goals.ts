@@ -9,16 +9,17 @@ import { schedule } from './automation'
 import { formatLocal, formatLocalDate, localDateKey, localToUtc } from '../cron'
 import { timezone } from '../env'
 import type { ToolContext } from './context'
+import { requireMember } from './context'
 
 /**
- * Goals are what the household is working towards over weeks: a trip saved
- * for, a party planned, a house readied for sale. Each has a plan of steps of
- * its own, ticked off in the chat or on Home; a record of progress in the
- * family's words; and a check-in that brings it back to the chat on a
- * schedule until it is done or dropped. That last is what keeps a goal moving
- * when nobody is thinking about it. A goal set in a member's own chat is
- * theirs: nothing about it reaches a group, Home shows it to them alone, and
- * its steps are never one of the household's shared lists.
+ * Goals are what a member is working towards over weeks: a trip saved for, a
+ * party planned, a house readied for sale. Each has a plan of steps of its
+ * own, ticked off from an MCP client or on Home; a record of progress in the
+ * member's words; and a check-in that reports on it on a schedule until it is
+ * done or dropped. That last is what keeps a goal moving when nobody is
+ * thinking about it. A goal is its owner's alone: another member's client
+ * never sees it, Home shows it to them alone, and its steps are never one of
+ * the household's shared lists.
  */
 
 /** Sunday at 7pm: the week's end, when a household looks at the week ahead. */
@@ -26,45 +27,26 @@ export const DEFAULT_CHECK_IN = '0 19 * * 0'
 
 const DAY_MS = 86_400_000
 
-const isGroup = (chatId: string) => chatId.startsWith('-')
-
 /**
- * What a check-in runs: a custom automation like any other, read-only, with
- * the post checked against goal_status. Everything it says comes from there,
- * so the instruction names the goal by id and says what to pick out of it.
+ * What a check-in runs: a scheduled instruction like any other, read-only,
+ * with its report checked against goal_status. Everything it says comes from
+ * there, so the instruction names the goal by id and says what to pick out of it.
  */
 export function checkInInstruction(goal: { id: number; title: string }): string {
   return (
     `Check in on goal ${goal.id}, "${goal.title}". Call goal_status with id ${goal.id}. ` +
-    'If it says the goal is no longer active, reply SKIP. Otherwise post a short check-in: the progress so far as goal_status gives it ' +
+    'If it says the goal is no longer active, reply SKIP. Otherwise write a short check-in: the progress so far as goal_status gives it ' +
     '(steps done out of all of them, and the latest update with who gave it), the next open step, and the days left to the target date when there is one. ' +
     'End with one question that would move it forward, such as who will take the next step.'
   )
 }
 
-/**
- * What the check-in is called where everyone can see it, among Home's
- * reminders: a group's goal by its name, a member's own by nothing that
- * gives it away.
- */
-const checkInLabel = (goal: { title: string; chatId: string }) => (isGroup(goal.chatId) ? `Goal check-in: ${goal.title}` : 'Goal check-in')
+/** What the check-in is called among its owner's reminders. */
+const checkInLabel = (title: string) => `Goal check-in: ${title}`
 
-/**
- * Whether what this run reads is read by one member alone: their own chat
- * with the bot, or their MCP client. A group's turn is read by the room, and
- * so is a scheduled run in a group, which posts what it finds there whoever
- * set it up.
- */
-const readAlone = (ctx: Pick<ToolContext, 'chatId' | 'via'>) => ctx.via === 'mcp' || !isGroup(ctx.chatId)
-
-/** The goals this run may see: the room's own, and where one member alone reads it, theirs from anywhere. */
-export function goalScope(ctx: Pick<ToolContext, 'chatId' | 'member' | 'via'>) {
-  return readAlone(ctx) ? { chatId: ctx.chatId, memberId: ctx.member?.id ?? null } : { chatId: ctx.chatId }
-}
-
-export function canSee(goal: Goal, ctx: Pick<ToolContext, 'chatId' | 'member' | 'via'>): boolean {
-  if (goal.chatId === ctx.chatId) return true
-  return readAlone(ctx) && ctx.member != null && goal.memberId === ctx.member.id
+/** Whether this caller may see a goal: only its owner may. */
+export function canSee(goal: Goal, ctx: Pick<ToolContext, 'member'>): boolean {
+  return ctx.member != null && goal.memberId === ctx.member.id
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
@@ -102,15 +84,15 @@ export function goalTools(ctx: ToolContext) {
   /** The goal by id, if this run may see it, or why not. */
   async function visible(id: number): Promise<Goal | { error: string }> {
     const goal = await getGoal(id)
-    return goal && canSee(goal, ctx) ? goal : { error: `No goal ${id} here.` }
+    return goal && canSee(goal, ctx) ? goal : { error: `No goal ${id} of yours.` }
   }
 
   return {
     create_goal: tool({
       description:
-        'Start a goal the household is working towards over weeks: a trip to save for, a party to plan, a house to ready for sale, a training plan. ' +
+        'Start a goal you are working towards over weeks: a trip to save for, a party to plan, a house to ready for sale, a training plan. ' +
         'Give its plan as steps, each one thing a person can do, in order: they are ticked off with update_goal, or on Home. ' +
-        'A check-in then brings it back to this chat each week (Sunday 7pm unless asked otherwise) with the progress and the next step, until it is done or dropped. ' +
+        'A check-in then reports on it each week (Sunday 7pm unless asked otherwise) with the progress and the next step, kept for you in list_reports and on Home, until it is done or dropped. ' +
         'Draft the steps yourself when they are not given, from what the goal needs, and show them in your reply.',
       inputSchema: z.object({
         title: z.string().describe('Short name, e.g. "Bali trip in March"'),
@@ -135,13 +117,13 @@ export function goalTools(ctx: ToolContext) {
         const checked = cron.toLowerCase() === 'none' ? null : await schedule(cron, ctx.now)
         if (checked && 'error' in checked) return checked
 
-        const goal = await createGoal({ chatId: ctx.chatId, memberId: ctx.member?.id ?? null, title: name, outcome: outcome?.trim() || null, targetDate: target })
+        const member = requireMember(ctx)
+        const goal = await createGoal({ memberId: member.id, title: name, outcome: outcome?.trim() || null, targetDate: target })
         const planned = (await addGoalSteps(goal.id, steps)).map((st) => st.content)
         if (checked) {
           const automation = await addAutomation({
-            chatId: ctx.chatId,
-            memberId: ctx.member?.id ?? null,
-            label: checkInLabel(goal),
+            memberId: member.id,
+            label: checkInLabel(name),
             cronExpr: cron,
             instruction: checkInInstruction(goal),
             nextRunAt: checked.next,
@@ -160,11 +142,11 @@ export function goalTools(ctx: ToolContext) {
     }),
 
     list_goals: tool({
-      description: 'The goals in progress here, each with its progress, its next step and the days left to its target date.',
+      description: 'Your goals in progress, each with its progress, its next step and the days left to its target date.',
       inputSchema: z.object({}),
       execute: async () => {
-        const rows = await goalsIn(goalScope(ctx))
-        if (rows.length === 0) return { goals: [], note: 'No goals in progress here. create_goal starts one.' }
+        const rows = await goalsIn({ memberId: requireMember(ctx).id })
+        if (rows.length === 0) return { goals: [], note: 'No goals in progress. create_goal starts one.' }
         return { goals: await Promise.all(rows.map((g) => goalSummary(g, ctx.now))) }
       },
     }),
@@ -233,12 +215,12 @@ export function goalTools(ctx: ToolContext) {
           if (name !== undefined) changed.push(`renamed to "${name}"`)
           if (outcome !== undefined) changed.push('what done looks like')
           if (target !== undefined) changed.push(target ? `target ${targetWords(target)}` : 'target cleared')
-          // The check-in asks after the goal by name, and a group's is labelled with it.
+          // The check-in asks after the goal by name, and is labelled with it.
           if (name !== undefined && goal.automationId) {
             const check = await getAutomation(goal.automationId)
             if (check) {
               await syncAutomation(check.id, {
-                label: checkInLabel({ title: name, chatId: goal.chatId }),
+                label: checkInLabel(name),
                 cronExpr: check.cronExpr,
                 instruction: checkInInstruction({ id: goal.id, title: name }),
               })
@@ -252,7 +234,8 @@ export function goalTools(ctx: ToolContext) {
         if (unticked.length) changed.push(`put back ${unticked.map((st) => st.content).join(', ')}`)
         if (added.length) changed.push(`added ${added.map((st) => st.content).join(', ')}`)
         if (progress?.trim()) {
-          await addGoalUpdate(goal.id, progress, ctx.member?.id ?? null)
+          // Only its owner sees a goal (see visible), so the caller is that member.
+          await addGoalUpdate(goal.id, progress, requireMember(ctx).id)
           changed.push('progress noted')
         }
         if (status === 'done' || status === 'dropped') {
@@ -266,9 +249,8 @@ export function goalTools(ctx: ToolContext) {
           const checked = await schedule(DEFAULT_CHECK_IN, ctx.now)
           if ('next' in checked) {
             const automation = await addAutomation({
-              chatId: goal.chatId,
               memberId: goal.memberId,
-              label: checkInLabel({ title: name ?? goal.title, chatId: goal.chatId }),
+              label: checkInLabel(name ?? goal.title),
               cronExpr: DEFAULT_CHECK_IN,
               instruction: checkInInstruction({ id: goal.id, title: name ?? goal.title }),
               nextRunAt: checked.next,

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
-import { signState, verifyState, connectLink } from '@/lib/oauth/state'
+import { signState, verifyState, safeNext } from '@/lib/oauth/state'
 import { signingSecret, signOutEverywhere } from '@/lib/auth/keys'
 import {
   authorizeUrl, redirectUri, providerConfig, exchangeCode, refreshAccessToken, emailFromIdToken,
@@ -22,66 +22,78 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('oauth state', () => {
-  const payload = { tg: '111', name: 'Rowan', chat: '-100' }
-  // The epoch the state is signed under lives in the store.
+  const link = { purpose: 'link' as const, member: 5 }
+  // The epoch a link is signed under lives in the store.
   let client: PGlite
   beforeEach(async () => { client = (await freshDb()).client })
   afterEach(async () => closeDb(client))
 
-  it('round-trips the telegram binding, defaulting to the linking purpose', async () => {
-    expect(await verifyState(await signState(payload))).toEqual({ ...payload, purpose: 'link' })
+  const signed = async (claims: Record<string, unknown>, key?: Uint8Array) => {
+    const { SignJWT } = await import('jose')
+    return new SignJWT(claims).setProtectedHeader({ alg: 'HS256' }).setExpirationTime('5m').sign(key ?? (await signingSecret('oauth-state')))
+  }
+
+  it('round-trips a link, bound to the member who asked for it', async () => {
+    expect(await verifyState(await signState(link))).toEqual(link)
   })
 
-  it('carries a sign-in purpose through, which needs no telegram binding', async () => {
-    const signin = { tg: '', name: '', chat: '', purpose: 'signin' as const }
-    expect(await verifyState(await signState(signin))).toEqual(signin)
+  it('round-trips a sign-in, which binds nobody', async () => {
+    expect(await verifyState(await signState({ purpose: 'signin' }))).toEqual({ purpose: 'signin' })
+  })
+
+  it('carries a sign-in on to a page on this site afterwards', async () => {
+    const next = '/api/oauth/authorize?client_id=abc&state=x'
+    expect(await verifyState(await signState({ purpose: 'signin', next }))).toEqual({ purpose: 'signin', next })
+  })
+
+  it('never carries a sign-in on to another site', async () => {
+    for (const next of ['//evil.example/x', 'https://evil.example/', '/\\evil.example', '/a b', `/${'x'.repeat(2001)}`]) {
+      expect(await verifyState(await signState({ purpose: 'signin', next }))).toEqual({ purpose: 'signin' })
+    }
+    // Nor one written into a state with the right key some other way.
+    expect(await verifyState(await signed({ purpose: 'signin', next: '//evil.example' }))).toEqual({ purpose: 'signin' })
   })
 
   it('treats an unrecognised purpose as linking, never as a sign-in', async () => {
-    const { SignJWT } = await import('jose')
-    const token = await new SignJWT({ tg: '111', name: 'L', chat: '', purpose: 'root' })
-      .setProtectedHeader({ alg: 'HS256' })
-      .setExpirationTime('5m')
-      .sign(await signingSecret('oauth-state'))
-    expect((await verifyState(token)).purpose).toBe('link')
+    expect(await verifyState(await signed({ purpose: 'root', member: 5, ep: '' }))).toEqual(link)
+    await expect(verifyState(await signed({ purpose: 'root' }))).rejects.toThrow(/names no member/)
   })
 
   it('rejects a token signed with a different key', async () => {
-    const token = await signState(payload)
+    const token = await signState(link)
     process.env.TOKEN_ENC_KEY = 'b'.repeat(64)
     await expect(verifyState(token)).rejects.toThrow()
   })
 
   it('will not take a token signed with TOKEN_ENC_KEY itself, or with the key sessions are signed with', async () => {
-    const { SignJWT } = await import('jose')
-    const sign = async (key: Uint8Array) =>
-      new SignJWT({ ...payload }).setProtectedHeader({ alg: 'HS256' }).setExpirationTime('5m').sign(key)
-    await expect(verifyState(await sign(new TextEncoder().encode(process.env.TOKEN_ENC_KEY!)))).rejects.toThrow()
-    await expect(verifyState(await sign(await signingSecret('session')))).rejects.toThrow()
-    expect(await verifyState(await sign(await signingSecret('oauth-state')))).toEqual({ ...payload, purpose: 'link' })
+    const claims = { ...link, ep: '' }
+    await expect(verifyState(await signed(claims, new TextEncoder().encode(process.env.TOKEN_ENC_KEY!)))).rejects.toThrow()
+    await expect(verifyState(await signed(claims, await signingSecret('session')))).rejects.toThrow()
+    expect(await verifyState(await signed(claims))).toEqual(link)
   })
 
-  it('voids every link still out once everyone is signed out', async () => {
-    const link = new URL(await connectLink('https://hearth.example', payload)).searchParams.get('t')!
+  it('voids every link still under way once everyone is signed out, and no sign-in', async () => {
+    const pending = await signState(link)
+    const signin = await signState({ purpose: 'signin' })
     await signOutEverywhere()
-    await expect(verifyState(link)).rejects.toThrow()
-    expect(await verifyState(await signState(payload))).toEqual({ ...payload, purpose: 'link' })
+    await expect(verifyState(pending)).rejects.toThrow(/signed out/)
+    expect(await verifyState(await signState(link))).toEqual(link)
+    expect(await verifyState(signin)).toEqual({ purpose: 'signin' })
   })
 
   it('turns a made-up state away, and hands out a sign-in state, without reading the store', async () => {
-    const { SignJWT } = await import('jose')
     const { __setDb } = await import('@/lib/db')
     let reads = 0
     __setDb(new Proxy({}, { get: () => { reads++; throw new Error('the store was read') } }))
-    const forged = await new SignJWT({ ...payload }).setProtectedHeader({ alg: 'HS256' }).setExpirationTime('5m').sign(new TextEncoder().encode('made up'))
+    const forged = await signed({ ...link }, new TextEncoder().encode('made up'))
     await expect(verifyState(forged)).rejects.toThrow(/signature verification failed/)
-    const signin = await signState({ tg: '', name: '', chat: '', purpose: 'signin' })
-    expect((await verifyState(signin, 'signin')).purpose).toBe('signin')
+    const signin = await signState({ purpose: 'signin', next: '/x' })
+    expect(await verifyState(signin, 'signin')).toEqual({ purpose: 'signin', next: '/x' })
     expect(reads).toBe(0)
   })
 
   it('rejects an expired token', async () => {
-    const token = await signState(payload, '0s')
+    const token = await signState(link, '0s')
     await new Promise((r) => setTimeout(r, 1100))
     await expect(verifyState(token)).rejects.toThrow()
   })
@@ -90,48 +102,31 @@ describe('oauth state', () => {
     await expect(verifyState('not-a-jwt')).rejects.toThrow()
   })
 
-  it('refuses a token with no telegram id', async () => {
-    const { SignJWT } = await import('jose')
-    const token = await new SignJWT({ name: 'x' })
-      .setProtectedHeader({ alg: 'HS256' })
-      .setExpirationTime('5m')
-      .sign(await signingSecret('oauth-state'))
-    await expect(verifyState(token)).rejects.toThrow(/telegram id/)
-  })
-
-  it('defaults a missing telegram id on a sign-in, which needs none', async () => {
-    const { SignJWT } = await import('jose')
-    const token = await new SignJWT({ purpose: 'signin' })
-      .setProtectedHeader({ alg: 'HS256' })
-      .setExpirationTime('5m')
-      .sign(await signingSecret('oauth-state'))
-    expect(await verifyState(token)).toEqual({ tg: '', name: 'Family member', chat: '', purpose: 'signin' })
-  })
-
-  it('defaults a missing name rather than failing', async () => {
-    const { SignJWT } = await import('jose')
-    const token = await new SignJWT({ tg: '111' })
-      .setProtectedHeader({ alg: 'HS256' })
-      .setExpirationTime('5m')
-      .sign(await signingSecret('oauth-state'))
-    expect(await verifyState(token)).toEqual({ tg: '111', name: 'Family member', chat: '', purpose: 'link' })
+  it('refuses a link that names no member, or not one that could be', async () => {
+    for (const member of [undefined, 0, -1, 2.5, '5']) {
+      await expect(verifyState(await signed({ purpose: 'link', ep: '', ...(member === undefined ? {} : { member }) }))).rejects.toThrow(/names no member/)
+    }
   })
 
   it('refuses a state minted for the other purpose when the caller says which it wants', async () => {
-    const signin = await signState({ tg: '', name: '', chat: '', purpose: 'signin' })
+    const signin = await signState({ purpose: 'signin' })
     await expect(verifyState(signin, 'link')).rejects.toThrow(/signin, not link/)
-    await expect(verifyState(await signState(payload), 'signin')).rejects.toThrow(/link, not signin/)
-    expect(await verifyState(await signState(payload), 'link')).toEqual({ ...payload, purpose: 'link' })
+    await expect(verifyState(await signState(link), 'signin')).rejects.toThrow(/link, not signin/)
+    expect(await verifyState(await signState(link), 'link')).toEqual(link)
+  })
+})
+
+describe('where a sign-in may land afterwards', () => {
+  it('is a path on this site', () => {
+    expect(safeNext('/api/oauth/authorize?a=1')).toBe('/api/oauth/authorize?a=1')
+    expect(safeNext('  /connect  ')).toBe('/connect')
   })
 
-  it('refuses a link whose telegram id is empty, which binds it to nobody', async () => {
-    await expect(verifyState(await signState({ tg: '  ', name: 'x', chat: '' }))).rejects.toThrow(/telegram id/)
-  })
-
-  it('builds a connect link carrying the state', async () => {
-    const link = await connectLink('https://hearth.example', payload)
-    const token = new URL(link).searchParams.get('t')!
-    expect(await verifyState(token)).toEqual({ ...payload, purpose: 'link' })
+  it('is never another site, nor anything a browser could read as one', () => {
+    for (const bad of [undefined, null, 5, '', 'connect', '//evil.example', 'https://evil.example', '/\\evil', '/x\ty', '/a b']) {
+      expect(safeNext(bad), String(bad)).toBeUndefined()
+    }
+    expect(safeNext(`/${'x'.repeat(2000)}`)).toBeUndefined()
   })
 })
 

@@ -5,17 +5,14 @@ import * as q from '@/lib/db/queries'
 import type { Member } from '@/lib/db/schema'
 import { hashToken, mcpKeyHolder, mintMcpKey, randomToken } from '@/lib/crypto'
 
-const send = vi.fn(async () => {})
-vi.mock('@/lib/telegram', () => ({ send }))
-const unaccountedIn = vi.hoisted(() => vi.fn(async (_chatId: string): Promise<number | null> => 0))
-// Everyone is in the group, so only the MCP rule itself can keep their mail out.
-vi.mock('@/lib/headcount', () => ({ unaccountedIn, presentIn: async (_chatId: string, people: unknown[]) => people }))
-
-/** Linked mailboxes, none unless a test adds one. */
-const mailboxes = vi.hoisted(() => ({ list: [] as { provider: string; listMail: () => Promise<unknown[]> }[] }))
+/** Linked mailboxes, none unless a test adds one; whose they were asked for is kept. */
+const mailboxes = vi.hoisted(() => ({ list: [] as { provider: string; listMail: () => Promise<unknown[]> }[], askedFor: [] as number[] }))
 vi.mock('@/lib/providers', async (orig) => ({
   ...(await orig<typeof import('@/lib/providers')>()),
-  clientsFor: async () => mailboxes.list,
+  clientsFor: async (memberId: number) => {
+    mailboxes.askedFor.push(memberId)
+    return mailboxes.list
+  },
 }))
 
 const hydrateSecrets = vi.fn(async () => {})
@@ -24,11 +21,14 @@ vi.mock('@/lib/settings', async (orig) => {
   return { ...actual, hydrateSecrets }
 })
 
-const { callTool, descriptors, mcpChat, CONTEXT_TOOL } = await import('@/lib/mcp')
+const { callTool, descriptors, context, connectLine, CONTEXT_TOOL, INSTRUCTIONS, SERVER_INFO } = await import('@/lib/mcp')
 
 let client: PGlite
 let member: Member
 let realDb: unknown
+
+const add = (name: string, extra: Partial<{ email: string; isAdmin: boolean; allowed: boolean }> = {}) =>
+  q.saveMember({ name, email: extra.email ?? `${name.toLowerCase()}@hearth.example`, allowed: extra.allowed ?? true, isAdmin: extra.isAdmin ?? false })
 
 beforeEach(async () => {
   vi.clearAllMocks()
@@ -40,36 +40,51 @@ beforeEach(async () => {
   const fresh = await freshDb()
   client = fresh.client
   realDb = fresh.db
-  member = await q.upsertMember('111', 'Rowan', { allowed: true })
+  member = await add('Rowan')
   mailboxes.list = []
+  mailboxes.askedFor = []
 })
 afterEach(async () => closeDb(client))
 
 const text = (result: { content: { text: string }[] }) => result.content[0].text
+const as = (m: Member, keyId = 1) => ({ member: m, keyId })
 
-/** A group the bot is in, where this member has said something. */
-async function talkedIn(chatId: string, title = 'Home', who: Member = member) {
-  await q.rememberChat(chatId, 'supergroup', title)
-  await q.recordMessage({ chatId, memberId: who.id, authorName: who.name, role: 'user', content: 'hi' })
-}
+describe('what a client is told before it calls anything', () => {
+  it('names the server and says to read the context first', () => {
+    expect(SERVER_INFO.name).toBe('hearth')
+    expect(INSTRUCTIONS).toContain(`Call ${CONTEXT_TOOL} first`)
+  })
+
+  it('says nothing is posted anywhere, so the client passes on what it is told', () => {
+    expect(INSTRUCTIONS).toContain('Nothing is posted anywhere')
+    expect(INSTRUCTIONS).not.toMatch(/chat/i)
+  })
+
+  it('gives the one line that adds a key to Claude Code', () => {
+    expect(connectLine('5.abc.def')).toBe(
+      'claude mcp add --transport http hearth https://hearth.example/api/mcp --header "Authorization: Bearer 5.abc.def"',
+    )
+  })
+})
 
 describe('the tools an MCP client is offered', () => {
   const names = () => descriptors().map((d) => d.name)
 
-  it('offers the whole set at once, not the routed subset a chat turn sees', () => {
+  it('offers the whole set at once', () => {
     expect(names()).toEqual(
-      expect.arrayContaining(['web_search', 'add_family_event', 'send_email', 'jira_create_issue', 'create_automation']),
+      expect.arrayContaining([
+        'web_search', 'add_family_event', 'send_email', 'jira_create_issue', 'create_automation',
+        'morning_brief', 'money_snapshot', 'list_reports', 'accept_event_proposal',
+      ]),
     )
   })
 
-  it('leaves out the two that mean nothing down this pipe', () => {
-    // more_tools widens a routed list, and there is no routing here; the import
-    // tool reads a file attached to a Telegram message, and there is no message.
+  it('has no tool that only meant something in a chat', () => {
     expect(names()).not.toContain('more_tools')
     expect(names()).not.toContain('import_calendar_file')
   })
 
-  it('stands in for the context a chat turn gets free', () => {
+  it('puts the context first', () => {
     expect(names()[0]).toBe(CONTEXT_TOOL)
   })
 
@@ -85,235 +100,283 @@ describe('the tools an MCP client is offered', () => {
   })
 })
 
-describe('the room a call acts in', () => {
-  it('is the household group, so what it posts reaches everyone', async () => {
-    await talkedIn('-100')
-    expect(await mcpChat(member)).toBe('-100')
-  })
-
-  it('is not a room with someone unrecognised in it', async () => {
-    await talkedIn('-100')
-    await q.noteStranger('-100', { id: '999', name: 'Guest' })
-    expect(await mcpChat(member)).toBe(member.telegramUserId)
-  })
-
-  it('is the group the caller talked in last, never merely the oldest on record', async () => {
-    const parent = await q.upsertMember('222', 'Sam', { allowed: true })
-    await talkedIn('-100', 'Parents', parent)
-    await talkedIn('-200', 'Family')
-    await talkedIn('-300', 'Cousins')
-    await talkedIn('-200', 'Family')
-    // Rowan never spoke in the parents' room, so its summary and drafts are not his to read.
-    expect(await mcpChat(member)).toBe('-200')
-    expect(await mcpChat(parent)).toBe('-100')
-  })
-
-  it('is not a room the bot has been removed from, until it is back', async () => {
-    await talkedIn('-100')
-    await q.setChatLeft('-100', true)
-    expect(await mcpChat(member)).toBe(member.telegramUserId)
-    await q.setChatLeft('-100', false)
-    expect(await mcpChat(member)).toBe('-100')
-  })
-
-  it('is not a group the caller has never said anything in', async () => {
-    await q.rememberChat('-100', 'supergroup', 'Test room')
-    expect(await mcpChat(member)).toBe(member.telegramUserId)
-  })
-
-  it("falls back to the member's own chat when there is no group at all", async () => {
-    expect(await mcpChat(member)).toBe('111')
-  })
-
-  it('treats a failed room lookup as no rooms, falling back to the caller\'s own chat', async () => {
-    const { __setDb } = await import('@/lib/db')
-    __setDb({ select: () => { throw new Error('chats table locked') } })
-    try {
-      expect(await mcpChat(member)).toBe(member.telegramUserId)
-    } finally {
-      __setDb(realDb)
-    }
-  })
-})
-
 describe('calling a tool', () => {
-  beforeEach(async () => talkedIn('-100'))
-
   it('runs it in the name of whoever holds the key', async () => {
-    await callTool('add_family_event', { title: 'Swimming', start: '2026-09-20T10:00', all_day: false }, member)
+    await callTool('add_family_event', { title: 'Swimming', start: '2026-09-20T10:00', all_day: false }, as(member))
     const [event] = await q.listFamilyEvents(new Date('2026-09-01'), new Date('2026-10-01'))
     expect(event.title).toBe('Swimming')
     expect(event.createdBy).toBe(member.id)
   })
 
-  it('says in the family chat what the tool asked the family to hear', async () => {
-    const result = await callTool(
-      'add_family_event',
-      { title: 'Swimming', start: '2026-09-20T10:00', all_day: false },
-      member,
-    )
-    expect(send).toHaveBeenCalledWith('-100', expect.stringContaining('Swimming'))
-    expect(text(result)).toContain('Swimming')
+  it('posts nothing: what the tool did comes back to the client alone', async () => {
+    const result = JSON.parse(text(await callTool('add_family_event', { title: 'Swimming', start: '2026-09-20T10:00', all_day: false }, as(member))))
+    expect(result.title).toBe('Swimming')
+    expect(result).not.toHaveProperty('posted')
+    expect(result.added).toContain('Swimming')
   })
 
-  it('says it in the member\'s own chat instead when the group holds people nobody has accounted for', async () => {
-    for (const count of [3, null]) {
-      send.mockClear()
-      unaccountedIn.mockResolvedValueOnce(count)
-      const result = await callTool('add_family_event', { title: `Swimming ${count}`, start: '2026-09-20T10:00', all_day: false }, member)
-      expect(send).toHaveBeenCalledTimes(1)
-      expect(send).toHaveBeenCalledWith(member.telegramUserId, expect.stringContaining('Swimming'))
-      expect(text(result)).toContain('your own chat rather than the group "Home"')
-    }
+  it("keeps what it changed on the member's own record, as done through an MCP client", async () => {
+    const other = await add('Sam')
+    await callTool('add_to_list', { items: ['milk'], list: 'shopping' }, as(member))
+    const [mine] = await q.recentActivity({ memberId: member.id })
+    expect(mine.via).toBe('mcp')
+    expect(mine.summary).toContain('milk')
+    expect(await q.recentActivity({ memberId: other.id })).toEqual([])
   })
 
-  it('withdraws the promise when the family could not be told, naming the room that was not', async () => {
-    send.mockRejectedValueOnce(new Error('telegram is down'))
-    const result = await callTool(
-      'add_family_event',
-      { title: 'Swimming', start: '2026-09-20T10:00', all_day: false },
-      member,
-    )
-    expect(text(result)).toContain('could not post this in the group "Home"')
-    expect(text(result)).toContain('nobody there has been told')
-    expect(result.isError).toBeUndefined()
-  })
-
-  it('spends what it reported as new once the call returns, so the next call does not repeat it', async () => {
+  it('spends what it reported as new once the call returns, on markers of its key alone', async () => {
     const date = new Date(Date.now() - 3600_000).toISOString()
     mailboxes.list = [{ provider: 'google', listMail: async () => [{ id: 'm1', from: 'school', to: 'me', subject: 'S', snippet: '…', date, unread: true }] }]
-    const first = JSON.parse(text(await callTool('new_mail', { limit: 10 }, member)))
+    const first = JSON.parse(text(await callTool('new_mail', { limit: 10 }, as(member, 7))))
     expect(first.accounts[0].messages).toHaveLength(1)
-    const again = JSON.parse(text(await callTool('new_mail', { limit: 10 }, member)))
+    const again = JSON.parse(text(await callTool('new_mail', { limit: 10 }, as(member, 7))))
     expect(again.accounts[0].messages).toEqual([])
-    // Its own marker: what the client saw is still new to the family's brief.
-    expect(await q.getSetting(`mail_cursor:mcp:${member.id}:${member.id}:google`)).not.toBeNull()
-    expect(await q.getSetting(`mail_cursor:-100:${member.id}:google`)).toBeNull()
+    expect(await q.getSetting(`mail_cursor:key:7:${member.id}:google`)).not.toBeNull()
+    // Another of the member's clients, and their morning brief, still have it to see.
+    const other = JSON.parse(text(await callTool('new_mail', { limit: 10 }, as(member, 8))))
+    expect(other.accounts[0].messages).toHaveLength(1)
+    expect(await q.getSetting(`mail_cursor:brief:${member.id}:google`)).toBeNull()
   })
 
-  it("reads only the key holder's own mailbox, though it acts in the family group", async () => {
-    const ada = await q.upsertMember('222', 'Ada', { allowed: true })
-    await q.saveConnection({ memberId: ada.id, provider: 'google', email: 'ada@hearth.example', refreshToken: 'r', scopes: null })
-    const date = new Date(Date.now() - 3600_000).toISOString()
-    mailboxes.list = [{ provider: 'google', listMail: async () => [{ id: 'm1', from: 'bank', to: 'ada', subject: 'Statement', snippet: '…', date, unread: true }] }]
-    expect(await mcpChat(member)).toBe('-100')
-
-    const sweep = await callTool('new_mail', { limit: 10, everyone: true }, member)
-    expect(text(sweep)).toContain('only for the family group')
-    const read = await callTool('read_email', { id: 'm1', provider: 'google', of: 'Ada' }, member)
-    expect(text(read)).toContain("Ada's mail is read only in the family group")
-    const file = await callTool('read_attachment', { email_id: 'm1', provider: 'google', filename: 'Statement.pdf', of: 'Ada' }, member)
-    expect(text(file)).toContain('only in the family group')
-  })
-
-  it('stays quiet in the chat when the tool only read something', async () => {
-    await callTool('recall', {}, member)
-    expect(send).not.toHaveBeenCalled()
+  it("reads only the key holder's own mailbox", async () => {
+    await add('Ada')
+    mailboxes.list = [{ provider: 'google', listMail: async () => [] }]
+    await callTool('new_mail', { limit: 10 }, as(member))
+    expect(mailboxes.askedFor).toEqual([member.id])
   })
 
   it('answers a name it does not have rather than failing the call', async () => {
-    const result = await callTool('rm_rf', {}, member)
+    const result = await callTool('rm_rf', {}, as(member))
     expect(result.isError).toBe(true)
     expect(text(result)).toContain('rm_rf')
   })
 
-  it('will not reach a tool a chat turn cannot reach either', async () => {
-    expect((await callTool('more_tools', { group: 'mail' }, member)).isError).toBe(true)
+  it('has no more_tools to reach for', async () => {
+    expect((await callTool('more_tools', { group: 'mail' }, as(member))).isError).toBe(true)
   })
 
   it('turns a failure on the way in into an answer, not a throw', async () => {
     hydrateSecrets.mockRejectedValueOnce(new Error('the store is unreachable'))
-    const result = await callTool('recall', {}, member)
+    const result = await callTool('recall', {}, as(member))
     expect(result.isError).toBe(true)
     expect(text(result)).toContain('the store is unreachable')
   })
 
   it('loads the stored keys before the first tool touches them', async () => {
-    await callTool('recall', {}, member)
+    await callTool('recall', {}, as(member))
     expect(hydrateSecrets).toHaveBeenCalled()
+  })
+
+  it('hands back a tool result that is already words as it is', async () => {
+    // hearth_context answers in plain text, not JSON.
+    expect(text(await callTool(CONTEXT_TOOL, {}, as(member)))).toMatch(/^You are acting as Rowan\./)
   })
 })
 
-describe('the context a client gets instead of a chat turn', () => {
-  it('says who it is acting as, where it is acting, and when', async () => {
-    await talkedIn('-100')
-    const result = text(await callTool(CONTEXT_TOOL, {}, member))
-    expect(result).toContain('acting as Rowan')
-    expect(result).toContain('lands in the group "Home"')
+describe('the context a client reads first', () => {
+  const now = new Date('2026-09-15T00:00:00Z')
+  const read = (m: Member = member) => context(m, now)
+
+  it('says who it is acting as and when, in the household clock', async () => {
+    const result = await read()
+    expect(result).toContain('You are acting as Rowan.')
     expect(result).toContain('Australia/Melbourne')
+    expect(result).not.toMatch(/lands in|chat/i)
   })
 
-  it('names the room by its title, since the one the caller used last need not be the family\'s', async () => {
-    await talkedIn('-100', 'Family')
-    await talkedIn('-200', 'Parents')
-    const result = text(await callTool(CONTEXT_TOOL, {}, member))
-    expect(result).toContain('lands in the group "Parents"')
-    expect(result).not.toContain('family group')
+  it('says when the caller is an admin', async () => {
+    const admin = await add('Sam', { isAdmin: true })
+    expect(await read(admin)).toContain('an admin of this household')
   })
 
-  it('says when it is acting somewhere only the member can see', async () => {
-    const admin = await q.upsertMember('222', 'Sam', { allowed: true, isAdmin: true })
-    const result = text(await callTool(CONTEXT_TOOL, {}, admin))
-    expect(result).toContain('an admin of this household')
-    expect(result).toContain('your own chat with Hearth')
+  it("names everyone's linked accounts, and that nobody else's mail is opened", async () => {
+    const ada = await add('Ada')
+    await q.saveConnection({ memberId: ada.id, provider: 'google', email: 'ada@gmail.example', refreshToken: 'r', scopes: null })
+    await q.setConnectionReadOnly(ada.id, 'google', true)
+    const result = await read()
+    expect(result).toContain('Ada (google: ada@gmail.example, read only)')
+    expect(result).toContain('Rowan (nothing linked)')
+    expect(result).toContain("nobody else's is ever opened")
+  })
+
+  it('says an account is linked even when the provider gave no address for it', async () => {
+    await q.saveConnection({ memberId: member.id, provider: 'microsoft', email: null, refreshToken: 'r', scopes: null })
+    expect(await read()).toContain('Rowan (microsoft: linked)')
+  })
+
+  it('tells a caller with nothing linked where to link it', async () => {
+    expect(await read()).toContain('they can link one at https://hearth.example/connect')
+    await q.saveConnection({ memberId: member.id, provider: 'google', email: 'rowan@gmail.example', refreshToken: 'r', scopes: null })
+    expect(await read()).not.toContain('can link one at')
+  })
+
+  it("carries the caller's own drafts and never another member's", async () => {
+    const sam = await add('Sam')
+    const mine = await q.createDraft({ memberId: member.id, provider: 'google', to: ['school@example.com'], subject: 'Absence', body: 'b' })
+    await q.createDraft({ memberId: sam.id, provider: 'google', to: ['bank@example.com'], subject: 'Loan', body: 'b' })
+    const result = await read()
+    expect(result).toContain(`draft_id ${mine.id}: to school@example.com, "Absence"`)
+    expect(result).not.toContain('Loan')
+  })
+
+  it('carries every proposal still waiting, whoever it was found for', async () => {
+    const sam = await add('Sam')
+    const p = await q.addProposal({ memberId: sam.id, title: 'Athletics carnival', startsAt: new Date('2026-10-14T23:00:00Z'), endsAt: new Date('2026-10-15T02:00:00Z') })
+    expect(await read()).toContain(`proposal_id ${p.id}: "Athletics carnival"`)
+  })
+
+  it('carries the open questions with their ids', async () => {
+    const { row } = await q.askQuestion({ question: 'Who attends Riverbend?', candidate: 'Juno attends Riverbend' })
+    const result = await read()
+    expect(result).toContain(`question_id ${row.id}: Who attends Riverbend?`)
+    expect(result).toContain('would keep: "Juno attends Riverbend"')
+  })
+
+  it("carries the caller's own goals and never another member's", async () => {
+    const sam = await add('Sam')
+    const goal = await q.createGoal({ memberId: member.id, title: 'Bali trip', targetDate: '2026-12-01' })
+    await q.addGoalSteps(goal.id, ['Book flights', 'Pack'])
+    await q.createGoal({ memberId: sam.id, title: 'Sell the car' })
+    const result = await read()
+    expect(result).toContain(`goal_id ${goal.id}: "Bali trip", 0 of 2 steps done`)
+    expect(result).toContain('next: Book flights')
+    expect(result).toContain('target ')
+    expect(result).not.toContain('Sell the car')
+  })
+
+  it('names a goal with no target date or step left by what it has', async () => {
+    const done = await q.createGoal({ memberId: member.id, title: 'Tidy the shed' })
+    const [only] = await q.addGoalSteps(done.id, ['Sort the tools'])
+    await q.setGoalStepDone(only.id, true)
+    const line = (await read()).split('\n').find((l) => l.includes('Tidy the shed'))!
+    expect(line).toBe(`- goal_id ${done.id}: "Tidy the shed", 1 of 1 steps done`)
+  })
+
+  it('names the helpers and the routines kept', async () => {
+    await q.addHelper({ name: 'Chef', role: 'Plans meals. Keeps to allergies.', createdBy: member.id })
+    await q.saveRoutine({ name: 'Sunday reset', steps: 'Clear the fridge', createdBy: member.id })
+    const result = await read()
+    expect(result).toContain('- Chef: Plans meals.')
+    expect(result).not.toContain('Keeps to allergies')
+    expect(result).toContain('Routines kept')
+    expect(result).toContain('Sunday reset')
+  })
+
+  it("carries the caller's latest reports, from the last few days only, and never another member's", async () => {
+    const sam = await add('Sam')
+    await q.addReport({ memberId: member.id, automationId: null, label: 'Camp dates', status: 'ready', body: 'The camp is 3 to 5 March.', helper: 'Researcher' })
+    await q.addReport({ memberId: member.id, automationId: null, label: 'Bills', status: 'held', body: 'Draft', detail: 'Held back: invented a figure.' })
+    await q.addReport({ memberId: sam.id, automationId: null, label: 'Secret', status: 'ready', body: 'Not yours' })
+    const old = await q.addReport({ memberId: member.id, automationId: null, label: 'Ancient', status: 'ready', body: 'Long ago' })
+    await client.query(`update automation_reports set created_at = now() - interval '10 days' where id = $1`, [old.id])
+    const result = await context(member)
+    expect(result).toContain('Reports from your scheduled jobs')
+    expect(result).toContain('Camp dates (Researcher), found this: The camp is 3 to 5 March.')
+    expect(result).toContain('Bills, held back by the checks: Draft [Held back: invented a figure.]')
+    expect(result).not.toContain('Not yours')
+    expect(result).not.toContain('Long ago')
   })
 
   it('carries what the household knows, ids and all', async () => {
     const fact = await q.addMemory('Bin night is Monday', member.id, null)
-    const result = text(await callTool(CONTEXT_TOOL, {}, member))
+    const result = await read()
     expect(result).toContain('Bin night is Monday')
     expect(result).toContain(`[${fact.id}]`)
   })
+
+  it('still says who and when when the store cannot be read', async () => {
+    const { __setDb } = await import('@/lib/db')
+    __setDb({ select: () => { throw new Error('locked') }, execute: () => { throw new Error('locked') } })
+    try {
+      const result = await read()
+      expect(result).toContain('You are acting as Rowan.')
+      expect(result).toContain('can link one at')
+    } finally {
+      __setDb(realDb)
+    }
+  })
+
+  it('is what hearth_context answers', async () => {
+    await q.addMemory('Bin night is Monday', member.id, null)
+    expect(text(await callTool(CONTEXT_TOOL, {}, as(member)))).toContain('Bin night is Monday')
+  })
 })
 
-describe('the key that says who is calling', () => {
-  it('names exactly one member', async () => {
-    const key = await q.issueMcpKey(member.id)
-    expect((await q.memberByMcpKey(key))?.id).toBe(member.id)
+describe('the keys that say who is calling', () => {
+  it('names exactly one member, and which of their keys it is', async () => {
+    const { key, row } = await q.issueMcpKey(member.id, 'Claude Code')
+    const found = await q.memberByMcpKey(key)
+    expect(found?.member.id).toBe(member.id)
+    expect(found?.keyId).toBe(row.id)
+    expect(row.label).toBe('Claude Code')
   })
 
   it('is never stored as itself, so a lost one cannot be read back', async () => {
-    const key = await q.issueMcpKey(member.id)
-    const [row] = await q.allMembers()
-    expect(row.mcpTokenHash).not.toBe(key)
-    expect(row.mcpTokenHash).toMatch(/^[0-9a-f]{64}$/)
+    const { key } = await q.issueMcpKey(member.id, 'Laptop')
+    const [row] = await q.mcpKeysFor(member.id)
+    expect(row.tokenHash).not.toBe(key)
+    expect(row.tokenHash).toMatch(/^[0-9a-f]{64}$/)
+    expect(JSON.stringify(row)).not.toContain(key.split('.')[1])
   })
 
-  it('retires the one it replaces', async () => {
-    const first = await q.issueMcpKey(member.id)
-    const second = await q.issueMcpKey(member.id)
-    expect(await q.memberByMcpKey(first)).toBeNull()
-    expect((await q.memberByMcpKey(second))?.id).toBe(member.id)
+  it('keeps one per client, each working beside the others', async () => {
+    const laptop = await q.issueMcpKey(member.id, 'Laptop')
+    const phone = await q.issueMcpKey(member.id, 'Phone')
+    expect((await q.memberByMcpKey(laptop.key))?.keyId).toBe(laptop.row.id)
+    expect((await q.memberByMcpKey(phone.key))?.keyId).toBe(phone.row.id)
+    expect((await q.mcpKeysFor(member.id)).map((k) => k.label)).toEqual(['Phone', 'Laptop'])
   })
 
-  it('leaves nothing to find once revoked', async () => {
-    const key = await q.issueMcpKey(member.id)
-    await q.revokeMcpKey(member.id)
-    // Its tag still checks: the stored hash is what turns it away.
-    expect(await mcpKeyHolder(key)).toBe(member.id)
-    expect(await q.memberByMcpKey(key)).toBeNull()
+  it('tidies a label and gives a blank one a name', async () => {
+    expect((await q.issueMcpKey(member.id, '  Claude   Desktop  ')).row.label).toBe('Claude Desktop')
+    expect((await q.issueMcpKey(member.id, '   ')).row.label).toBe('MCP client')
+    expect((await q.issueMcpKey(member.id, 'x'.repeat(200))).row.label).toHaveLength(q.MCP_KEY_LABEL_MAX)
+  })
+
+  it('leaves nothing to find once revoked, and the others go on working', async () => {
+    const laptop = await q.issueMcpKey(member.id, 'Laptop')
+    const phone = await q.issueMcpKey(member.id, 'Phone')
+    expect(await q.revokeMcpKey(member.id, laptop.row.id)).toBe(true)
+    // Its tag still checks: the missing row is what turns it away.
+    expect(await mcpKeyHolder(laptop.key)).toBe(member.id)
+    expect(await q.memberByMcpKey(laptop.key)).toBeNull()
+    expect((await q.memberByMcpKey(phone.key))?.member.id).toBe(member.id)
+    expect(await q.revokeMcpKey(member.id, laptop.row.id)).toBe(false)
+  })
+
+  it("cannot be revoked by anyone but its member", async () => {
+    const sam = await add('Sam')
+    const { key, row } = await q.issueMcpKey(member.id, 'Laptop')
+    expect(await q.revokeMcpKey(sam.id, row.id)).toBe(false)
+    expect(await q.memberByMcpKey(key)).not.toBeNull()
   })
 
   it('stops working the moment the member is denied, like every other door', async () => {
-    const key = await q.issueMcpKey(member.id)
-    await q.setMemberAllowed('111', false)
+    const { key } = await q.issueMcpKey(member.id, 'Laptop')
+    await q.saveMember({ id: member.id, name: member.name, email: member.email, allowed: false, isAdmin: false })
     expect(await q.memberByMcpKey(key)).toBeNull()
   })
 
+  it('goes with its member', async () => {
+    const { key } = await q.issueMcpKey(member.id, 'Laptop')
+    await q.deleteMember(member.id)
+    expect(await q.memberByMcpKey(key)).toBeNull()
+    expect(await q.mcpKeysFor(member.id)).toEqual([])
+  })
+
   it('answers nothing to an empty or unknown key', async () => {
-    await q.issueMcpKey(member.id)
+    await q.issueMcpKey(member.id, 'Laptop')
     expect(await q.memberByMcpKey('')).toBeNull()
     expect(await q.memberByMcpKey('not-a-key')).toBeNull()
   })
 
-  it('reads nothing for a key it did not mint, even one stored from before keys carried a tag', async () => {
-    const [id, random] = (await q.issueMcpKey(member.id)).split('.')
-    const legacy = randomToken(32)
-    await client.query('update members set mcp_token_hash = $1 where id = $2', [await hashToken(legacy), member.id])
+  it('reads nothing for a key it did not mint', async () => {
+    const { key } = await q.issueMcpKey(member.id, 'Laptop')
+    const [id, random] = key.split('.')
     const reads = vi.spyOn(client, 'query')
     try {
-      for (const key of ['not-a-key', legacy, `${id}.${random}.${'A'.repeat(43)}`]) {
-        expect(await q.memberByMcpKey(key)).toBeNull()
+      for (const made of ['not-a-key', randomToken(32), `${id}.${random}.${'A'.repeat(43)}`]) {
+        expect(await q.memberByMcpKey(made)).toBeNull()
       }
       expect(reads).not.toHaveBeenCalled()
     } finally {
@@ -322,9 +385,39 @@ describe('the key that says who is calling', () => {
   })
 
   it('names only the member a key was minted for, whoever holds its hash', async () => {
-    const other = await q.upsertMember('222', 'Sam', { allowed: true })
-    const theirs = await mintMcpKey(other.id)
-    await client.query('update members set mcp_token_hash = $1 where id = $2', [await hashToken(theirs), member.id])
+    const sam = await add('Sam')
+    const theirs = await mintMcpKey(sam.id)
+    await client.query(`insert into mcp_keys (member_id, label, token_hash) values ($1, 'stolen', $2)`, [member.id, await hashToken(theirs)])
     expect(await q.memberByMcpKey(theirs)).toBeNull()
+  })
+
+  it('notes when it was last used, once an hour at most', async () => {
+    const { key, row } = await q.issueMcpKey(member.id, 'Laptop')
+    expect(row.lastUsedAt).toBeNull()
+    await q.memberByMcpKey(key)
+    const [first] = await q.mcpKeysFor(member.id)
+    expect(first.lastUsedAt).toBeInstanceOf(Date)
+    await q.memberByMcpKey(key)
+    const [second] = await q.mcpKeysFor(member.id)
+    expect(second.lastUsedAt?.getTime()).toBe(first.lastUsedAt?.getTime())
+    await client.query(`update mcp_keys set last_used_at = now() - interval '2 hours'`)
+    await q.memberByMcpKey(key)
+    const [third] = await q.mcpKeysFor(member.id)
+    expect(third.lastUsedAt!.getTime()).toBeGreaterThan(first.lastUsedAt!.getTime() - 2 * 3600_000 + 60_000)
+  })
+
+  it('lets a key in even when its last use cannot be written down', async () => {
+    const { key } = await q.issueMcpKey(member.id, 'Laptop')
+    const real = client.query.bind(client)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const spy = vi.spyOn(client, 'query').mockImplementation(((sql: string, ...rest: unknown[]) =>
+      /^update "mcp_keys"/i.test(sql) ? Promise.reject(new Error('read only')) : (real as (...a: unknown[]) => unknown)(sql, ...rest)) as never)
+    try {
+      expect((await q.memberByMcpKey(key))?.member.id).toBe(member.id)
+      expect(warn).toHaveBeenCalledWith('[mcp] could not note a key as used:', expect.any(Error))
+    } finally {
+      spy.mockRestore()
+      warn.mockRestore()
+    }
   })
 })

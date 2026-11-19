@@ -4,7 +4,7 @@ import { notionTools } from '@/lib/tools/notion'
 import type { ToolContext } from '@/lib/tools/context'
 
 const fetchMock = vi.fn()
-const ctx = { chatId: '-100', member: null, memberName: 'Rowan', now: new Date(), notices: [] } as ToolContext
+const ctx: ToolContext = { member: null, memberName: 'Rowan', now: new Date() }
 
 const call = (name: string, args: unknown) => {
   const tools = notionTools(ctx) as Record<string, { execute: unknown; inputSchema: { parse: (a: unknown) => unknown } }>

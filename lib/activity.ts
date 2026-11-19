@@ -2,14 +2,15 @@ import { recordActivity } from './db/queries'
 import { describeError } from './errors'
 
 /**
- * The household's record of what the bot changed. Every write a tool makes
- * that goes through is kept as one line a person can read, with who asked and
- * where, so anyone can look back over what was done instead of taking the
- * bot's word for it: Home lists the latest, and /activity a chat's own.
+ * Each member's record of what Hearth changed in their name. Every write a
+ * tool makes that goes through is kept as one line a person can read, with
+ * how it was asked for, so a member can look back over what was done instead
+ * of taking anyone's word for it: Home lists their latest, and so does
+ * recent_activity.
  */
 
-/** Where a change was asked for: a chat turn, a scheduled run, the nightly pass, a member's MCP client, or a click on Home. */
-export type ActivityVia = 'chat' | 'watcher' | 'sweep' | 'mcp' | 'web'
+/** How a change was asked for: through a member's MCP client, by one of their scheduled jobs, or with a click on Home. */
+export type ActivityVia = 'mcp' | 'watcher' | 'web'
 
 type Fields = Record<string, unknown>
 
@@ -20,12 +21,9 @@ const quoted = (v: unknown) => `"${text(v).slice(0, 80)}"`
 const several = (v: unknown) => (Array.isArray(v) ? v.map(text).filter(Boolean).join(', ') : text(v))
 const listName = (v: unknown) => text(v) || 'shopping'
 
-/**
- * How each write reads, from what it was asked and what came back. A tool
- * that posts a line in the chat has already said it in the household's
- * words, and that line is used instead; these cover the rest.
- */
+/** How each write reads, from what it was asked and what came back. */
 const LINES: Record<string, (input: Fields, result: Fields) => string> = {
+  add_family_event: (i, r) => `put ${quoted(r.title ?? i.title)} on the family calendar${r.start_local ? `, ${text(r.start_local)}` : ''}`,
   update_family_event: (i, r) => `changed ${quoted(r.title ?? i.title ?? `event ${text(i.id)}`)} on the family calendar`,
   cancel_family_event: (i, r) => `cancelled ${quoted(r.title ?? `event ${text(i.id)}`)} on the family calendar`,
   propose_family_event: (i) => `proposed ${quoted(i.title)} for the family calendar, waiting on a yes`,
@@ -45,6 +43,7 @@ const LINES: Record<string, (input: Fields, result: Fields) => string> = {
   cancel_draft: (i) => `discarded email draft ${text(i.draft_id)}`,
   create_calendar_event: (i) => `added ${quoted(i.title)} to a personal calendar`,
   notion_append_to_page: () => 'added to a Notion page',
+  jira_create_issue: (i, r) => `added ${text(r.key)} ${quoted(r.summary ?? i.summary)} to the board`,
   jira_update_issue: (i) => `changed ${text(i.key)} on the board`,
   jira_move_issue: (i) => `moved ${text(i.key)} to ${text(i.status)}`,
   jira_comment: (i) => `commented on ${text(i.key)}`,
@@ -61,25 +60,20 @@ const LINES: Record<string, (input: Fields, result: Fields) => string> = {
   pause_automation: (i) => `${i.enabled ? 'resumed' : 'paused'} automation ${text(i.id)}`,
 }
 
-/** A posted line as plain words: the chat's bold and code marks are for the chat. */
-const plain = (line: string) => line.replace(/\*\*|`/g, '').replace(/\s+/g, ' ').trim()
-
 export function describeWrite(tool: string, input: unknown, result: unknown): string {
   const i = (input && typeof input === 'object' ? input : {}) as Fields
   const r = (result && typeof result === 'object' ? result : {}) as Fields
-  const said = typeof r.posted === 'string' ? plain(r.posted) : ''
-  const line = said || LINES[tool]?.(i, r) || tool.replace(/_/g, ' ')
+  const line = LINES[tool]?.(i, r) || tool.replace(/_/g, ' ')
   return line.length > MAX_SUMMARY ? `${line.slice(0, MAX_SUMMARY - 1)}…` : line
 }
 
 /**
  * Keep one write on record. Best effort: the change has already been made,
- * and a record that cannot be written is no reason to fail the turn that made it.
+ * and a record that cannot be written is no reason to fail the call that made it.
  */
-export async function noteActivity(entry: { chatId: string; memberId: number | null; via: ActivityVia; tool: string; input: unknown; result: unknown }): Promise<void> {
+export async function noteActivity(entry: { memberId: number | null; via: ActivityVia; tool: string; input: unknown; result: unknown }): Promise<void> {
   try {
     await recordActivity({
-      chatId: entry.chatId,
       memberId: entry.memberId,
       via: entry.via,
       tool: entry.tool,

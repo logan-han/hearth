@@ -5,9 +5,9 @@ import { describeError } from './errors'
 
 /**
  * What the chain actually did, call by call. Everything here is best effort:
- * a record that cannot be written must never cost the reply it describes.
+ * a record that cannot be written must never cost the run it describes.
  */
-export type ModelOutcome = 'answered' | 'failed' | 'claim_retry'
+export type ModelOutcome = 'answered' | 'failed'
 
 export async function recordModelEvent(event: {
   slot: string
@@ -58,8 +58,6 @@ export type SlotHealth = {
 export type ChainHealth = {
   days: number
   slots: SlotHealth[]
-  /** Chat replies sent back for reporting a change no tool made. */
-  claimRetries: number
   calls: number
 }
 
@@ -74,13 +72,8 @@ export async function chainHealth(days = 7, now: Date = new Date()): Promise<Cha
     .limit(20_000)
 
   const bySlot = new Map<string, { answered: number[]; failed: Map<string, number> }>()
-  let claimRetries = 0
   let calls = 0
   for (const r of rows) {
-    if (r.outcome === 'claim_retry') {
-      claimRetries++
-      continue
-    }
     calls++
     const s = bySlot.get(r.slot) ?? { answered: [] as number[], failed: new Map<string, number>() }
     if (r.outcome === 'answered') s.answered.push(r.ms)
@@ -101,7 +94,7 @@ export async function chainHealth(days = 7, now: Date = new Date()): Promise<Cha
       medianMs: sorted.length ? sorted[Math.floor(sorted.length / 2)] : null,
     }
   })
-  return { days, slots, claimRetries, calls }
+  return { days, slots, calls }
 }
 
 /** Keep a month. Older rows say nothing about the chain as it is now. */
@@ -114,7 +107,7 @@ export async function pruneModelEvents(days = 30, now: Date = new Date()): Promi
 }
 
 /** The calls that ask for an object or a choice back rather than prose. */
-export const STRUCTURED_PURPOSES = ['hearth.verify', 'hearth.decision', 'hearth.gate', 'hearth.claim'] as const
+export const STRUCTURED_PURPOSES = ['hearth.verify', 'hearth.decision'] as const
 
 export type StructuredRecord = Map<string, { attempts: number; noObject: number }>
 

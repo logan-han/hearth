@@ -5,7 +5,7 @@ const { weatherTools } = await import('@/lib/tools/weather')
 const weather = await import('@/lib/providers/weather')
 
 const fetchMock = vi.fn()
-const ctx: ToolContext = { chatId: '-1', member: null, memberName: 'Rowan', now: new Date(), notices: [] }
+const ctx: ToolContext = { member: null, memberName: 'Rowan', now: new Date() }
 const call = (args: unknown) =>
   (weatherTools(ctx).weather.execute as unknown as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)(args, {})
 

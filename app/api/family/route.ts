@@ -12,8 +12,6 @@ import {
   clearList,
   listContents,
   settleProposal,
-  addFamilyEvent,
-  listFamilyEvents,
   deleteMemory,
   answerQuestion,
   getGoal,
@@ -25,6 +23,8 @@ import {
   connectionsFor,
   getHelper,
   deleteHelper,
+  setConnectionReadOnly,
+  deleteConnection,
 } from '@/lib/db/queries'
 import { clientFor } from '@/lib/providers'
 import { UnconfirmedError } from '@/lib/deadline'
@@ -33,14 +33,13 @@ import { noteActivity } from '@/lib/activity'
 import type { Provider } from '@/lib/oauth/providers'
 import { resumeAt } from '@/lib/tools/automation'
 import { hydrateSecrets } from '@/lib/settings'
-import { isBuiltinKind } from '@/lib/watchers'
+import { acceptProposal } from '@/lib/tools/proposals'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-/** A group's goal is the household's; one set in a member's own chat is theirs alone. */
-const homeMaySee = (goal: { chatId: string; memberId: number | null }, viewer: number | null) =>
-  goal.chatId.startsWith('-') || (viewer !== null && goal.memberId === viewer)
+/** A goal, a draft and a reminder are their member's alone. */
+const own = (row: { memberId: number | null }, viewer: number | null) => viewer !== null && row.memberId === viewer
 
 /**
  * One list in full, older ticked items included. Home carries only the ten
@@ -57,9 +56,10 @@ export async function GET(req: Request) {
 }
 
 /**
- * Household mutations from the Home page. Gated on being a recognised member,
- * not an admin: everything here is something any member can already do by
- * asking the bot in the chat, so the web is just a second pair of hands.
+ * Mutations from Home and Connect. Gated on being a recognised member, not an
+ * admin: everything here is something a member can already do from their MCP
+ * client, so the web is just a second pair of hands. What is a member's own
+ * (a goal, a draft, a reminder, a linked account) is theirs alone to change.
  */
 export async function POST(req: Request) {
   const session = await requireMember()
@@ -68,7 +68,19 @@ export async function POST(req: Request) {
   // which may live in the dashboard rather than this instance's environment.
   await hydrateSecrets()
 
-  let body: { action?: string; id?: number; enabled?: boolean; done?: boolean; list?: string; content?: string; fact?: string; status?: string }
+  let body: {
+    action?: string
+    id?: number
+    enabled?: boolean
+    done?: boolean
+    list?: string
+    content?: string
+    fact?: string
+    status?: string
+    provider?: string
+    readOnly?: boolean
+    confirmedDistinct?: boolean
+  }
   try {
     body = await req.json()
   } catch {
@@ -84,27 +96,15 @@ export async function POST(req: Request) {
     }
 
     case 'accept_proposal': {
-      // Claim first, as the chat tool does, so two clicks cannot add it twice.
-      const row = await settleProposal(id, 'accepted')
-      if (!row) return NextResponse.json({ error: `Proposal ${id} is no longer waiting for an answer.` }, { status: 404 })
-      // The same occasion may have reached the calendar another way meanwhile.
-      const clash = (await listFamilyEvents(row.startsAt, row.endsAt)).find(
-        (e) =>
-          !e.cancelled &&
-          e.startsAt.getTime() === row.startsAt.getTime() &&
-          e.title.trim().toLowerCase() === row.title.trim().toLowerCase(),
-      )
-      if (clash) return NextResponse.json({ ok: true, added: false, already: clash.title })
-      const event = await addFamilyEvent({
-        title: row.title,
-        description: row.description,
-        location: row.location,
-        startsAt: row.startsAt,
-        endsAt: row.endsAt,
-        allDay: row.allDay,
-        createdBy: session.memberId,
-      })
-      return NextResponse.json({ ok: true, added: true, id: event.id })
+      // The same accept as accept_event_proposal: added, or held for a named
+      // same-day clash until the member says it is a different occasion, or
+      // refused with why. Never a click that quietly does nothing.
+      const result = await acceptProposal(id, { confirmedDistinct: body.confirmedDistinct === true, memberId: session.memberId })
+      if (result.status === 'failed') return NextResponse.json({ ...result }, { status: 409 })
+      if (result.status === 'added') {
+        await noteActivity({ memberId: session.memberId, via: 'web', tool: 'accept_event_proposal', input: { proposal_id: id }, result })
+      }
+      return NextResponse.json({ ok: true, ...result })
     }
 
     case 'reject_proposal': {
@@ -115,7 +115,7 @@ export async function POST(req: Request) {
 
     case 'pause_automation': {
       const existing = await getAutomation(id)
-      if (!existing) return NextResponse.json({ error: `No reminder ${id}.` }, { status: 404 })
+      if (!existing || !own(existing, session.memberId)) return NextResponse.json({ error: `No reminder ${id} of yours.` }, { status: 404 })
       // A paused automation's next_run_at goes stale, so recompute on resume.
       const enabled = body.enabled === true
       const next = enabled ? resumeAt(existing) : null
@@ -125,17 +125,13 @@ export async function POST(req: Request) {
 
     case 'delete_automation': {
       const existing = await getAutomation(id)
-      if (!existing) return NextResponse.json({ error: `No reminder ${id}.` }, { status: 404 })
-      // Built in means the tick would only put it back; a pause is the off switch.
-      if (isBuiltinKind(existing.kind)) {
-        return NextResponse.json({ error: `${existing.label} is built in. Pause it instead.` }, { status: 400 })
-      }
+      if (!existing || !own(existing, session.memberId)) return NextResponse.json({ error: `No reminder ${id} of yours.` }, { status: 404 })
       if (!(await deleteAutomation(id))) return NextResponse.json({ error: `No reminder ${id}.` }, { status: 404 })
       return NextResponse.json({ ok: true })
     }
 
     case 'forget_memory': {
-      // Soft, as in the chat: the fact stops being Known but stays as history.
+      // Soft, as the forget tool is: the fact stops being Known but stays as history.
       const row = await deleteMemory(id)
       if (!row) return NextResponse.json({ error: `Nothing remembered as ${id}.` }, { status: 404 })
       return NextResponse.json({ ok: true, forgotten: row.content })
@@ -150,19 +146,19 @@ export async function POST(req: Request) {
     }
 
     case 'toggle_goal_step': {
-      // As for closing: a group's goal is anyone's to tick, a member's own theirs alone.
+      // As for closing: a goal is its owner's alone to tick.
       const step = await getGoalStep(id)
       const goal = step ? await getGoal(step.goalId) : undefined
-      if (!goal || !homeMaySee(goal, session.memberId)) return NextResponse.json({ error: `No step ${id}.` }, { status: 404 })
+      if (!goal || !own(goal, session.memberId)) return NextResponse.json({ error: `No step ${id}.` }, { status: 404 })
       const row = await setGoalStepDone(id, body.done === true)
       return NextResponse.json({ ok: true, done: row!.done })
     }
 
     case 'close_goal': {
       if (body.status !== 'done' && body.status !== 'dropped') return NextResponse.json({ error: 'A goal closes as done or dropped.' }, { status: 400 })
-      // Home lists the groups' goals and the viewer's own; another member's private one is theirs to close.
+      // Home lists the viewer's own goals; another member's is theirs to close.
       const goal = await getGoal(id)
-      if (!goal || !homeMaySee(goal, session.memberId)) {
+      if (!goal || !own(goal, session.memberId)) {
         return NextResponse.json({ error: `No goal ${id}.` }, { status: 404 })
       }
       const closed = await closeGoal(id, body.status)
@@ -179,14 +175,14 @@ export async function POST(req: Request) {
       if (!draft || draft.memberId !== session.memberId) return NextResponse.json({ error: `No draft ${id} of yours.` }, { status: 404 })
       if (body.action === 'discard_draft') {
         if (!(await markDraft(id, 'cancelled'))) return NextResponse.json({ error: `That draft is already ${draft.status}.` }, { status: 409 })
-        await noteActivity({ chatId: draft.chatId, memberId: draft.memberId, via: 'web', tool: 'cancel_draft', input: { draft_id: id }, result: {} })
+        await noteActivity({ memberId: draft.memberId, via: 'web', tool: 'cancel_draft', input: { draft_id: id }, result: {} })
         return NextResponse.json({ ok: true, discarded: draft.subject })
       }
       // Linked read-only since the draft was written, the account sends nothing, click or no click.
       if ((await connectionsFor(draft.memberId)).some((c) => c.provider === draft.provider && c.readOnly)) {
         return NextResponse.json({ error: readOnlyRefusal(draft.provider as Provider) }, { status: 409 })
       }
-      // The click is the yes. Claimed first, as in the chat, so two clicks cannot send it twice.
+      // The click is the yes. Claimed first, as send_email does, so two clicks cannot send it twice.
       if (!(await markDraft(id, 'sent'))) return NextResponse.json({ error: `That draft is already ${draft.status}.` }, { status: 409 })
       const to = draft.recipients.split(',').map((s) => s.trim()).filter(Boolean)
       try {
@@ -204,15 +200,30 @@ export async function POST(req: Request) {
         await markDraft(id, 'pending', 'sent')
         return NextResponse.json({ error: describeAccountError(err) }, { status: 502 })
       }
-      await noteActivity({ chatId: draft.chatId, memberId: draft.memberId, via: 'web', tool: 'send_email', input: { draft_id: id }, result: { to: draft.recipients, subject: draft.subject } })
+      await noteActivity({ memberId: draft.memberId, via: 'web', tool: 'send_email', input: { draft_id: id }, result: { to: draft.recipients, subject: draft.subject } })
       return NextResponse.json({ ok: true, sent: draft.subject })
     }
 
     case 'remove_helper': {
-      // Anyone can, as in the chat; jobs already handed to it are left to the bot itself.
+      // Anyone can, as with remove_helper; jobs already handed to it are left to Hearth itself.
       const helper = await getHelper(id)
       if (!helper || !(await deleteHelper(id))) return NextResponse.json({ error: `No helper ${id}.` }, { status: 404 })
       return NextResponse.json({ ok: true, removed: helper.name })
+    }
+
+    case 'set_read_only':
+    case 'unlink_account': {
+      // One of the signed-in member's own accounts, never anyone else's.
+      const provider = body.provider
+      if (provider !== 'google' && provider !== 'microsoft') return NextResponse.json({ error: 'Which account?' }, { status: 400 })
+      if (session.memberId === null) return NextResponse.json({ error: 'Only a family member has accounts linked here.' }, { status: 403 })
+      if (body.action === 'unlink_account') {
+        await deleteConnection(session.memberId, provider)
+        return NextResponse.json({ ok: true, unlinked: provider })
+      }
+      const row = await setConnectionReadOnly(session.memberId, provider, body.readOnly === true)
+      if (!row) return NextResponse.json({ error: `No ${provider} account of yours is linked.` }, { status: 404 })
+      return NextResponse.json({ ok: true, readOnly: row.readOnly })
     }
 
     case 'toggle_item': {
@@ -227,7 +238,7 @@ export async function POST(req: Request) {
     }
 
     case 'clear_ticked': {
-      // The ticked ones only, as clearing a list does in the chat: nothing still to get goes.
+      // The ticked ones only, as clear_list does by default: nothing still to get goes.
       const cleared = await clearList(id, true)
       return NextResponse.json({ ok: true, cleared: cleared.length })
     }

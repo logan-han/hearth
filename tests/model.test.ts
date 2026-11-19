@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
-  withModelFallback, modelChain, localSlots, geminiSlots, openrouterSlots, gateSlot, orderForStructured,
+  withModelFallback, modelChain, localSlots, geminiSlots, openrouterSlots, orderForStructured,
   EndOnFailure, type ModelSlot,
 } from '@/lib/model'
 
@@ -24,7 +24,6 @@ describe('tiers', () => {
     expect(localSlots()).toHaveLength(0)
     expect(geminiSlots()).toHaveLength(0)
     expect(openrouterSlots()).toHaveLength(0)
-    expect(gateSlot()).toBeNull()
   })
 
   it('need a base URL and a model for the local tier', () => {
@@ -79,13 +78,6 @@ describe('modelChain ordering', () => {
       'openrouter:minimax/minimax-m3:free',
       'gemini:gemini-3.5-flash-lite',
     ])
-  })
-
-  it('gates on the first slot in the chain', () => {
-    process.env.GEMINI_API_KEY = 'k'
-    process.env.GEMINI_MODEL = 'gemini-3.5-flash-lite'
-    process.env.OPENROUTER_API_KEY = 'sk-or-test'
-    expect(gateSlot()?.name).toBe('openrouter:~deepseek/deepseek-flash-latest')
   })
 
   it('promotes OpenRouter to first when there is no local endpoint, with Gemini behind it', () => {

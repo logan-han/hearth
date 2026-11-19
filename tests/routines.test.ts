@@ -4,8 +4,7 @@ import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
 import type { ToolContext } from '@/lib/tools/context'
 import { routineTools } from '@/lib/tools/routines'
-import { routeGroups } from '@/lib/tools/router'
-import { ambientContext } from '@/lib/agent'
+import { context } from '@/lib/mcp'
 import { describeWrite } from '@/lib/activity'
 import { CUSTOM_AUTOMATION_TOOLS } from '@/lib/tools'
 
@@ -18,8 +17,8 @@ const routines = () => routineTools(ctx)
 
 beforeEach(async () => {
   client = (await freshDb()).client
-  const member = await q.upsertMember('111', 'Rowan', { allowed: true })
-  ctx = { chatId: '-100', member, memberName: 'Rowan', now: new Date(), notices: [], shared: true }
+  const member = await q.saveMember({ name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false })
+  ctx = { member, memberName: 'Rowan', now: new Date() }
 })
 afterEach(async () => closeDb(client))
 
@@ -72,12 +71,10 @@ describe('routines', () => {
     expect(await call(routines(), 'save_routine', { name: 'x', steps: ['  '] })).toEqual({ error: 'A routine needs at least one step.' })
   })
 
-  it('are in the chat context by name, and their names bring the routine tools', async () => {
+  it('are in an MCP client\'s context by name, and a scheduled run can run one', async () => {
     await call(routines(), 'save_routine', { name: 'Sunday reset', steps: ['x'] })
-    const ambient = await ambientContext('-100', ctx.member, 'chat')
-    expect(ambient.text).toContain('Routines kept (run_routine by name when one is asked for, then carry out its steps): Sunday reset.')
-    expect(routeGroups('can you do the sunday reset', { routineNames: ambient.routineNames })).toContain('routines')
-    expect(routeGroups('keep that as our routine')).toContain('routines')
+    const text = await context(ctx.member!, new Date())
+    expect(text).toContain('Routines kept (run_routine by name when one is asked for, then carry out its steps): Sunday reset.')
     expect(CUSTOM_AUTOMATION_TOOLS).toContain('run_routine')
   })
 

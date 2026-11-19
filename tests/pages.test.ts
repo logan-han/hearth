@@ -4,6 +4,7 @@ import { createElement, type ReactElement } from 'react'
 import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
+import type { Member } from '@/lib/db/schema'
 import { recordModelEvent } from '@/lib/model-events'
 import { jar } from './helpers/next-headers'
 
@@ -33,6 +34,7 @@ const { default: PageError } = await import('@/app/error')
 const { createSession } = await import('@/lib/auth/session')
 
 let client: PGlite
+let ada: Member
 
 const html = (page: ReactElement) => renderToStaticMarkup(page)
 const home = async (month?: string) => html(await HomePage({ searchParams: Promise.resolve({ month }) }))
@@ -49,14 +51,13 @@ beforeEach(async () => {
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
   process.env.APP_URL = 'https://hearth.example'
   process.env.ADMIN_EMAILS = 'rowan@hearth.example'
-  process.env.TELEGRAM_BOT_TOKEN = '123:abc'
   process.env.GEMINI_API_KEY = 'k'
   process.env.GEMINI_MODEL = 'gemini-flash'
   const { resetKeyCache } = await import('@/lib/crypto')
   resetKeyCache()
   client = (await freshDb()).client
-  await q.saveMember({ telegramUserId: '222', name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
-  await q.saveMember({ telegramUserId: '333', name: 'Juno', email: 'juno@hearth.example', allowed: true, isAdmin: false })
+  ada = await q.saveMember({ name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
+  await q.saveMember({ name: 'Juno', email: 'juno@hearth.example', allowed: true, isAdmin: false })
 })
 afterEach(async () => closeDb(client))
 
@@ -70,7 +71,7 @@ describe('Home', () => {
 
   it('asks a member who has since been removed to sign in again', async () => {
     await asMember()
-    await q.setMemberAllowed('222', false)
+    await q.saveMember({ id: ada.id, name: 'Ada', email: ada.email, allowed: false, isAdmin: false })
     expect(await home()).toContain(SIGN_IN)
   })
 
@@ -86,21 +87,44 @@ describe('Home', () => {
     expect(page).not.toContain('href="/system"')
   })
 
-  it('sends an admin to setup while there is no bot token, and shows the house once there is', async () => {
+  it("shows a member their own reports, keys and drafts, and where to connect a client, and never another member's", async () => {
+    const juno = (await q.allMembers()).find((m) => m.name === 'Juno')!
+    await q.addReport({ memberId: ada.id, automationId: null, label: 'Camp dates', status: 'held', body: 'Camp is 3 to 5 March', detail: 'Held back: unsure' })
+    await q.addReport({ memberId: juno.id, automationId: null, label: 'Juno only', status: 'ready', body: 'Not for Ada' })
+    await q.issueMcpKey(ada.id, 'Claude on the laptop')
+    await q.issueMcpKey(juno.id, 'Juno phone')
+    await q.createDraft({ memberId: ada.id, provider: 'google', to: ['school@example.com'], subject: 'Absence note', body: 'b' })
+    await q.addProposal({ title: 'Working bee', startsAt: new Date(Date.now() + 86_400_000), endsAt: new Date(Date.now() + 90_000_000) })
+    await asMember()
+
+    const page = await home()
+    expect(page).toContain('Reports')
+    expect(page).toContain('Camp dates')
+    expect(page).toContain('held back')
+    expect(page).not.toContain('Juno only')
+    expect(page).toContain('Claude and other MCP clients')
+    expect(page).toContain('Claude on the laptop')
+    expect(page).not.toContain('Juno phone')
+    expect(page).toContain('https://hearth.example/api/mcp')
+    expect(page).toContain('Absence note')
+    expect(page).toContain('Working bee')
+  })
+
+  it('sends an admin to setup while nobody is in the family, and shows the house once someone is', async () => {
+    await client.query('delete from members')
     await asAdmin()
-    delete process.env.TELEGRAM_BOT_TOKEN
     await expect(home()).rejects.toMatchObject({ digest: expect.stringContaining('/setup') })
 
-    process.env.TELEGRAM_BOT_TOKEN = '123:abc'
+    await q.saveMember({ name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: true })
     const page = await home('2026-09')
     expect(page).toContain('September 2026')
     expect(page).toContain('href="/settings"')
   })
 
-  it('leaves a member on Home whatever state the bot is in', async () => {
-    delete process.env.TELEGRAM_BOT_TOKEN
-    await asMember()
-    expect(await home()).toContain('Next up')
+  it('tells an admin with no member behind their address that a key needs one', async () => {
+    await asAdmin()
+    const page = await home()
+    expect(page).toContain('A key acts as a family member, and this address is not one yet.')
   })
 })
 
@@ -117,23 +141,25 @@ describe('System', () => {
     await asAdmin()
     const page = html(await SystemPage())
     expect(page).toContain('Mailboxes linked')
+    expect(page).toContain('MCP keys')
     expect(page).toContain('No model calls recorded yet.')
-    expect(page).toContain('No messages in the last fortnight.')
-    expect(page).toContain('Nothing answered yet.')
+    expect(page).toContain('Nothing changed in the last fortnight.')
+    expect(page).toContain('No scheduled run yet.')
+    expect(page).toContain('No keys yet.')
+    expect(page).toContain('None scheduled.')
     expect(page).toContain('no tick recorded yet')
+    expect(page).not.toMatch(/chat|telegram/i)
   })
 
-  it('shows an admin how the chain has fared, the traffic and the rooms', async () => {
-    await q.rememberChat('-100', 'group', 'The Kitchen')
-    await q.rememberChat('444', 'private', null)
-    await q.noteStranger('-100', { id: '999', name: 'Unknown' })
-    await q.recordMessage({ chatId: '-100', role: 'user', content: 'hi' })
-    await q.recordMessage({ chatId: '-100', role: 'assistant', content: 'hello', model: 'gemini:gemini-flash' })
-    await recordModelEvent({ slot: 'gemini:gemini-flash', purpose: 'hearth.chat', outcome: 'answered', ms: 1200 })
-    await recordModelEvent({ slot: 'gemini:gemini-flash', purpose: 'hearth.chat', outcome: 'failed', error: '429 Too Many Requests' })
+  it('shows an admin how the chain has fared, the changes, the keys and the reminders', async () => {
+    await q.recordActivity({ memberId: ada.id, via: 'mcp', tool: 'add_to_list', summary: 'added milk' })
+    await q.recordActivity({ memberId: ada.id, via: 'watcher', tool: 'propose_family_event', summary: 'proposed' })
+    await recordModelEvent({ slot: 'gemini:gemini-flash', purpose: 'hearth.watcher', outcome: 'answered', ms: 1200 })
+    await recordModelEvent({ slot: 'gemini:gemini-flash', purpose: 'hearth.watcher', outcome: 'failed', error: '429 Too Many Requests' })
     // A slot since taken out of the chain still shows what it did this week.
-    await recordModelEvent({ slot: 'openrouter:retired', purpose: 'hearth.chat', outcome: 'answered', ms: 800 })
-    await recordModelEvent({ slot: 'gemini:gemini-flash', purpose: 'hearth.chat', outcome: 'claim_retry' })
+    await recordModelEvent({ slot: 'openrouter:retired', purpose: 'hearth.decision', outcome: 'answered', ms: 800 })
+    await q.issueMcpKey(ada.id, 'Claude Desktop')
+    await q.addAutomation({ memberId: ada.id, label: 'Bin night', cronExpr: '0 19 * * 1', instruction: 'x', nextRunAt: new Date(Date.now() + 86_400_000) })
     await q.recordTick(new Date())
     await asAdmin()
 
@@ -143,12 +169,11 @@ describe('System', () => {
     expect(page).toContain('skipped 1 time: rate limited ×1')
     expect(page).toContain('openrouter:retired')
     expect(page).toContain('never skipped')
-    expect(page).toContain('1 reply was sent back')
-    expect(page).toContain('Grey is what the family asked')
+    expect(page).toContain('Grey is what members changed')
     expect(page).toContain('100%')
-    expect(page).toContain('The Kitchen')
-    expect(page).toContain('Someone (444)')
-    expect(page).toContain('Quiet here: 1 person unrecognised')
+    expect(page).toContain('Claude Desktop')
+    expect(page).toContain('not used yet')
+    expect(page).toContain('Bin night')
     expect(page).toContain('just now')
     expect(page).not.toContain(DENIED)
   })
@@ -163,12 +188,14 @@ describe('Settings', () => {
     expect(page).not.toContain('Who answers')
   })
 
-  it('shows an admin the family, the chain and the settings', async () => {
+  it('shows an admin the family, the chain and the settings, with nothing of a chat bot', async () => {
     await asAdmin()
     const page = html(await SettingsPage())
     expect(page).toContain('juno@hearth.example')
     expect(page).toContain('Who answers')
+    expect(page).toContain('Sign everyone out')
     expect(page).not.toContain(DENIED)
+    expect(page).not.toMatch(/telegram|webhook|bot token/i)
   })
 })
 
@@ -179,12 +206,14 @@ describe('Setup', () => {
     expect(html(await SetupPage())).toContain(DENIED)
   })
 
-  it('walks an admin through the first run, with the family listed', async () => {
-    delete process.env.TELEGRAM_BOT_TOKEN
+  it('walks an admin through the first run, with the family listed by address', async () => {
     await asAdmin()
     const page = html(await SetupPage())
     expect(page).toContain('Light the fire')
     expect(page).toContain('Juno')
+    expect(page).toContain('juno@hearth.example')
+    expect(page).toContain('Connect an MCP client')
+    expect(page).not.toMatch(/telegram|botfather|webhook/i)
   })
 })
 

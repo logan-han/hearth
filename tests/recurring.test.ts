@@ -138,7 +138,7 @@ describe('recurring_payments', () => {
     vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockReset()
     client = (await freshDb()).client
-    ctx = { chatId: '-100', member: null, memberName: 'Rowan', now: new Date('2026-10-10T02:00:00Z'), notices: [] }
+    ctx = { member: null, memberName: 'Rowan', now: new Date('2026-10-10T02:00:00Z') }
   })
   afterEach(async () => {
     vi.unstubAllGlobals()

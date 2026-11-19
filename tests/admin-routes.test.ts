@@ -4,8 +4,6 @@ import { freshDb, closeDb } from './helpers/db'
 import { jar } from './helpers/next-headers'
 
 vi.mock('next/headers', async () => ({ cookies: (await import('./helpers/next-headers')).jar.cookies }))
-const send = vi.hoisted(() => vi.fn(async () => {}))
-vi.mock('@/lib/telegram', () => ({ send, typing: vi.fn(), bot: vi.fn() }))
 
 const { GET, POST } = await import('@/app/api/admin/settings/route')
 const { POST: LOGOUT } = await import('@/app/api/admin/logout/route')
@@ -111,46 +109,21 @@ describe('the settings API respects the allowlist', () => {
     expect(process.env.TAVILY_API_KEY).toBe('tvly-pasted')
   })
 
-  it("takes a name the bot can answer to, and a manner of a line or two", async () => {
+  it('takes a name Hearth can go by, and nothing else', async () => {
     const bad = await post({ key: 'ASSISTANT_NAME', value: 'Pip the Great!' })
     expect(bad.status).toBe(400)
     expect((await bad.json()).error).toContain('one or two words of letters')
     expect((await post({ key: 'ASSISTANT_NAME', value: ' Pip ' })).status).toBe(200)
     expect(process.env.ASSISTANT_NAME).toBe('Pip')
-    const long = await post({ key: 'ASSISTANT_PERSONA', value: 'x'.repeat(301) })
-    expect(long.status).toBe(400)
-    expect((await post({ key: 'ASSISTANT_PERSONA', value: 'warm and brief' })).status).toBe(200)
   })
 
-  it('accepts the Telegram settings, which are dashboard-managed now', async () => {
-    const res = await post({ key: 'ALLOWED_TELEGRAM_IDS', value: '111, 222' })
-    expect(res.status).toBe(200)
-    expect(process.env.ALLOWED_TELEGRAM_IDS).toBe('111, 222')
-  })
-
-  it('holds a bot token saved from its own row to the check the Telegram panel makes', async () => {
-    const telegram = (reply: unknown) => fetchMock.mockResolvedValueOnce({ json: async () => reply })
-
-    const pasted = await post({ key: 'TELEGRAM_BOT_TOKEN', value: '123456' })
-    expect(pasted.status).toBe(400)
-    expect((await pasted.json()).error).toContain('does not look like a bot token')
+  it('refuses the chat bot settings that are gone, whatever is pasted', async () => {
+    for (const key of ['TELEGRAM_BOT_TOKEN', 'ALLOWED_TELEGRAM_IDS', 'AMBIENT_MODE', 'ASSISTANT_PERSONA']) {
+      const res = await post({ key, value: 'x' })
+      expect(res.status, key).toBe(400)
+      expect(process.env[key]).toBeUndefined()
+    }
     expect(fetchMock).not.toHaveBeenCalled()
-
-    telegram({ ok: false, description: 'Unauthorized' })
-    const rejected = await post({ key: 'TELEGRAM_BOT_TOKEN', value: '123456:WRONG' })
-    expect(rejected.status).toBe(400)
-    expect((await rejected.json()).error).toContain('Unauthorized')
-    expect(process.env.TELEGRAM_BOT_TOKEN).toBeUndefined()
-
-    telegram({ ok: true, result: { username: 'hearth_bot' } })
-    expect((await post({ key: 'TELEGRAM_BOT_TOKEN', value: '123456:GOOD-token\n' })).status).toBe(200)
-    expect(String(fetchMock.mock.calls.at(-1)![0])).toContain('/bot123456:GOOD-token/getMe')
-    expect(process.env.TELEGRAM_BOT_TOKEN).toBe('123456:GOOD-token')
-
-    // Removing it is a choice, not a paste, and asks nothing of Telegram.
-    expect((await post({ key: 'TELEGRAM_BOT_TOKEN', value: '' })).status).toBe(200)
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(process.env.TELEGRAM_BOT_TOKEN).toBeUndefined()
   })
 
   it('refuses a missing key and a malformed body', async () => {
@@ -159,10 +132,16 @@ describe('the settings API respects the allowlist', () => {
     expect(bad.status).toBe(400)
   })
 
-  it('treats an empty value as a reset', async () => {
+  it('treats an empty value, or none at all, as a reset', async () => {
     await post({ key: 'GEMINI_MODEL', value: 'temp' })
     expect((await post({ key: 'GEMINI_MODEL', value: '' })).status).toBe(200)
     expect(process.env.GEMINI_MODEL).toBeUndefined()
+    await post({ key: 'GEMINI_MODEL', value: 'temp' })
+    expect((await post({ key: 'GEMINI_MODEL' })).status).toBe(200)
+    expect(process.env.GEMINI_MODEL).toBeUndefined()
+    await post({ key: 'TIMEZONE', value: 'Australia/Perth' })
+    expect((await post({ key: 'TIMEZONE', value: '' })).status).toBe(200)
+    expect(process.env.TIMEZONE).toBeUndefined()
   })
 
   it('returns the refreshed list, still without secret values', async () => {
@@ -217,9 +196,9 @@ describe('signing out', () => {
     expect(await readSession()).not.toBeNull()
   })
 
-  it('signs every browser out, and voids every link still out, when an admin asks for everywhere', async () => {
+  it('signs every browser out, and voids every account link still under way, when an admin asks for everywhere', async () => {
     const other = await elsewhere()
-    const link = await signState({ tg: '111', name: 'Rowan', chat: '' }, '30m')
+    const link = await signState({ purpose: 'link', member: 1 }, '30m')
     await signIn()
     const res = await logout(true)
     expect(res.status).toBe(303)
@@ -243,7 +222,7 @@ describe('admin sign-in through the shared OAuth callback', () => {
   const tokenReply = (body: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) })
 
   const callback = async (email: string, extra: Record<string, unknown> = {}) => {
-    const state = await signState({ tg: '', name: 'Administrator', chat: '', purpose: 'signin' }, '10m')
+    const state = await signState({ purpose: 'signin' }, '10m')
     fetchMock.mockResolvedValueOnce(tokenReply({ access_token: 'a', id_token: idToken(email), ...extra }))
     return completeAuth(
       new Request(`https://hearth.example/api/oauth/google/callback?code=c&state=${encodeURIComponent(state)}`),
@@ -251,14 +230,15 @@ describe('admin sign-in through the shared OAuth callback', () => {
     )
   }
 
-  it('starts without a link token, unlike the member flow', async () => {
+  it('starts without a session, unlike linking a mailbox', async () => {
     const res = await startAuth(new Request('https://hearth.example/api/oauth/google?signin=1'), 'google')
     expect(res.status).toBe(307)
     expect(res.headers.get('location')).toContain('accounts.google.com')
   })
 
-  it('still refuses the member flow with no token', async () => {
-    expect((await startAuth(new Request('https://hearth.example/api/oauth/google'), 'google')).status).toBe(400)
+  it('sends a link asked for without a session back to Connect', async () => {
+    const res = await startAuth(new Request('https://hearth.example/api/oauth/google'), 'google')
+    expect(res.headers.get('location')).toBe('https://hearth.example/connect')
   })
 
   it('signs a recognised address in and lands on the dashboard at the root', async () => {
@@ -276,14 +256,14 @@ describe('admin sign-in through the shared OAuth callback', () => {
 
   it('signs an ordinary member in as a member, not an admin', async () => {
     const q = await import('@/lib/db/queries')
-    await q.saveMember({ telegramUserId: '222', name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
+    await q.saveMember({ name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
     await callback('ada@hearth.example')
     const { readSession } = await import('@/lib/auth/session')
     expect((await readSession())?.role).toBe('member')
   })
 
   it('refuses when the provider will not say who signed in', async () => {
-    const state = await signState({ tg: '', name: 'Administrator', chat: '', purpose: 'signin' }, '10m')
+    const state = await signState({ purpose: 'signin' }, '10m')
     fetchMock.mockResolvedValueOnce(tokenReply({ access_token: 'a' }))
     const res = await completeAuth(
       new Request(`https://hearth.example/api/oauth/google/callback?code=c&state=${encodeURIComponent(state)}`),
@@ -300,18 +280,16 @@ describe('admin sign-in through the shared OAuth callback', () => {
 
   it('doubles as the mailbox link when the provider hands back a refresh token', async () => {
     const q = await import('@/lib/db/queries')
-    await q.saveMember({ telegramUserId: '222', name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
+    const member = await q.saveMember({ name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
     const res = await callback('ada@hearth.example', { refresh_token: 'rt-1', scope: 'mail calendar' })
     expect(res.status).toBe(307)
-    const member = (await q.memberByTelegramId('222'))!
     const conn = await q.connectionFor(member.id, 'google')
     expect(conn).toMatchObject({ provider: 'google', email: 'ada@hearth.example' })
   })
 
   it('never repoints an existing link at a different account', async () => {
     const q = await import('@/lib/db/queries')
-    await q.saveMember({ telegramUserId: '222', name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
-    const member = (await q.memberByTelegramId('222'))!
+    const member = await q.saveMember({ name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
     await q.saveConnection({ memberId: member.id, provider: 'google', email: 'other@gmail.com', refreshToken: 'rt-old', scopes: null })
     await callback('ada@hearth.example', { refresh_token: 'rt-new' })
     const conn = (await q.connectionFor(member.id, 'google'))!
@@ -329,9 +307,9 @@ describe('admin sign-in through the shared OAuth callback', () => {
   })
 
   it('cannot be reached by replaying a member link-state', async () => {
-    // A /connect state has purpose 'link', so it takes the linking path and is
-    // rejected for want of a refresh token rather than creating a session.
-    const state = await signState({ tg: '111', name: 'Rowan', chat: '-100' }, '10m')
+    // A link state takes the linking path, and is turned away for want of a
+    // member behind it rather than creating a session.
+    const state = await signState({ purpose: 'link', member: 1 }, '10m')
     fetchMock.mockResolvedValueOnce(tokenReply({ access_token: 'a', id_token: idToken('rowan@hearth.example') }))
     const res = await completeAuth(
       new Request(`https://hearth.example/api/oauth/google/callback?code=c&state=${encodeURIComponent(state)}`),

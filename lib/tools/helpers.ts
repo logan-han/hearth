@@ -1,13 +1,13 @@
 import { tool } from 'ai'
 import { z } from 'zod'
 import { addHelper, listHelpers, helperNamed, deleteHelper, allowedMembers, addAutomation } from '../db/queries'
-import { HELPER_TEMPLATES, templateNamed, helperGroups, roleInBrief, namesSomeone } from '../helpers'
+import { HELPER_TEMPLATES, templateNamed, roleInBrief, namesSomeone } from '../helpers'
 import { isAssistantName, assistantName, timezone } from '../env'
 import { cronAt, formatLocal, localToUtc } from '../cron'
 import { tickGrid, nextTickOnOrAfter } from '../scheduler'
 import { schedule } from './automation'
-import { GROUP_NAMES, type ToolGroup } from './router'
 import type { ToolContext } from './context'
+import { requireMember } from './context'
 
 const HOUR_MS = 3_600_000
 
@@ -26,56 +26,50 @@ export function helperTools(ctx: ToolContext) {
   return {
     create_helper: tool({
       description:
-        'Add a helper the family can talk to by name and hand jobs to: a specialist role you play, signed with its name. ' +
+        'Add a helper the family can hand jobs to by name: a specialist role Hearth plays, whose reports carry its name. ' +
         `${HELPER_TEMPLATES.map((t) => t.name).join(', ')} come ready-made, so give the name alone for those. Anything else needs a role, written as its standing instructions.`,
       inputSchema: z.object({
         name: z.string().describe('What the family will call it: one or two words, e.g. "Chef"'),
         role: z.string().optional().describe('Who it is and what it looks after; leave out for a ready-made one'),
-        groups: z
-          .array(z.enum(GROUP_NAMES as [ToolGroup, ...ToolGroup[]]))
-          .optional()
-          .describe('The tool groups its turns start with, beside the everyday ones'),
       }),
-      execute: async ({ name, role, groups }) => {
+      execute: async ({ name, role }) => {
         const clean = name.trim()
         if (!isAssistantName(clean)) return { error: "A helper's name is one or two words of letters, like Chef or Aunty Bot." }
-        if (clean.toLowerCase() === assistantName().toLowerCase()) return { error: `${clean} is the bot's own name. Choose another for the helper.` }
-        // A message calling a family member by name must never be taken for one to a helper.
+        if (clean.toLowerCase() === assistantName().toLowerCase()) return { error: `${clean} is Hearth's own name. Choose another for the helper.` }
+        // "Ask Sam to look into it" must never be taken for a job for a helper called Sam.
         if (namesSomeone(clean, await allowedMembers())) {
-          return { error: `${clean} is what someone in the family is called, so a message to them would go to the helper. Choose another name.` }
+          return { error: `${clean} is what someone in the family is called, so a job meant for them could go to the helper. Choose another name.` }
         }
         const template = templateNamed(clean)
         const standing = role?.trim() || template?.role
         if (!standing) {
           return { error: `Say what ${clean} looks after: every helper needs a role, bar the ready-made ${HELPER_TEMPLATES.map((t) => t.name).join(', ')}.` }
         }
-        const starts = groups ?? template?.groups ?? []
-        const made = await addHelper({ name: clean, role: standing, groups: starts, createdBy: ctx.member?.id ?? null })
+        const made = await addHelper({ name: clean, role: standing, createdBy: ctx.member?.id ?? null })
         if (!made) return { error: `There is already a helper called ${clean}.` }
         return {
           helper: made.name,
           role: made.role,
-          groups: starts,
-          note: `Anyone can talk to it by opening a message with its name ("${made.name}, ..."), and its replies are signed with it. hand_off gives it a job to do in the background.`,
+          note: 'hand_off gives it a job to do in the background, and its report carries its name. Asked to talk to it, take its role up yourself.',
         }
       },
     }),
 
     list_helpers: tool({
-      description: 'The helpers the family can talk to by name, with what each looks after, and the ready-made ones not yet added.',
+      description: 'The helpers the family can hand jobs to by name, with what each looks after, and the ready-made ones not yet added.',
       inputSchema: z.object({}),
       execute: async () => {
         const all = await listHelpers()
         const have = new Set(all.map((h) => h.name.toLowerCase()))
         return {
-          helpers: all.map((h) => ({ name: h.name, role: h.role, groups: helperGroups(h) })),
+          helpers: all.map((h) => ({ name: h.name, role: h.role })),
           ready_to_add: HELPER_TEMPLATES.filter((t) => !have.has(t.name.toLowerCase())).map((t) => ({ name: t.name, role: roleInBrief(t.role) })),
         }
       },
     }),
 
     remove_helper: tool({
-      description: 'Remove a helper. Jobs already handed to it still run, by the bot itself.',
+      description: 'Remove a helper. Jobs already handed to it still run, by Hearth itself.',
       inputSchema: z.object({ name: z.string() }),
       execute: async ({ name }) => {
         const found = await helperNamed(name)
@@ -86,9 +80,9 @@ export function helperTools(ctx: ToolContext) {
 
     hand_off: tool({
       description:
-        'Give a helper a job to do in the background, to post here when it is done: something to look into, a plan to draft, a check to make. ' +
-        'It runs at the next scheduler tick (normally the top of the hour) unless a time is given, as that helper, with read-only tools and the same checks as any scheduled post, signed with its name. ' +
-        'Use it when a request is another helper\'s line of work, or will take more than one reply. Say in your reply who has it and when it will be done.',
+        'Give a helper a job to do in the background: something to look into, a plan to draft, a check to make. ' +
+        'It runs at the next scheduler tick (normally the top of the hour) unless a time is given, as that helper, with read-only tools and the same checks as any scheduled run, ' +
+        'and what it finds is kept as a report for you under its name (list_reports, Home). Say who has it and when it will be done.',
       inputSchema: z.object({
         helper: z.string().describe('Which helper, by name'),
         task: z.string().describe('The job, written as an instruction to the helper, with everything it needs to know: it will not see this conversation'),
@@ -120,8 +114,7 @@ export function helperTools(ctx: ToolContext) {
           when = await nextChance(ctx.now)
         }
         const row = await addAutomation({
-          chatId: ctx.chatId,
-          memberId: ctx.member?.id ?? null,
+          memberId: requireMember(ctx).id,
           label: `${found.name}: ${job.length > 60 ? `${job.slice(0, 59)}…` : job}`,
           cronExpr: cronAt(when),
           instruction: job,
@@ -134,7 +127,7 @@ export function helperTools(ctx: ToolContext) {
           task: job,
           runs_local: formatLocal(when),
           automation_id: row.id,
-          note: `${found.name} posts here when it is done, or stays quiet if there is nothing to say. It is listed with the reminders until then.`,
+          note: `${found.name} leaves a report when it is done, or nothing if there is nothing to say. It is listed with your reminders until then.`,
         }
       },
     }),

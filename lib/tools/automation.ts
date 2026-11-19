@@ -6,15 +6,16 @@ import {
   deleteAutomation,
   setAutomationEnabled,
   getAutomation,
+  reportsFor,
   REPEATS,
   type Repeat,
 } from '../db/queries'
 import { nextRun, isValidCron, formatLocal, localToUtc, cronAt } from '../cron'
 import { tickGrid, fitsGrid, suggestAligned, describeGrid } from '../scheduler'
 import { timezone } from '../env'
-import { isBuiltinKind } from '../watchers'
-import type { Automation } from '../db/schema'
+import type { Automation, AutomationReport } from '../db/schema'
 import type { ToolContext } from './context'
+import { requireMember } from './context'
 
 /** How each way of repeating reads in a listing. */
 export const REPEAT_WORDS: Record<Repeat, string> = {
@@ -39,8 +40,8 @@ export function resumeAt(a: Pick<Automation, 'repeat' | 'cronExpr' | 'nextRunAt'
  * does not parse, never fires, or would not land on one of the scheduler's
  * ticks. An automation fires at the first tick on or after its time, so a
  * schedule the ticks cannot land on would quietly run late, or, if finer than
- * the ticks, at their pace. It is refused while the request is still a
- * conversation, with the nearest schedule that would work.
+ * the ticks, at their pace. It is refused while whoever asked is still there
+ * to choose, with the nearest schedule that would work.
  */
 export async function schedule(cron: string, now: Date): Promise<{ next: Date } | { error: string; scheduler?: string; suggestion?: string }> {
   if (!isValidCron(cron)) return { error: `"${cron}" is not a valid 5-field cron expression.` }
@@ -62,20 +63,41 @@ export async function schedule(cron: string, now: Date): Promise<{ next: Date } 
   return { next }
 }
 
+/** How each report reads to the member it is for. */
+const REPORT_STATUS: Record<string, string> = {
+  ready: 'found this',
+  held: 'held back by the checks',
+  problem: 'ran into a problem',
+}
+
+/** A report as a caller is shown it: which job, when, what it found, and anything the checks changed or held. */
+export function reportView(r: AutomationReport) {
+  return {
+    report_id: r.id,
+    from: r.label,
+    ...(r.helper ? { helper: r.helper } : {}),
+    when: formatLocal(r.createdAt),
+    status: REPORT_STATUS[r.status] ?? r.status,
+    report: r.body,
+    ...(r.detail ? { detail: r.detail } : {}),
+  }
+}
+
 export function automationTools(ctx: ToolContext) {
   return {
     create_automation: tool({
       description:
-        `Schedule an instruction that runs on its own later and posts to this chat. Times are ${timezone()}. ` +
+        `Schedule an instruction that Hearth runs on its own later, with read-only tools. Times are ${timezone()}. ` +
+        'What a run finds is kept as a report for you: hearth_context lists the latest, list_reports reads them, and so does Home. Nothing is posted or sent anywhere. ' +
         'It fires only when the scheduler ticks, normally hourly on the hour, so put 0 in the minute field; ' +
         'a cron that would not land on a tick is refused, with the nearest one that does. ' +
         'repeat says how often: always (a schedule), once (a reminder or a job for later, then it is gone), or until ' +
-        '(checks on a schedule until it finds what it is waiting for, posts it, then stops). ' +
+        '(checks on a schedule until it finds what it is waiting for, reports it, then stops). ' +
         'Examples: "every Monday 7pm remind us to put the bins out" -> cron "0 19 * * 1"; ' +
         '"weekday mornings at 7am summarise today" -> "0 7 * * 1-5"; ' +
         '"remind me tomorrow at 5pm to call the plumber" -> at "<tomorrow>T17:00", repeat once; ' +
         '"let me know when the school emails the camp dates" -> cron "0 8-20 * * *", repeat until, ' +
-        'instruction "Look for new mail from the school with the camp dates; post them when they arrive, otherwise SKIP".',
+        'instruction "Look for new mail from the school with the camp dates; report them when they arrive, otherwise SKIP".',
       inputSchema: z.object({
         label: z.string().describe('Short name, e.g. "bin night"'),
         cron: z
@@ -116,14 +138,13 @@ export function automationTools(ctx: ToolContext) {
         const next = when ?? checked.next
 
         const row = await addAutomation({
-          chatId: ctx.chatId,
-          memberId: ctx.member?.id ?? null,
+          memberId: requireMember(ctx).id,
           label,
           cronExpr: cron,
           instruction,
           nextRunAt: next,
           repeat,
-          // Set up by a helper, it is that helper's job, and posts under its name.
+          // Set up by a helper, it is that helper's job, and its report carries the helper's name.
           helperId: ctx.helper?.id ?? null,
         })
         return {
@@ -138,10 +159,10 @@ export function automationTools(ctx: ToolContext) {
     }),
 
     list_automations: tool({
-      description: 'List the scheduled automations for this chat: reminders, watchers, and jobs waiting to run once or until something happens.',
+      description: 'List your scheduled automations: reminders, check-ins, and jobs waiting to run once or until something happens. What they found is in list_reports.',
       inputSchema: z.object({}),
       execute: async () => {
-        const [rows, grid] = await Promise.all([listAutomations(ctx.chatId), tickGrid()])
+        const [rows, grid] = await Promise.all([listAutomations(requireMember(ctx).id), tickGrid()])
         return {
           timezone: timezone(),
           /** When these can fire at all; null until the scheduler has shown its cadence. */
@@ -159,19 +180,30 @@ export function automationTools(ctx: ToolContext) {
       },
     }),
 
-    delete_automation: tool({
+    list_reports: tool({
       description:
-        'Permanently delete a scheduled automation by id. The built-in watchers (the morning brief, the money snapshot) cannot be deleted, only paused.',
+        'What your scheduled jobs found, newest first: each reminder, goal check-in, watch and helper job that ran, with what it reported. ' +
+        'A report held back by the checks says why, and is the unchecked draft; one that ran into a problem says what went wrong. Reports are kept thirty days.',
+      inputSchema: z.object({
+        days: z.number().int().min(1).max(30).default(7).describe('How far back to look'),
+        limit: z.number().int().min(1).max(50).default(20),
+      }),
+      execute: async ({ days, limit }) => {
+        const since = new Date(ctx.now.getTime() - (days ?? 7) * 86_400_000)
+        const rows = await reportsFor(requireMember(ctx).id, { since, limit: limit ?? 20 })
+        return rows.length
+          ? { timezone: timezone(), reports: rows.map(reportView) }
+          : { reports: [], note: `Nothing reported in the last ${days ?? 7} days.` }
+      },
+    }),
+
+    delete_automation: tool({
+      description: 'Permanently delete one of your scheduled automations by id.',
       inputSchema: z.object({ id: z.number().int() }),
       execute: async ({ id }) => {
         const existing = await getAutomation(id)
-        // Only this chat's, the ones list_automations shows: another chat's is
-        // someone else's to manage, there or from the admin pages.
-        if (existing?.chatId !== ctx.chatId) return { error: `No automation ${id} in this chat.` }
-        // Built in means the tick would only put it back; a pause is the off switch.
-        if (isBuiltinKind(existing.kind)) {
-          return { error: `"${existing.label}" is built in and cannot be deleted. Pause it with pause_automation if it is not wanted.` }
-        }
+        // Only your own, the ones list_automations shows: another member's is theirs to manage.
+        if (!existing || existing.memberId !== requireMember(ctx).id) return { error: `No automation ${id} of yours.` }
         return (await deleteAutomation(id)) ? { deleted: id } : { error: `No automation ${id}.` }
       },
     }),
@@ -181,7 +213,7 @@ export function automationTools(ctx: ToolContext) {
       inputSchema: z.object({ id: z.number().int(), enabled: z.boolean() }),
       execute: async ({ id, enabled }) => {
         const existing = await getAutomation(id)
-        if (existing?.chatId !== ctx.chatId) return { error: `No automation ${id} in this chat.` }
+        if (!existing || existing.memberId !== requireMember(ctx).id) return { error: `No automation ${id} of yours.` }
         // A paused automation's next_run_at goes stale, so recompute on resume.
         const next = enabled ? resumeAt(existing) : null
         const row = await setAutomationEnabled(id, enabled, next ?? undefined)

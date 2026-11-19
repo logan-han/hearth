@@ -39,7 +39,7 @@ function readToken(): Promise<string> {
  * the token was replaced elsewhere. A read for every miss let anyone who knew
  * the host keep Neon awake by fetching made-up addresses every few minutes,
  * which runs out the month's compute hours and suspends the whole deployment.
- * As with the webhook's secret (see recheckSecrets), a request arriving while
+ * As with the tick's keys (see recheckSecrets), a request arriving while
  * a read is under way shares it, and neither a fresh instance's first read nor
  * one that failed uses up the hour.
  */

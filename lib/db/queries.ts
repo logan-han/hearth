@@ -1,9 +1,9 @@
 import { and, asc, desc, eq, gte, inArray, lte, lt, ne, or, sql, isNull, gt, exists, notExists, ilike } from 'drizzle-orm'
 import { db } from './index'
 import {
-  members, chats, connections, messages, familyEvents, memories, memoryQuestions, automations, settings, emailDrafts,
+  members, mcpKeys, connections, familyEvents, memories, memoryQuestions, automations, automationReports, settings, emailDrafts,
   lists, listItems, eventProposals, activity, goals, goalSteps, goalUpdates, helpers, routines,
-  type Member, type Connection, type EmailDraft, type Stranger,
+  type Member, type McpKey, type Connection, type EmailDraft, type AutomationReport,
   type List, type ListItem, type EventProposal, type Memory, type MemoryQuestion, type Activity,
   type Goal, type GoalStep, type GoalUpdate, type Helper, type Routine,
 } from './schema'
@@ -11,51 +11,15 @@ import { encrypt, decrypt, randomToken, hashToken, mintMcpKey, mcpKeyHolder } fr
 import { rankSimilar, findCorrected, DUPLICATE } from '../memory-match'
 import type { Provider } from '../oauth/providers'
 
-export const MAX_HISTORY = 200
-/** Talk younger than this is kept however many rows it runs to: System charts a fortnight of it. */
-export const HISTORY_DAYS = 14
-/** Raw messages the model sees verbatim; older talk arrives as the chat's summary. */
-export const CONTEXT_WINDOW = 15
-
 /* ---------------------------------------------------------------- members */
 
-/**
- * Record a person and refresh their display name. `grant` only ever raises
- * privileges, so seeing a seeded admin speak can never demote them, and an
- * ordinary member can never be silently promoted by a name change.
- */
-export async function upsertMember(
-  telegramUserId: string,
-  name: string,
-  grant: { allowed?: boolean; isAdmin?: boolean } = {},
-): Promise<Member> {
-  const raise: Partial<typeof members.$inferInsert> = { name }
-  if (grant.allowed) raise.allowed = true
-  if (grant.isAdmin) raise.isAdmin = true
-  const [row] = await db()
-    .insert(members)
-    .values({ telegramUserId, name, allowed: grant.allowed ?? false, isAdmin: grant.isAdmin ?? false })
-    .onConflictDoUpdate({ target: members.telegramUserId, set: raise })
-    .returning()
-  return row
-}
-
-export async function setMemberAllowed(telegramUserId: string, allowed: boolean) {
-  const [row] = await db()
-    .update(members)
-    .set(allowed ? { allowed: true } : { allowed: false, isAdmin: false })
-    .where(eq(members.telegramUserId, telegramUserId))
-    .returning()
-  return row
-}
-
-/** Everyone who may talk to the bot, in any room. */
+/** Everyone who may use Hearth: sign in, hold a key, have their accounts read. */
 export async function allowedMembers(): Promise<Member[]> {
   return db().select().from(members).where(eq(members.allowed, true)).orderBy(asc(members.id))
 }
 
-export async function memberByTelegramId(telegramUserId: string): Promise<Member | undefined> {
-  const [row] = await db().select().from(members).where(eq(members.telegramUserId, telegramUserId)).limit(1)
+export async function memberById(id: number): Promise<Member | undefined> {
+  const [row] = await db().select().from(members).where(eq(members.id, id)).limit(1)
   return row
 }
 
@@ -65,318 +29,72 @@ export async function allMembers(): Promise<Member[]> {
 
 /* --------------------------------------------------------------- MCP keys */
 
+/** The longest label a key keeps: enough for "Claude Code on the laptop", not an essay. */
+export const MCP_KEY_LABEL_MAX = 60
+
 /**
- * Mint this member's key for the MCP endpoint, replacing whatever they had:
- * one key per person, so revoking is always unambiguous. The plaintext is
- * returned once and never stored. It carries a tag only this deployment can
- * make (see mintMcpKey), so a made-up one is turned away before any read.
+ * Mint a new key for the MCP endpoint for this member, beside any they
+ * already hold: one per client, so revoking one leaves the others working.
+ * The plaintext is returned once and never stored. It carries a tag only this
+ * deployment can make (see mintMcpKey), so a made-up one is turned away
+ * before any read.
  */
-export async function issueMcpKey(memberId: number): Promise<string> {
+export async function issueMcpKey(memberId: number, label: string): Promise<{ key: string; row: McpKey }> {
   const key = await mintMcpKey(memberId)
-  await db()
-    .update(members)
-    .set({ mcpTokenHash: await hashToken(key), mcpTokenAt: new Date() })
-    .where(eq(members.id, memberId))
-  return key
+  const name = label.trim().replace(/\s+/g, ' ').slice(0, MCP_KEY_LABEL_MAX) || 'MCP client'
+  const [row] = await db()
+    .insert(mcpKeys)
+    .values({ memberId, label: name, tokenHash: await hashToken(key) })
+    .returning()
+  return { key, row }
 }
 
-export async function revokeMcpKey(memberId: number): Promise<void> {
-  await db()
-    .update(members)
-    .set({ mcpTokenHash: null, mcpTokenAt: null })
-    .where(eq(members.id, memberId))
+/** A member's keys, newest first, as the dashboard lists them: never the key itself, which is not kept. */
+export async function mcpKeysFor(memberId: number): Promise<McpKey[]> {
+  return db().select().from(mcpKeys).where(eq(mcpKeys.memberId, memberId)).orderBy(desc(mcpKeys.createdAt), desc(mcpKeys.id))
 }
+
+/** Revoke one of a member's own keys. Its row goes, and with it the only record that would let it in again. */
+export async function revokeMcpKey(memberId: number, keyId: number): Promise<boolean> {
+  const rows = await db()
+    .delete(mcpKeys)
+    .where(and(eq(mcpKeys.id, keyId), eq(mcpKeys.memberId, memberId)))
+    .returning({ id: mcpKeys.id })
+  return rows.length > 0
+}
+
+/** How often a key's last use is written down: once an hour is enough to tell a live key from a forgotten one. */
+const TOUCH_EVERY_MS = 3_600_000
 
 /**
- * Who a bearer key belongs to, or null. A member who has since been denied
- * holds nothing: the allowlist is the one gate, here as everywhere else.
+ * Who a bearer key belongs to and which of their keys it is, or null. A
+ * member who has since been denied holds nothing: the allowlist is the one
+ * gate, here as everywhere else.
  *
  * The key's tag is checked first, with nothing read. Looking up every key sent
  * let anyone who knew the host keep Neon awake by posting made-up ones every
  * few minutes, which runs out the free plan's compute hours. A key whose tag
  * checks was minted here for that member, and its stored hash then says
- * whether it is still theirs: a replaced or revoked one no longer matches.
+ * whether it is still theirs: a revoked one has no row to match.
  */
-export async function memberByMcpKey(key: string): Promise<Member | null> {
+export async function memberByMcpKey(key: string): Promise<{ member: Member; keyId: number } | null> {
   const holder = await mcpKeyHolder(key)
   if (holder === null) return null
   const [row] = await db()
-    .select()
-    .from(members)
-    .where(and(eq(members.id, holder), eq(members.mcpTokenHash, await hashToken(key)), eq(members.allowed, true)))
+    .select({ member: members, keyId: mcpKeys.id, lastUsedAt: mcpKeys.lastUsedAt })
+    .from(mcpKeys)
+    .innerJoin(members, eq(members.id, mcpKeys.memberId))
+    .where(and(eq(mcpKeys.tokenHash, await hashToken(key)), eq(mcpKeys.memberId, holder), eq(members.allowed, true)))
     .limit(1)
-  return row ?? null
-}
-
-/* ------------------------------------------------------------------ chats */
-
-export async function rememberChat(chatId: string, type: string, title: string | null) {
-  // A message from the room is proof the bot is in it, whatever was said before.
-  await db()
-    .insert(chats)
-    .values({ chatId, type, title })
-    .onConflictDoUpdate({ target: chats.chatId, set: { type, title, leftAt: null } })
-}
-
-/** Telegram says the bot was removed from a room, or added back to one it knew. */
-export async function setChatLeft(chatId: string, left: boolean): Promise<void> {
-  await db()
-    .update(chats)
-    .set({ leftAt: left ? new Date() : null })
-    .where(eq(chats.chatId, chatId))
-}
-
-export async function chatSummary(chatId: string): Promise<{ summary: string | null; through: number }> {
-  const [row] = await db()
-    .select({ summary: chats.summary, through: chats.summaryThrough })
-    .from(chats)
-    .where(eq(chats.chatId, chatId))
-    .limit(1)
-  return { summary: row?.summary ?? null, through: row?.through ?? 0 }
-}
-
-export async function setChatSummary(chatId: string, summary: string, through: number): Promise<void> {
-  await db()
-    .update(chats)
-    .set({ summary, summaryThrough: through, summaryAt: new Date() })
-    .where(eq(chats.chatId, chatId))
-}
-
-/** Messages newer than an id, oldest first. */
-export async function messagesAfter(chatId: string, afterId: number, limit = MAX_HISTORY) {
-  return db()
-    .select()
-    .from(messages)
-    .where(and(eq(messages.chatId, chatId), gt(messages.id, afterId)))
-    .orderBy(asc(messages.id))
-    .limit(limit)
-}
-
-export async function strangersIn(chatId: string): Promise<Stranger[]> {
-  const [row] = await db().select().from(chats).where(eq(chats.chatId, chatId)).limit(1)
-  return parseStrangers(row?.strangers)
-}
-
-/** A group the bot is still in, with who there is unrecognised. */
-export type Room = { chatId: string; title: string | null; strangers: Stranger[] }
-
-/** The chats that are a group or supergroup the bot has not left. */
-const liveGroup = () => and(inArray(chats.type, ['group', 'supergroup']), isNull(chats.leftAt))
-
-/** A chat row as a room, its strangers parsed. */
-const toRoom = (r: { chatId: string; title: string | null; strangers: string }): Room => ({
-  chatId: r.chatId,
-  title: r.title,
-  strangers: parseStrangers(r.strangers),
-})
-
-/** The household's rooms: every group the bot is still in, with who there is unrecognised. */
-export async function groupChats(): Promise<Room[]> {
-  const rows = await db()
-    .select()
-    .from(chats)
-    .where(liveGroup())
-    .orderBy(asc(chats.id))
-  return rows.map(toRoom)
-}
-
-/**
- * The groups the bot is still in that this member has talked in, the one
- * they talked in last first. Having spoken there is the evidence the history
- * holds that they belong to the room, and the room they spoke in last is the
- * one they are using.
- */
-export async function roomsOf(memberId: number): Promise<Room[]> {
-  const last = sql`max(${messages.id})`
-  const rows = await db()
-    .select({ chatId: chats.chatId, title: chats.title, strangers: chats.strangers })
-    .from(chats)
-    .innerJoin(messages, and(eq(messages.chatId, chats.chatId), eq(messages.memberId, memberId)))
-    .where(liveGroup())
-    .groupBy(chats.id)
-    .orderBy(desc(last))
-  return rows.map(toRoom)
-}
-
-function parseStrangers(raw: string | undefined | null): Stranger[] {
-  if (!raw) return []
-  try {
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? (parsed as Stranger[]).filter((s) => s && typeof s.id === 'string') : []
-  } catch {
-    return []
+  if (!row) return null
+  if (!row.lastUsedAt || Date.now() - row.lastUsedAt.getTime() > TOUCH_EVERY_MS) {
+    await db()
+      .update(mcpKeys)
+      .set({ lastUsedAt: new Date() })
+      .where(eq(mcpKeys.id, row.keyId))
+      .catch((err: unknown) => console.warn('[mcp] could not note a key as used:', err))
   }
-}
-
-/*
- * The list is changed in the database, in one statement each, rather than
- * read, changed here and written back: updates are handled side by side, and
- * two outsiders noted at once would otherwise leave only the second on the
- * list, with the first in the room and the bot talking.
- */
-
-/** Matches a room whose list already holds this person. */
-const holds = (userId: string) => sql`${chats.strangers}::jsonb @> ${JSON.stringify([{ id: userId }])}::jsonb`
-
-/** Returns true when this is the first time we have seen that stranger here. */
-export async function noteStranger(chatId: string, stranger: Stranger): Promise<boolean> {
-  // True only if a row took it: a stranger reported as flagged but written
-  // nowhere is a room the bot goes on talking in.
-  const written = await db()
-    .update(chats)
-    .set({ strangers: sql`(${chats.strangers}::jsonb || ${JSON.stringify([stranger])}::jsonb)::text` })
-    .where(and(eq(chats.chatId, chatId), sql`not ${holds(stranger.id)}`))
-    .returning({ id: chats.id })
-  return written.length > 0
-}
-
-const without = (userId: string) =>
-  sql`coalesce((select jsonb_agg(e) from jsonb_array_elements(${chats.strangers}::jsonb) e where e->>'id' <> ${userId}), '[]'::jsonb)::text`
-
-export async function clearStranger(chatId: string, userId: string): Promise<void> {
-  await db().update(chats).set({ strangers: without(userId) }).where(and(eq(chats.chatId, chatId), holds(userId)))
-}
-
-/** Vouched for, so a stranger nowhere: a grant made in a DM or on the dashboard unmutes every room they are in. */
-export async function clearStrangerEverywhere(userId: string): Promise<void> {
-  await db().update(chats).set({ strangers: without(userId) }).where(holds(userId))
-}
-
-/**
- * Telegram gives a group a new id when it becomes a supergroup, and the old
- * id is dead from then on. Everything kept under it moves across: the room's
- * row with its stranger flags and summary, its history, automations, drafts
- * and proposals, and the settings keyed by the room, the sweep cursors among
- * them, so the brief does not read the inbox out again. Both ends of the
- * upgrade announce it, so this runs twice and is safe to. Should the new id
- * have a row already (someone spoke there first), it gains the old one's
- * strangers and its summary, which covers the longer history, and a built-in
- * watcher already installed there gives way to the one the household had,
- * paused or not.
- */
-export async function moveChat(from: string, to: string): Promise<void> {
-  if (from === to) return
-  await db().execute(sql`
-    insert into chats (chat_id, type, title, strangers, summary, summary_through, summary_at, created_at)
-    select ${to}, 'supergroup', title, strangers, summary, summary_through, summary_at, created_at
-    from chats where chat_id = ${from}
-    on conflict (chat_id) do update set
-      strangers = (
-        select coalesce(jsonb_agg(e), '[]'::jsonb)::text from (
-          select distinct on (e->>'id') e
-          from jsonb_array_elements(chats.strangers::jsonb || excluded.strangers::jsonb) e
-        ) merged
-      ),
-      summary = coalesce(excluded.summary, chats.summary),
-      summary_through = case when excluded.summary is null then chats.summary_through else excluded.summary_through end,
-      summary_at = case when excluded.summary is null then chats.summary_at else excluded.summary_at end
-  `)
-  await db().delete(chats).where(eq(chats.chatId, from))
-  await db().update(messages).set({ chatId: to }).where(eq(messages.chatId, from))
-  await db().execute(sql`
-    delete from automations
-    where chat_id = ${to} and kind in (select kind from automations where chat_id = ${from} and kind is not null)
-  `)
-  await db().update(automations).set({ chatId: to }).where(eq(automations.chatId, from))
-  await db().update(emailDrafts).set({ chatId: to }).where(eq(emailDrafts.chatId, from))
-  await db().update(eventProposals).set({ chatId: to }).where(eq(eventProposals.chatId, from))
-  // Keys name the room as one colon-separated part: mail_cursor:<chat>:…,
-  // proactive_posts:<chat>. One the new room has already written stays. A
-  // turn's hold, a waiting message's row and an album's items stay put: the
-  // invocation answering in the old room frees and takes them by the old id,
-  // and moved, a hold would keep the new room waiting for five minutes.
-  const keyed = sql`(${settings.key} like ${`%:${from}:%`} or ${settings.key} like ${`%:${from}`})
-    and ${settings.key} not like 'turn:%' and ${settings.key} not like 'turnq:%' and ${settings.key} not like 'album:%'`
-  await db().execute(sql`
-    insert into settings (key, value)
-    select replace(key, ${`:${from}`}, ${`:${to}`}), value from settings where ${keyed}
-    on conflict (key) do nothing
-  `)
-  await db().delete(settings).where(keyed)
-}
-
-/* --------------------------------------------------------------- messages */
-
-export async function recordMessage(input: {
-  chatId: string
-  memberId?: number | null
-  authorName?: string | null
-  role: 'user' | 'assistant'
-  content: string
-  model?: string | null
-}): Promise<number> {
-  const [row] = await db()
-    .insert(messages)
-    .values({
-      chatId: input.chatId,
-      memberId: input.memberId ?? null,
-      authorName: input.authorName ?? null,
-      role: input.role,
-      content: input.content.slice(0, 8000),
-      model: input.model ?? null,
-    })
-    .returning({ id: messages.id })
-  return row.id
-}
-
-/**
- * The last `limit` messages in a chat, oldest first. `excludeId` drops the
- * message currently being answered, which the caller has already stored, and
- * whatever members said after it: that came later, and read as history it sat
- * ahead of the question it followed. The bot's own replies since are kept, so
- * a turn that waited for the one before it sees what that one said.
- */
-export async function recentMessages(chatId: string, limit = CONTEXT_WINDOW, excludeId?: number) {
-  const where = excludeId
-    ? and(eq(messages.chatId, chatId), or(lt(messages.id, excludeId), ne(messages.role, 'user')))
-    : eq(messages.chatId, chatId)
-  const rows = await db()
-    .select()
-    .from(messages)
-    .where(where)
-    .orderBy(desc(messages.createdAt), desc(messages.id))
-    .limit(limit)
-  return rows.reverse()
-}
-
-/**
- * The last day's talk across every chat, oldest first, for the nightly memory
- * pass. On a day with more than `limit` messages it is the newest that are
- * kept, since the pass is about what was said most recently.
- */
-export async function messagesSince(hours: number, limit = 400) {
-  const rows = await db()
-    .select({
-      chatId: messages.chatId,
-      authorName: messages.authorName,
-      role: messages.role,
-      content: messages.content,
-    })
-    .from(messages)
-    .where(gte(messages.createdAt, new Date(Date.now() - hours * 3600_000)))
-    .orderBy(desc(messages.id))
-    .limit(limit)
-  return rows.reverse()
-}
-
-/**
- * Keep the table bounded: drop what is older than both the newest `keep` rows
- * and the last `days`. A count alone let a chatty group lose its week-old
- * talk, which left System's fortnight with empty days and the nightly pass
- * short of the day's first messages.
- */
-export async function pruneMessages(chatId: string, keep = MAX_HISTORY, days = HISTORY_DAYS) {
-  await db().execute(sql`
-    delete from ${messages}
-    where ${messages.chatId} = ${chatId}
-      and ${messages.createdAt} < now() - make_interval(days => ${days})
-      and ${messages.id} not in (
-        select id from ${messages}
-        where ${messages.chatId} = ${chatId}
-        order by ${messages.id} desc
-        limit ${keep}
-      )
-  `)
+  return { member: row.member, keyId: row.keyId }
 }
 
 /* ------------------------------------------------------------ connections */
@@ -661,45 +379,31 @@ export async function answerQuestion(
 export const REPEATS = ['always', 'once', 'until'] as const
 export type Repeat = (typeof REPEATS)[number]
 
-/**
- * A chat has at most one of each ready-made watcher, and the database holds
- * it to that: a second of the same kind, from two ticks installing the
- * built-ins at once or a doubled /watch, hands back the one already there.
- */
 export async function addAutomation(input: {
-  chatId: string
-  memberId?: number | null
+  memberId: number | null
   label: string
   cronExpr: string
   instruction: string
-  kind?: string | null
   nextRunAt: Date
   repeat?: Repeat
   helperId?: number | null
 }) {
   const [row] = await db().insert(automations).values({
-    chatId: input.chatId,
-    memberId: input.memberId ?? null,
+    memberId: input.memberId,
     label: input.label,
     cronExpr: input.cronExpr,
     instruction: input.instruction,
-    kind: input.kind ?? null,
     nextRunAt: input.nextRunAt,
     repeat: input.repeat ?? 'always',
     helperId: input.helperId ?? null,
-  }).onConflictDoNothing().returning()
-  if (row) return row
-  const [have] = await db()
-    .select()
-    .from(automations)
-    .where(and(eq(automations.chatId, input.chatId), eq(automations.kind, input.kind ?? '')))
-    .limit(1)
-  return have
+  }).returning()
+  return row
 }
 
-export async function listAutomations(chatId?: string) {
+/** A member's automations, or everyone's for the admin pages, soonest first. */
+export async function listAutomations(memberId?: number) {
   const q = db().select().from(automations)
-  const rows = chatId ? await q.where(eq(automations.chatId, chatId)) : await q
+  const rows = memberId !== undefined ? await q.where(eq(automations.memberId, memberId)) : await q
   return rows.sort((a, b) => a.nextRunAt.getTime() - b.nextRunAt.getTime())
 }
 
@@ -743,10 +447,10 @@ export async function setAutomationEnabled(id: number, enabled: boolean, nextRun
   return row
 }
 
-/** Bring a ready-made watcher's row back in step with its definition; a converted one changes kind too. */
+/** Rewrite what an automation is called and does, keeping when it runs unless told. */
 export async function syncAutomation(
   id: number,
-  patch: { kind?: string; label: string; cronExpr: string; instruction: string; nextRunAt?: Date },
+  patch: { label: string; cronExpr: string; instruction: string; nextRunAt?: Date },
 ) {
   const [row] = await db().update(automations).set(patch).where(eq(automations.id, id)).returning()
   return row
@@ -762,12 +466,62 @@ export async function deleteAutomation(id: number) {
   return rows.length > 0
 }
 
+/* ----------------------------------------------------- automation reports */
+
+export type ReportStatus = 'ready' | 'held' | 'problem'
+
+/** Keep what a scheduled run found for the member who set it up. */
+export async function addReport(input: {
+  memberId: number
+  automationId: number | null
+  label: string
+  helper?: string | null
+  status: ReportStatus
+  body: string
+  detail?: string | null
+}): Promise<AutomationReport> {
+  const [row] = await db()
+    .insert(automationReports)
+    .values({
+      memberId: input.memberId,
+      automationId: input.automationId,
+      label: input.label,
+      helper: input.helper ?? null,
+      status: input.status,
+      body: input.body.slice(0, 8000),
+      detail: input.detail?.slice(0, 2000) ?? null,
+    })
+    .returning()
+  return row
+}
+
+/** A member's reports since a moment, newest first. */
+export async function reportsFor(memberId: number, opts: { since?: Date; limit?: number } = {}): Promise<AutomationReport[]> {
+  const where = opts.since
+    ? and(eq(automationReports.memberId, memberId), gte(automationReports.createdAt, opts.since))
+    : eq(automationReports.memberId, memberId)
+  return db()
+    .select()
+    .from(automationReports)
+    .where(where)
+    .orderBy(desc(automationReports.createdAt), desc(automationReports.id))
+    .limit(opts.limit ?? 20)
+}
+
+/** Thirty days is long enough to catch up after a holiday, and no longer. */
+export async function pruneReports(days = 30): Promise<number> {
+  const rows = await db()
+    .delete(automationReports)
+    .where(lt(automationReports.createdAt, new Date(Date.now() - days * 86_400_000)))
+    .returning({ id: automationReports.id })
+  return rows.length
+}
+
 /* ------------------------------------------------------------------ goals */
 
 export type GoalStatus = 'active' | 'done' | 'dropped'
 
 export async function createGoal(input: {
-  chatId: string
   memberId: number | null
   title: string
   outcome?: string | null
@@ -775,7 +529,7 @@ export async function createGoal(input: {
 }): Promise<Goal> {
   const [row] = await db()
     .insert(goals)
-    .values({ chatId: input.chatId, memberId: input.memberId, title: input.title, outcome: input.outcome ?? null, targetDate: input.targetDate ?? null })
+    .values({ memberId: input.memberId, title: input.title, outcome: input.outcome ?? null, targetDate: input.targetDate ?? null })
     .returning()
   return row
 }
@@ -793,19 +547,13 @@ export async function updateGoal(
   return row
 }
 
-/**
- * The goals in progress a room can see: in a group, the group's own; in a
- * member's own chat, theirs from anywhere as well, since a goal set in a DM is
- * that member's and never the family group's to read. Oldest first.
- */
-export async function goalsIn(opts: { chatId?: string; memberId?: number | null; status?: GoalStatus } = {}): Promise<Goal[]> {
-  const where = [eq(goals.status, opts.status ?? 'active')]
-  const scope = [
-    ...(opts.chatId ? [eq(goals.chatId, opts.chatId)] : []),
-    ...(opts.memberId ? [eq(goals.memberId, opts.memberId)] : []),
-  ]
-  if (scope.length) where.push(scope.length === 1 ? scope[0] : or(...scope)!)
-  return db().select().from(goals).where(and(...where)).orderBy(asc(goals.id))
+/** One member's goals in a given state, in progress unless told, oldest first. A goal is its owner's alone. */
+export async function goalsIn(opts: { memberId: number; status?: GoalStatus }): Promise<Goal[]> {
+  return db()
+    .select()
+    .from(goals)
+    .where(and(eq(goals.status, opts.status ?? 'active'), eq(goals.memberId, opts.memberId)))
+    .orderBy(asc(goals.id))
 }
 
 /** Settle a goal, once: the predicate makes it a claim, so a second "done" finds it already closed. */
@@ -896,10 +644,10 @@ export async function helperNamed(name: string): Promise<Helper | undefined> {
 }
 
 /** A new helper, or null when one of that name, in any case, is already there. */
-export async function addHelper(input: { name: string; role: string; groups: string[]; createdBy: number | null }): Promise<Helper | null> {
+export async function addHelper(input: { name: string; role: string; createdBy: number | null }): Promise<Helper | null> {
   const [row] = await db()
     .insert(helpers)
-    .values({ name: input.name.trim(), role: input.role.trim(), groups: JSON.stringify(input.groups), createdBy: input.createdBy })
+    .values({ name: input.name.trim(), role: input.role.trim(), createdBy: input.createdBy })
     .onConflictDoNothing()
     .returning()
   return row ?? null
@@ -942,17 +690,17 @@ export async function deleteRoutine(id: number): Promise<boolean> {
 
 /* --------------------------------------------------------------- activity */
 
-export async function recordActivity(input: { chatId: string; memberId: number | null; via: string; tool: string; summary: string }): Promise<void> {
+export async function recordActivity(input: { memberId: number | null; via: string; tool: string; summary: string }): Promise<void> {
   await db().insert(activity).values(input)
 }
 
-/** The latest changes, newest first, with who asked for each; a chat's own when one is named. */
-export async function recentActivity(opts: { chatId?: string; limit?: number } = {}): Promise<(Activity & { who: string | null })[]> {
+/** The latest changes, newest first, with whose each was; one member's own when one is named. */
+export async function recentActivity(opts: { memberId?: number; limit?: number } = {}): Promise<(Activity & { who: string | null })[]> {
   const rows = await db()
     .select({ row: activity, who: members.name })
     .from(activity)
     .leftJoin(members, eq(members.id, activity.memberId))
-    .where(opts.chatId ? eq(activity.chatId, opts.chatId) : undefined)
+    .where(opts.memberId !== undefined ? eq(activity.memberId, opts.memberId) : undefined)
     .orderBy(desc(activity.createdAt), desc(activity.id))
     .limit(opts.limit ?? 20)
   return rows.map((r) => ({ ...r.row, who: r.who }))
@@ -1013,7 +761,7 @@ export async function calendarToken(): Promise<string> {
 /**
  * How long the edge answers the feed from its own copy: the s-maxage it is
  * served with, and so how long a replaced address can still be answered,
- * which `/calendar new` tells the admin.
+ * which Settings tells the admin who replaces it.
  */
 export const FEED_EDGE_SECONDS = 60 * 60
 
@@ -1031,7 +779,6 @@ export async function rotateCalendarToken(): Promise<string> {
 /* ----------------------------------------------------------- email drafts */
 
 export async function createDraft(input: {
-  chatId: string
   memberId: number
   provider: string
   to: string[]
@@ -1042,7 +789,6 @@ export async function createDraft(input: {
   const [row] = await db()
     .insert(emailDrafts)
     .values({
-      chatId: input.chatId,
       memberId: input.memberId,
       provider: input.provider,
       recipients: input.to.join(', '),
@@ -1059,11 +805,12 @@ export async function getDraft(id: number): Promise<EmailDraft | undefined> {
   return row
 }
 
-export async function pendingDrafts(chatId: string): Promise<EmailDraft[]> {
+/** A member's own drafts still waiting on their yes, newest first. Only the writer can send one, so only they see it. */
+export async function pendingDrafts(memberId: number): Promise<EmailDraft[]> {
   return db()
     .select()
     .from(emailDrafts)
-    .where(and(eq(emailDrafts.chatId, chatId), eq(emailDrafts.status, 'pending')))
+    .where(and(eq(emailDrafts.memberId, memberId), eq(emailDrafts.status, 'pending')))
     .orderBy(desc(emailDrafts.id))
     .limit(5)
 }
@@ -1191,13 +938,32 @@ export async function clearList(listId: number, onlyDone: boolean) {
 
 /* -------------------------------------------------------- event proposals */
 
-export async function proposalForSource(source: string): Promise<EventProposal | undefined> {
-  const [row] = await db().select().from(eventProposals).where(eq(eventProposals.source, source)).limit(1)
+export async function getProposal(id: number): Promise<EventProposal | undefined> {
+  const [row] = await db().select().from(eventProposals).where(eq(eventProposals.id, id)).limit(1)
   return row
 }
 
+/**
+ * Every proposal, in any state, from this source or starting in this span:
+ * the candidates for being the same occasion as a new find. Small by its
+ * nature, a day's proposals and one source's.
+ */
+export async function proposalsAround(opts: { source: string | null; from: Date; to: Date }): Promise<EventProposal[]> {
+  const inSpan = and(gte(eventProposals.startsAt, opts.from), lt(eventProposals.startsAt, opts.to))
+  const source = opts.source?.trim()
+  return db()
+    .select()
+    .from(eventProposals)
+    .where(source ? or(eq(eventProposals.source, source), sql`split_part(${eventProposals.source}, '/', 1) = ${source.split('/')[0]}`, inSpan) : inSpan)
+    .orderBy(asc(eventProposals.id))
+}
+
+/**
+ * A new proposal. Two finds of the same source at once (two clients reading
+ * the same notice in the same second) cannot both insert one: the source is
+ * unique, and the second gets the first's row back.
+ */
 export async function addProposal(input: {
-  chatId: string
   memberId?: number | null
   title: string
   description?: string | null
@@ -1210,7 +976,6 @@ export async function addProposal(input: {
   const [row] = await db()
     .insert(eventProposals)
     .values({
-      chatId: input.chatId,
       memberId: input.memberId ?? null,
       title: input.title,
       description: input.description ?? null,
@@ -1218,10 +983,13 @@ export async function addProposal(input: {
       startsAt: input.startsAt,
       endsAt: input.endsAt,
       allDay: input.allDay ?? false,
-      source: input.source ?? null,
+      source: input.source?.trim() || null,
     })
+    .onConflictDoNothing()
     .returning()
-  return row
+  if (row) return row
+  const [have] = await db().select().from(eventProposals).where(eq(eventProposals.source, input.source!.trim())).limit(1)
+  return have
 }
 
 /** A live event with the proposal's title at the proposal's instant: the same occasion, already on the calendar. */
@@ -1247,9 +1015,9 @@ function liveProposal(now: Date) {
   return and(eq(eventProposals.status, 'pending'), gt(eventProposals.endsAt, now), notExists(alreadyOnCalendar()))
 }
 
-export async function pendingProposals(chatId?: string, now: Date = new Date()): Promise<EventProposal[]> {
-  const where = chatId ? and(liveProposal(now), eq(eventProposals.chatId, chatId)) : liveProposal(now)
-  return db().select().from(eventProposals).where(where).orderBy(asc(eventProposals.startsAt))
+/** Every proposal still worth an answer, soonest first. Any member may settle one. */
+export async function pendingProposals(now: Date = new Date()): Promise<EventProposal[]> {
+  return db().select().from(eventProposals).where(liveProposal(now)).orderBy(asc(eventProposals.startsAt))
 }
 
 /**
@@ -1302,42 +1070,46 @@ export async function allMembersWithLinks(): Promise<MemberRow[]> {
   }))
 }
 
-/** Create or update a member from the dashboard rather than from a chat. */
+/**
+ * Add a member from the dashboard, or change one: by id when one is given,
+ * otherwise by their address, so adding someone already in the family by the
+ * same address changes that person rather than making a second.
+ */
 export async function saveMember(input: {
-  telegramUserId: string
+  id?: number
   name: string
   email: string | null
   allowed: boolean
   isAdmin: boolean
 }): Promise<Member> {
-  const [row] = await db()
-    .insert(members)
-    .values(input)
-    .onConflictDoUpdate({
-      target: members.telegramUserId,
-      set: {
-        name: input.name,
-        email: input.email,
-        allowed: input.allowed,
-        // Losing access takes admin with it, so a revoked person cannot sign in.
-        isAdmin: input.allowed && input.isAdmin,
-      },
-    })
-    .returning()
+  const email = input.email?.trim() || null
+  const values = {
+    name: input.name,
+    email,
+    allowed: input.allowed,
+    // Losing access takes admin with it, so a revoked person cannot sign in.
+    isAdmin: input.allowed && input.isAdmin,
+  }
+  const existing = input.id !== undefined
+    ? await memberById(input.id)
+    : email
+      ? (await db().select().from(members).where(sql`lower(${members.email}) = ${email.toLowerCase()}`).limit(1))[0]
+      : undefined
+  // A change names someone already here; one who has gone is not made again.
+  if (input.id !== undefined && !existing) throw new Error(`No member ${input.id}.`)
+  if (existing) {
+    const [row] = await db().update(members).set(values).where(eq(members.id, existing.id)).returning()
+    return row
+  }
+  const [row] = await db().insert(members).values(values).returning()
   return row
 }
 
-export async function deleteMember(telegramUserId: string): Promise<boolean> {
+export async function deleteMember(id: number): Promise<boolean> {
   // Their own scheduled instructions stop with them. Deleting the row sets
-  // member_id to null, after which a custom automation would read as the
-  // household's, so it is paused while it is still known to be theirs.
-  const [member] = await db().select({ id: members.id }).from(members).where(eq(members.telegramUserId, telegramUserId)).limit(1)
-  if (member) {
-    await db()
-      .update(automations)
-      .set({ enabled: false })
-      .where(and(eq(automations.memberId, member.id), isNull(automations.kind)))
-  }
-  const rows = await db().delete(members).where(eq(members.telegramUserId, telegramUserId)).returning()
+  // member_id to null, after which an automation would belong to nobody, so
+  // it is paused while it is still known to be theirs.
+  await db().update(automations).set({ enabled: false }).where(eq(automations.memberId, id))
+  const rows = await db().delete(members).where(eq(members.id, id)).returning()
   return rows.length > 0
 }

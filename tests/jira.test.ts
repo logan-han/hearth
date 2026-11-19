@@ -3,22 +3,15 @@ import * as jira from '@/lib/providers/jira'
 import { jiraTools } from '@/lib/tools/jira'
 import type { ToolContext } from '@/lib/tools/context'
 
-// The mailbox behind jira_attach_email_file, answering with whatever a test sets.
+// The mailbox behind jira_attach_email_file, answering with whatever a test sets, and whose it was asked for.
 const readAttachment = vi.hoisted(() => vi.fn())
+const mailboxesOf = vi.hoisted(() => [] as number[])
 vi.mock('@/lib/providers', async (orig) => ({
   ...(await orig<typeof import('@/lib/providers')>()),
-  clientFor: () => ({ readAttachment }),
-}))
-
-// Whose mailbox a request reads: defaults to the asker, same as the real
-// lib/tools/mail.ts does when `of` is not given. A test overrides it to check
-// how jira_attach_email_file handles a mailbox it could not resolve.
-const mailboxOwnerMock = vi.hoisted(() =>
-  vi.fn(async (ctx: { member: unknown }): Promise<{ owner: unknown } | { error: string }> => ({ owner: ctx.member })),
-)
-vi.mock('@/lib/tools/mail', async (orig) => ({
-  ...(await orig<typeof import('@/lib/tools/mail')>()),
-  mailboxOwner: mailboxOwnerMock,
+  clientFor: (id: number) => {
+    mailboxesOf.push(id)
+    return { readAttachment }
+  },
 }))
 
 const fetchMock = vi.fn()
@@ -61,7 +54,8 @@ beforeEach(() => {
   process.env.JIRA_PROJECT_KEY = 'HTL'
   vi.stubGlobal('fetch', fetchMock)
   fetchMock.mockReset()
-  ctx = { chatId: '-100', member: null, memberName: 'Rowan', now: new Date('2026-08-27T02:00:00Z'), notices: [] }
+  mailboxesOf.length = 0
+  ctx = { member: null, memberName: 'Rowan', now: new Date('2026-08-27T02:00:00Z') }
 })
 afterEach(() => vi.unstubAllGlobals())
 
@@ -247,11 +241,10 @@ describe('jira_board_summary', () => {
 })
 
 describe('jira_create_issue', () => {
-  it('creates in the configured project and announces it', async () => {
+  it('creates in the configured project and says so', async () => {
     fetchMock.mockResolvedValue(json({ key: 'HTL-400' }))
     const r = await call('jira_create_issue', { summary: 'Fix the gutter', due_date: '2026-09-30', issue_type: 'Task' })
-    expect(r).toMatchObject({ key: 'HTL-400', url: 'https://example.atlassian.net/browse/HTL-400' })
-    expect(ctx.notices.join(' ')).toContain('HTL-400')
+    expect(r).toMatchObject({ key: 'HTL-400', url: 'https://example.atlassian.net/browse/HTL-400', added: 'Added to the board: HTL-400 Fix the gutter' })
 
     const body = lastBody()
     expect(body.fields.project).toEqual({ key: 'HTL' })
@@ -312,7 +305,7 @@ describe('jira_update_issue', () => {
 })
 
 describe('jira_attach_email_file', () => {
-  const member = { id: 3, name: 'Rowan', telegramUserId: '111', allowed: true, isAdmin: false } as unknown as ToolContext['member']
+  const member = { id: 3, name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false, createdAt: new Date() } as ToolContext['member']
 
   it('fetches the attachment from the mailbox and uploads it as multipart with the XSRF opt-out header', async () => {
     ctx = { ...ctx, member }
@@ -334,7 +327,7 @@ describe('jira_attach_email_file', () => {
   })
 
   it('needs a known member, and hands a mailbox error back rather than throwing', async () => {
-    await expect(call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })).rejects.toThrow(/direct message/)
+    await expect(call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })).rejects.toThrow(/family member/)
     ctx = { ...ctx, member }
     readAttachment.mockRejectedValue(new Error('No attachment called "x.pdf" on that email.'))
     expect(String((await call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })).error)).toContain('No attachment called')
@@ -354,12 +347,13 @@ describe('jira_attach_email_file', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('hands back a mailbox error rather than attaching anything', async () => {
+  it("reads the file from the caller's own mailbox, whoever else the call names", async () => {
     ctx = { ...ctx, member }
-    mailboxOwnerMock.mockResolvedValueOnce({ error: 'No family member called "Nobody".' })
-    const r = await call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf', of: 'Nobody' })
-    expect(r).toEqual({ error: 'No family member called "Nobody".' })
-    expect(fetchMock).not.toHaveBeenCalled()
+    readAttachment.mockResolvedValue({ filename: 'x.pdf', mimeType: 'application/pdf', size: 1, bytes: new Uint8Array([1]) })
+    fetchMock.mockResolvedValue(json([{ id: '1', filename: 'x.pdf', size: 1 }]))
+    const tools = jiraTools(ctx) as Record<string, { execute: unknown }>
+    await (tools.jira_attach_email_file.execute as (a: unknown, o: unknown) => Promise<unknown>)({ key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf', of: 'Nobody' }, {})
+    expect(mailboxesOf).toEqual([3])
   })
 
   it('says only that it failed when the mailbox ran out of time, since nothing was uploaded', async () => {
@@ -373,7 +367,7 @@ describe('jira_attach_email_file', () => {
 })
 
 describe('a board write that runs out of time', () => {
-  const member = { id: 3, name: 'Rowan', telegramUserId: '111', allowed: true, isAdmin: false } as unknown as ToolContext['member']
+  const member = { id: 3, name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false, createdAt: new Date() } as ToolContext['member']
 
   it.each([
     ['jira_create_issue', { summary: 'Pay the rates' }],
@@ -386,7 +380,7 @@ describe('a board write that runs out of time', () => {
     const r = await call(name, args)
     expect(String(r.error)).toContain('may or may not have gone through')
     expect(r.maybe_done).toBe(true)
-    expect(ctx.notices).toEqual([])
+    expect(r).not.toHaveProperty('added')
   })
 })
 

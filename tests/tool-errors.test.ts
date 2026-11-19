@@ -32,7 +32,7 @@ vi.mock('@/lib/providers/jira', () => jiraProvider)
 const { notionTools } = await import('@/lib/tools/notion')
 const { jiraTools } = await import('@/lib/tools/jira')
 
-const ctx: ToolContext = { chatId: '-100', member: null, memberName: 'Rowan', now: new Date(), notices: [] }
+const ctx: ToolContext = { member: null, memberName: 'Rowan', now: new Date() }
 
 const call = (tools: Record<string, unknown>, name: string, args: unknown) =>
   ((tools[name] as { execute: unknown }).execute as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)(args, {})
@@ -94,7 +94,7 @@ describe('jira tools degrade to an error result', () => {
   it('create issue', async () => {
     const r = await call(jiraTools(ctx), 'jira_create_issue', { summary: 'Fix gate' })
     expect(String(r.error)).toContain('Jira said 502')
-    expect(ctx.notices).toHaveLength(0)
+    expect(r).not.toHaveProperty('added')
   })
 
   it('move issue', async () => {

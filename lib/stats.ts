@@ -9,7 +9,6 @@ import { describeChain } from './model'
 import { chainHealth, type ChainHealth } from './model-events'
 import { getSetting } from './db/queries'
 import { schedulerPulse, tickCadence, onGrid, nextTickOnOrAfter, describeGrid, type TickGrid } from './scheduler'
-import { isBuiltinKind } from './watchers'
 import { roleInBrief } from './helpers'
 
 export type Stats = Awaited<ReturnType<typeof gatherStats>>
@@ -32,53 +31,55 @@ const LIVE_PROPOSAL = sql`p.status = 'pending' and p.ends_at > now() and not exi
 
 export async function gatherStats(month?: string) {
   const view = monthView(month, ctxNow())
-  const [counts, byDay, models, chats, upcoming, automations, listRows, monthEvents, health, lastTickAt, prevTickAt] = await Promise.all([
+  const [counts, byDay, models, keyRows, upcoming, automations, listRows, monthEvents, health, lastTickAt, prevTickAt] = await Promise.all([
     db().execute(sql`
       select
         (select count(*) from members where allowed) as members,
         (select count(*) from members where is_admin and allowed) as admins,
         (select count(*) from connections) as connections,
-        (select count(*) from messages) as messages,
+        (select count(*) from mcp_keys) as keys,
         (select count(*) from family_events where not cancelled) as events,
         (select count(*) from memories where invalidated_at is null) as memories,
         (select count(*) from event_proposals p where ${LIVE_PROPOSAL}) as proposals,
         (select count(*) from email_drafts where status = 'pending') as drafts,
         (select count(*) from email_drafts where status = 'sent') as sent
     `),
+    // What was changed each day of the fortnight, and how it was asked for:
+    // through an MCP client, on Home, or by a scheduled job.
     db().execute(sql`
       select to_char(created_at at time zone ${timezone()}, 'YYYY-MM-DD') as day,
-             count(*) filter (where role = 'user') as asked,
-             count(*) filter (where role = 'assistant') as answered
-      from messages
+             count(*) filter (where via = 'mcp') as mcp,
+             count(*) filter (where via = 'web') as web,
+             count(*) filter (where via = 'watcher') as scheduled
+      from activity
       where created_at > now() - interval '14 days'
       group by 1 order by 1
     `),
-    // Which model actually answered, which is how the fallback chain is judged:
-    // chat replies and watcher runs, read from the chain's own record, which
-    // is kept for the whole month. Stored messages are not: the history is
-    // only sure to reach back a fortnight. That record is a diagnostic, like
-    // the chain's health below, so a table that cannot be read leaves the
-    // shares empty rather than taking the page down.
+    // Which model actually ran the scheduled jobs, which is how the fallback
+    // chain is judged, read from the chain's own record for the month. That
+    // record is a diagnostic, like the chain's health below, so a table that
+    // cannot be read leaves the shares empty rather than taking the page down.
     db().execute(sql`
       select slot as model, count(*) as n
-      from model_events where outcome = 'answered' and purpose in ('hearth.chat', 'hearth.watcher')
+      from model_events where outcome = 'answered' and purpose = 'hearth.watcher'
         and created_at > now() - interval '30 days'
       group by 1 order by 2 desc limit 8
     `).catch(() => ({ rows: [] as Row[] })),
+    // Every key out there, whose it is and when it was last used: the keys
+    // themselves are not kept, so this is what an admin can judge a stale one by.
     db().execute(sql`
-      select c.chat_id, c.type, c.title, c.strangers,
-             (select count(*) from messages m where m.chat_id = c.chat_id) as messages,
-             -- A private chat's id is the other person's Telegram id.
-             (select name from members where telegram_user_id = c.chat_id) as person
-      from chats c order by messages desc limit 10
+      select k.id, k.label, k.created_at, k.last_used_at, m.name as member
+      from mcp_keys k join members m on m.id = k.member_id
+      order by k.last_used_at desc nulls last, k.id desc
     `),
     db().execute(sql`
       select title, starts_at, all_day from family_events
       where not cancelled and ends_at > now() order by starts_at limit 6
     `),
     db().execute(sql`
-      select id, label, cron_expr, enabled, next_run_at, last_run_at, chat_id
-      from automations order by enabled desc, next_run_at
+      select a.id, a.label, a.cron_expr, a.enabled, a.next_run_at, a.last_run_at, m.name as owner
+      from automations a left join members m on m.id = a.member_id
+      order by a.enabled desc, a.next_run_at
     `),
     db().execute(sql`
       select l.name, count(i.id) filter (where not i.done) as open, count(i.id) as total
@@ -103,7 +104,7 @@ export async function gatherStats(month?: string) {
       members: n(c.members),
       admins: n(c.admins),
       connections: n(c.connections),
-      messages: n(c.messages),
+      keys: n(c.keys),
       events: n(c.events),
       memories: n(c.memories),
       proposals: n(c.proposals),
@@ -111,16 +112,15 @@ export async function gatherStats(month?: string) {
       sent: n(c.sent),
     },
     activity: fortnight(
-      rows(byDay).map((r) => ({ day: String(r.day), asked: n(r.asked), answered: n(r.answered) })),
+      rows(byDay).map((r) => ({ day: String(r.day), mcp: n(r.mcp), web: n(r.web), scheduled: n(r.scheduled) })),
     ),
     models: rows(models).map((r) => ({ model: String(r.model), count: n(r.n) })),
-    chats: rows(chats).map((r) => ({
-      id: String(r.chat_id),
-      type: String(r.type),
-      title: (r.title as string) ?? null,
-      person: (r.person as string) ?? null,
-      messages: n(r.messages),
-      strangers: safeStrangers(r.strangers),
+    keys: rows(keyRows).map((r) => ({
+      id: n(r.id),
+      label: String(r.label),
+      member: String(r.member),
+      created: formatLocalDate(new Date(r.created_at as string)),
+      lastUsed: r.last_used_at ? formatLocal(new Date(r.last_used_at as string)) : null,
     })),
     upcoming: rows(upcoming).map((r) => ({
       title: String(r.title),
@@ -132,6 +132,7 @@ export async function gatherStats(month?: string) {
       label: String(r.label),
       cron: String(r.cron_expr),
       enabled: Boolean(r.enabled),
+      owner: r.owner ? String(r.owner) : null,
       ...timing(grid, r),
       lastRun: r.last_run_at ? formatLocal(new Date(r.last_run_at as string)) : null,
     })),
@@ -164,7 +165,7 @@ export async function gatherStats(month?: string) {
       },
       {
         group: 'Scheduler',
-        items: [{ name: 'QStash', on: Boolean(process.env.QSTASH_CURRENT_SIGNING_KEY), note: 'fires reminders' }],
+        items: [{ name: 'QStash', on: Boolean(process.env.QSTASH_CURRENT_SIGNING_KEY), note: 'runs reminders and scheduled jobs' }],
       },
     ],
     chain: describeChain(),
@@ -187,41 +188,39 @@ function timing(grid: TickGrid | null, r: Row) {
   }
 }
 
+type DayCount = { day: string; mcp: number; web: number; scheduled: number }
+
 /** Fourteen days, oldest first, with quiet days present as zeroes. */
-function fortnight(found: { day: string; asked: number; answered: number }[]) {
+function fortnight(found: DayCount[]): DayCount[] {
   const byDay = new Map(found.map((f) => [f.day, f]))
   const today = new Date()
-  const out: { day: string; asked: number; answered: number }[] = []
+  const out: DayCount[] = []
   for (let i = 13; i >= 0; i--) {
     const at = new Date(today.getTime() - i * 86_400_000)
     const key = localDateKey(at)
-    out.push(byDay.get(key) ?? { day: key, asked: 0, answered: 0 })
+    out.push(byDay.get(key) ?? { day: key, mcp: 0, web: 0, scheduled: 0 })
   }
   return out
 }
 
-function safeStrangers(raw: unknown): number {
-  try {
-    const parsed = JSON.parse(String(raw ?? '[]'))
-    return Array.isArray(parsed) ? parsed.length : 0
-  } catch {
-    return 0
-  }
-}
-
-/** How many of the latest changes Home lists; /activity in a chat has that chat's. */
+/** How many of the viewer's latest changes Home lists. */
 const ACTIVITY_SHOWN = 15
 
 /** How many ticked items Home carries per list, the most recently added; the rest are a click away. */
 const TICKED_SHOWN = 10
 
+/** How many of the viewer's latest reports Home lists; list_reports reaches the rest. */
+const REPORTS_SHOWN = 10
+
 /**
- * The subset any recognised family member may see: shared household things
- * only. No settings, no per-chat internals, no integration wiring.
+ * What any recognised family member may see: the household's shared things,
+ * and the viewer's own goals, drafts, reminders, reports, keys and record of
+ * changes. No settings, no integration wiring, and nothing of another member's.
  */
 export async function gatherFamilyStats(month?: string, viewer?: number | null) {
   const view = monthView(month, ctxNow())
-  const [counts, upcoming, automations, listRows, monthEvents, proposalRows, memoryRows, questionRows, lastTickAt, prevTickAt, activityRows, goalRows, draftRows, helperRows] = await Promise.all([
+  const me = viewer ?? -1
+  const [counts, upcoming, automations, listRows, monthEvents, proposalRows, memoryRows, questionRows, lastTickAt, prevTickAt, activityRows, goalRows, draftRows, helperRows, reportRows, keyRows] = await Promise.all([
     db().execute(sql`
       select
         (select count(*) from family_events where not cancelled) as events,
@@ -232,10 +231,11 @@ export async function gatherFamilyStats(month?: string, viewer?: number | null) 
       select id, title, starts_at, all_day from family_events
       where not cancelled and ends_at > now() order by starts_at limit 6
     `),
-    // Every one: Home is the only place a member can pause or delete one from
-    // the web, and a paused one sorts last, so a cut-off would hide it.
+    // Every one of the viewer's own: Home is where they pause or delete one
+    // from the web, and a paused one sorts last, so a cut-off would hide it.
     db().execute(sql`
-      select id, label, cron_expr, kind, enabled, next_run_at, repeat from automations
+      select id, label, cron_expr, enabled, next_run_at, repeat from automations
+      where member_id = ${me}
       order by enabled desc, next_run_at
     `),
     // Every open item, but only the latest ticked ones: a weekly shop ticks
@@ -254,62 +254,63 @@ export async function gatherFamilyStats(month?: string, viewer?: number | null) 
       order by name, done, id
     `),
     eventsInView(view),
-    // What the bot found and is waiting for a yes on, with the chat it was
-    // proposed in: a group's title, or the person whose DM it is.
+    // What was found and is waiting for a yes, with whose call or job found it.
     db().execute(sql`
-      select p.id, p.title, p.starts_at, p.all_day, p.location, p.description,
-             coalesce(c.title, (select name from members where telegram_user_id = p.chat_id), p.chat_id) as chat
-      from event_proposals p left join chats c on c.chat_id = p.chat_id
+      select p.id, p.title, p.starts_at, p.all_day, p.location, p.description, m.name as who
+      from event_proposals p left join members m on m.id = p.member_id
       where ${LIVE_PROPOSAL} order by p.starts_at
     `),
-    // What the bot keeps in mind between conversations, newest first, with
-    // who asked for it; the nightly pass files under nobody.
+    // What the household keeps in mind, newest first, with who asked for it.
     db().execute(sql`
       select m.id, m.content, m.created_at, mb.name as who
       from memories m left join members mb on mb.id = m.created_by
       where m.invalidated_at is null
       order by m.created_at desc, m.id desc limit 200
     `),
-    // What the nightly pass would have filed but put to the family instead.
+    // What nobody could stand behind yet, put to the family instead.
     db().execute(sql`
       select id, question, candidate, created_at from memory_questions
       where settled_at is null order by id
     `),
     getSetting('last_tick_at').catch((): string | null => null),
     getSetting('prev_tick_at').catch((): string | null => null),
-    // What the bot changed lately, in the family's groups, in the viewer's
-    // own chats and in the nightly memory pass, whose facts Home already
-    // shows everyone: someone else's private chat (their drafts, their
-    // calendar) is theirs to look back over, not the household's.
+    // What was changed in the viewer's name lately: another member's record
+    // (their drafts, their calendar) is theirs to look back over.
     db().execute(sql`
-      select a.id, a.summary, a.via, a.created_at, mb.name as who,
-             case when a.via = 'sweep' then 'the nightly memory pass'
-                  else coalesce(c.title, (select name from members where telegram_user_id = a.chat_id), a.chat_id) end as chat
+      select a.id, a.summary, a.via, a.created_at
       from activity a
-      left join members mb on mb.id = a.member_id
-      left join chats c on c.chat_id = a.chat_id
-      where a.chat_id like '-%' or a.via = 'sweep' or a.member_id = ${viewer ?? -1}
+      where a.member_id = ${me}
       order by a.created_at desc, a.id desc limit ${ACTIVITY_SHOWN}
     `),
-    // The goals in progress, by the same rule: the groups' and the viewer's
-    // own. Each with its latest progress note.
+    // The viewer's own goals in progress, each with its latest progress note.
     db().execute(sql`
       select g.id, g.title, g.outcome, g.target_date,
              (select u.note from goal_updates u where u.goal_id = g.id order by u.created_at desc, u.id desc limit 1) as latest
       from goals g
-      where g.status = 'active' and (g.chat_id like '-%' or g.member_id = ${viewer ?? -1})
+      where g.status = 'active' and g.member_id = ${me}
       order by g.target_date nulls last, g.id
     `),
     // The viewer's own email drafts waiting on their yes: nobody else's, since only the writer can send one.
     db().execute(sql`
-      select d.id, d.recipients, d.cc, d.subject, d.body, d.provider, d.created_at,
-             coalesce(c.title, (select name from members where telegram_user_id = d.chat_id), d.chat_id) as chat
-      from email_drafts d left join chats c on c.chat_id = d.chat_id
-      where d.status = 'pending' and d.member_id = ${viewer ?? -1}
+      select d.id, d.recipients, d.cc, d.subject, d.body, d.provider, d.created_at
+      from email_drafts d
+      where d.status = 'pending' and d.member_id = ${me}
       order by d.id desc limit 10
     `),
-    // The household's helpers, which anyone can call by name.
+    // The household's helpers, which anyone can hand a job to.
     db().execute(sql`select id, name, role from helpers order by id`),
+    // What the viewer's scheduled jobs found, newest first.
+    db().execute(sql`
+      select id, label, helper, status, body, detail, created_at from automation_reports
+      where member_id = ${me}
+      order by created_at desc, id desc limit ${REPORTS_SHOWN}
+    `),
+    // The viewer's own MCP keys, never the keys themselves, which are not kept.
+    db().execute(sql`
+      select id, label, created_at, last_used_at from mcp_keys
+      where member_id = ${me}
+      order by created_at desc, id desc
+    `),
   ])
 
   // One row per item, empty lists included; fold into per-list shapes the
@@ -347,8 +348,6 @@ export async function gatherFamilyStats(month?: string, viewer?: number | null) 
       label: String(r.label),
       cron: String(r.cron_expr),
       enabled: Boolean(r.enabled),
-      // Part of the product rather than something a member set up: Home offers a pause, not a delete.
-      builtin: isBuiltinKind(r.kind == null ? null : String(r.kind)),
       // A job that goes once it has run, or once it has found what it waits for.
       repeat: r.repeat === 'once' || r.repeat === 'until' ? (r.repeat as 'once' | 'until') : null,
       ...timing(grid, r),
@@ -362,8 +361,8 @@ export async function gatherFamilyStats(month?: string, viewer?: number | null) 
       id: n(r.id),
       title: String(r.title),
       when: whenText(r),
-      chat: String(r.chat),
-      // The first line of what the bot found, so the family can judge without opening the chat.
+      who: r.who ? String(r.who) : null,
+      // The first line of what was found, so the family can judge without looking it up.
       detail: [r.location ? String(r.location) : null, readableLine(r.description)].filter(Boolean).join(' · '),
     })),
     memories: rows(memoryRows).map((r) => ({
@@ -386,7 +385,6 @@ export async function gatherFamilyStats(month?: string, viewer?: number | null) 
       subject: String(r.subject),
       body: String(r.body),
       from: r.provider === 'microsoft' ? 'Outlook' : 'Gmail',
-      chat: String(r.chat),
       when: formatLocal(new Date(r.created_at as string)),
     })),
     goals: rows(goalRows).map((r) => {
@@ -406,10 +404,23 @@ export async function gatherFamilyStats(month?: string, viewer?: number | null) 
     activity: rows(activityRows).map((r) => ({
       id: n(r.id),
       summary: String(r.summary),
-      // Nobody asked for a scheduled run's or the nightly pass's changes; Hearth made them on its own.
-      who: r.who ? String(r.who) : r.via === 'watcher' || r.via === 'sweep' ? 'Hearth, on its own' : 'someone',
-      chat: String(r.chat),
+      how: r.via === 'watcher' ? 'by a scheduled job' : r.via === 'web' ? 'on Home' : 'through an MCP client',
       when: formatLocal(new Date(r.created_at as string)),
+    })),
+    reports: rows(reportRows).map((r) => ({
+      id: n(r.id),
+      label: String(r.label),
+      helper: r.helper ? String(r.helper) : null,
+      status: String(r.status) as 'ready' | 'held' | 'problem',
+      body: String(r.body),
+      detail: r.detail ? String(r.detail) : null,
+      when: formatLocal(new Date(r.created_at as string)),
+    })),
+    keys: rows(keyRows).map((r) => ({
+      id: n(r.id),
+      label: String(r.label),
+      created: formatLocalDate(new Date(r.created_at as string)),
+      lastUsed: r.last_used_at ? formatLocal(new Date(r.last_used_at as string)) : null,
     })),
   }
 }

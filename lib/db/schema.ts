@@ -12,65 +12,43 @@ import {
 import { sql } from 'drizzle-orm'
 
 /**
- * A person in the family, keyed by their Telegram user id. `allowed` is the only
- * authorisation gate the bot has: rooms are never trusted, people are.
+ * A person in the family. `allowed` is the only authorisation gate there is:
+ * a dashboard session, an MCP key and a linked account all act for a member,
+ * and none of them for anyone whose row says they may not. `email` is how
+ * they sign in on the web before they have linked anything.
  */
-export const members = pgTable(
-  'members',
-  {
-    id: serial('id').primaryKey(),
-    telegramUserId: text('telegram_user_id').notNull(),
-    name: text('name').notNull(),
-    /** Set by an admin so this person can sign in before linking an account. */
-    email: text('email'),
-    allowed: boolean('allowed').notNull().default(false),
-    isAdmin: boolean('is_admin').notNull().default(false),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    /**
-     * SHA-256 of the key this member handed an MCP client. Only the hash is
-     * kept, so a key that goes missing is replaced rather than looked up.
-     */
-    mcpTokenHash: text('mcp_token_hash'),
-    mcpTokenAt: timestamp('mcp_token_at', { withTimezone: true }),
-  },
-  (t) => [
-    uniqueIndex('members_telegram_user_id_idx').on(t.telegramUserId),
-    uniqueIndex('members_mcp_token_idx').on(t.mcpTokenHash),
-  ],
-)
+export const members = pgTable('members', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull(),
+  /** Set by an admin so this person can sign in before linking an account. */
+  email: text('email'),
+  allowed: boolean('allowed').notNull().default(false),
+  isAdmin: boolean('is_admin').notNull().default(false),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})
 
 /**
- * Rooms the bot has seen. A room grants nothing on its own; `strangers` holds
- * the people seen here who are not allowed members, as a JSON array of
- * `{ id, name }`. While it is non-empty the bot stays quiet in that room, so a
- * private calendar or inbox is never read out in front of an outsider.
+ * A key a member made on the web for an MCP client, or that the OAuth flow
+ * made for a client they approved. Only the SHA-256 of the key is kept, so a
+ * lost key is replaced rather than looked up, and deleting the row revokes it
+ * for good.
  */
-export const chats = pgTable(
-  'chats',
+export const mcpKeys = pgTable(
+  'mcp_keys',
   {
     id: serial('id').primaryKey(),
-    chatId: text('chat_id').notNull(),
-    type: text('type').notNull(),
-    title: text('title'),
-    strangers: text('strangers').notNull().default('[]'),
+    memberId: integer('member_id')
+      .notNull()
+      .references(() => members.id, { onDelete: 'cascade' }),
+    /** What the member called it, or the client that asked for it: "Claude Code on the laptop". */
+    label: text('label').notNull(),
+    tokenHash: text('token_hash').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    /** Rolling summary of everything older than the raw history window. */
-    summary: text('summary'),
-    /** The newest message id the summary covers. */
-    summaryThrough: integer('summary_through'),
-    summaryAt: timestamp('summary_at', { withTimezone: true }),
-    /**
-     * When Telegram said the bot was removed. The row and its history stay, but
-     * a room the bot is no longer in is not one of the household's: it gets no
-     * built-in watchers and is never where an MCP call acts. Seeing the bot
-     * back, or any message from the room, clears it.
-     */
-    leftAt: timestamp('left_at', { withTimezone: true }),
+    /** When it was last used, to the hour: enough to tell a live key from a forgotten one. */
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
   },
-  (t) => [uniqueIndex('chats_chat_id_idx').on(t.chatId)],
+  (t) => [uniqueIndex('mcp_keys_token_hash_idx').on(t.tokenHash), index('mcp_keys_member_idx').on(t.memberId)],
 )
-
-export type Stranger = { id: string; name: string }
 
 /** A linked Google or Microsoft account belonging to one member. */
 export const connections = pgTable(
@@ -94,23 +72,6 @@ export const connections = pgTable(
     readOnly: boolean('read_only').notNull().default(false),
   },
   (t) => [uniqueIndex('connections_member_provider_idx').on(t.memberId, t.provider)],
-)
-
-/** Rolling conversation window per chat: the newest MAX_HISTORY rows, or the last HISTORY_DAYS if that is more. */
-export const messages = pgTable(
-  'messages',
-  {
-    id: serial('id').primaryKey(),
-    chatId: text('chat_id').notNull(),
-    memberId: integer('member_id').references(() => members.id, { onDelete: 'set null' }),
-    authorName: text('author_name'),
-    role: text('role').notNull(), // 'user' | 'assistant'
-    content: text('content').notNull(),
-    /** For assistant rows: which model in the chain actually answered. */
-    model: text('model'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [index('messages_chat_created_idx').on(t.chatId, t.createdAt)],
 )
 
 /** The shared family calendar, served as ICS. */
@@ -153,10 +114,10 @@ export const memories = pgTable(
 )
 
 /**
- * A fact the nightly pass would have filed but could not stand behind: the
- * talk did not say who it is about, or it rested on a notice or an email
- * rather than on a person saying so. It is put to the family instead, once,
- * and filed only on a yes.
+ * A fact worth keeping that nobody could stand behind yet: it does not say
+ * who it is about, or it rests on a notice or an email rather than on a
+ * person saying so. It is put to the family instead, once, and filed only on
+ * a yes.
  */
 export const memoryQuestions = pgTable(
   'memory_questions',
@@ -164,10 +125,10 @@ export const memoryQuestions = pgTable(
     id: serial('id').primaryKey(),
     /** As put to the family. */
     question: text('question').notNull(),
-    /** The fact to file on a yes, as the pass would have written it. */
+    /** The fact to file on a yes. */
     candidate: text('candidate').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    /** When a morning brief put it to the family; Home carries it from then on. */
+    /** When a morning brief first put it to someone; Home carries it from then on. */
     askedAt: timestamp('asked_at', { withTimezone: true }),
     settledAt: timestamp('settled_at', { withTimezone: true }),
     outcome: text('outcome'), // confirmed | dismissed
@@ -177,18 +138,19 @@ export const memoryQuestions = pgTable(
   (t) => [index('memory_questions_settled_idx').on(t.settledAt)],
 )
 
-/** Scheduled instructions run by /api/tick. */
+/**
+ * A member's scheduled instruction, run by /api/tick: a reminder, a watch
+ * that runs until it finds something, a goal's check-in, a job handed to a
+ * helper. What a run finds is kept as a report for the member who set it up.
+ */
 export const automations = pgTable(
   'automations',
   {
     id: serial('id').primaryKey(),
-    chatId: text('chat_id').notNull(),
     memberId: integer('member_id').references(() => members.id, { onDelete: 'set null' }),
     label: text('label').notNull(),
     cronExpr: text('cron_expr').notNull(),
     instruction: text('instruction').notNull(),
-    /** A ready-made watcher's kind (morning, snapshot); null for a custom instruction. */
-    kind: text('kind'),
     nextRunAt: timestamp('next_run_at', { withTimezone: true }).notNull(),
     lastRunAt: timestamp('last_run_at', { withTimezone: true }),
     enabled: boolean('enabled').notNull().default(true),
@@ -196,41 +158,61 @@ export const automations = pgTable(
     /**
      * always: at every time its cron gives. once: at the first of them, then
      * it switches itself off, for "tomorrow at 5pm" and work handed over to do
-     * later. until: at every time until a run has something to post, then it
-     * switches itself off, for "tell us when the camp dates are out".
+     * later. until: at every time until a run has something to report, then
+     * it switches itself off, for "tell us when the camp dates are out".
      */
     repeat: text('repeat').notNull().default('always'),
-    /** The helper whose job this is, who runs it and is named on what it posts; null for Hearth itself. */
+    /** The helper whose job this is, who runs it and is named on its report; null for Hearth itself. */
     helperId: integer('helper_id').references((): AnyPgColumn => helpers.id, { onDelete: 'set null' }),
   },
-  (t) => [
-    index('automations_next_run_idx').on(t.enabled, t.nextRunAt),
-    // One of each ready-made watcher per chat. Checking first and inserting
-    // after lets two overlapping ticks both install one, and each copy then
-    // posts every day; the index makes the second insert a no-op instead.
-    uniqueIndex('automations_chat_kind_idx').on(t.chatId, t.kind).where(sql`${t.kind} is not null`),
-  ],
+  (t) => [index('automations_next_run_idx').on(t.enabled, t.nextRunAt)],
 )
 
 /**
- * Something the household wants to get done over weeks rather than in one
- * message: a trip saved for, a party planned, a house readied for sale. Its
- * steps are its own, never a shared list, so a goal set in a member's own
- * chat stays theirs; a check-in automation brings it back to the chat until
- * it is done or dropped.
+ * What a scheduled run found, kept for the member who set it up: nothing is
+ * posted anywhere, so it waits here until their MCP client or Home reads
+ * it. A draft the checks held back is kept too, marked, with why. Pruned
+ * after thirty days.
+ */
+export const automationReports = pgTable(
+  'automation_reports',
+  {
+    id: serial('id').primaryKey(),
+    memberId: integer('member_id')
+      .notNull()
+      .references(() => members.id, { onDelete: 'cascade' }),
+    /** The automation that ran; a one-off or a finished watch is gone by the time it is read. */
+    automationId: integer('automation_id').references(() => automations.id, { onDelete: 'set null' }),
+    label: text('label').notNull(),
+    /** The helper whose job it was, by name, when one did it. */
+    helper: text('helper'),
+    /** ready | held | problem */
+    status: text('status').notNull(),
+    body: text('body').notNull(),
+    /** Why a draft was held back, what went wrong, or what the checks changed. */
+    detail: text('detail'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('automation_reports_member_idx').on(t.memberId, t.createdAt)],
+)
+
+/**
+ * Something one member wants to get done over weeks rather than in one go: a
+ * trip saved for, a party planned, a house readied for sale. Its steps are its
+ * own, never a shared list, and it is its owner's alone; a check-in automation
+ * reports on it until it is done or dropped.
  */
 export const goals = pgTable(
   'goals',
   {
     id: serial('id').primaryKey(),
-    chatId: text('chat_id').notNull(),
     memberId: integer('member_id').references(() => members.id, { onDelete: 'set null' }),
     title: text('title').notNull(),
     /** What done looks like, in the household's words. */
     outcome: text('outcome'),
     /** The day it is meant to be done by, as YYYY-MM-DD in household time. */
     targetDate: text('target_date'),
-    /** The check-in that brings it back to the chat; gone once the goal is closed. */
+    /** The check-in that reports on it; gone once the goal is closed. */
     automationId: integer('automation_id').references(() => automations.id, { onDelete: 'set null' }),
     status: text('status').notNull().default('active'), // active | done | dropped
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -271,9 +253,9 @@ export const goalUpdates = pgTable(
 )
 
 /**
- * A named specialist the family can talk to directly ("Chef, what's for
- * dinner?") or hand a job to: a role it plays and the tool groups it starts
- * with. One bot speaks for all of them, each reply under its helper's name.
+ * A named specialist the family can hand a job to ("Researcher, look into
+ * plumbers for tonight"): a role it plays when it does that job, and that an
+ * MCP client can take up when someone talks to it by name.
  */
 export const helpers = pgTable(
   'helpers',
@@ -283,8 +265,6 @@ export const helpers = pgTable(
     name: text('name').notNull(),
     /** Who it is and what it looks after, as its standing instructions. */
     role: text('role').notNull(),
-    /** The tool groups its turns start with, as a JSON array. */
-    groups: text('groups').notNull().default('[]'),
     createdBy: integer('created_by').references(() => members.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -294,7 +274,7 @@ export const helpers = pgTable(
 /**
  * Something the household does the same way each time, kept once and run by
  * name: "the Sunday reset", "getting ready for a school term". Its steps are
- * instructions to the bot, carried out with whatever tools the turn has.
+ * instructions, carried out with whatever tools the caller has.
  */
 export const routines = pgTable(
   'routines',
@@ -310,24 +290,23 @@ export const routines = pgTable(
 )
 
 /**
- * What the bot changed, one row a change: the household's record of what it
- * did, for whom and where, kept so anyone can look back over it rather than
- * take its word. Pruned after ninety days.
+ * What Hearth changed, one row a change: each member's record of what was
+ * done in their name and how, kept so they can look back over it rather than
+ * take anyone's word. Pruned after ninety days.
  */
 export const activity = pgTable(
   'activity',
   {
     id: serial('id').primaryKey(),
-    chatId: text('chat_id').notNull(),
     memberId: integer('member_id').references(() => members.id, { onDelete: 'set null' }),
-    /** chat | watcher | sweep | mcp */
+    /** mcp | web | watcher */
     via: text('via').notNull(),
     tool: text('tool').notNull(),
     /** One line a person can read: "added milk, eggs to the shopping list". */
     summary: text('summary').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('activity_created_idx').on(t.createdAt), index('activity_chat_idx').on(t.chatId, t.createdAt)],
+  (t) => [index('activity_created_idx').on(t.createdAt), index('activity_member_idx').on(t.memberId, t.createdAt)],
 )
 
 /** Outbound email held for explicit human confirmation. Never sent silently. */
@@ -335,7 +314,6 @@ export const emailDrafts = pgTable(
   'email_drafts',
   {
     id: serial('id').primaryKey(),
-    chatId: text('chat_id').notNull(),
     memberId: integer('member_id')
       .notNull()
       .references(() => members.id, { onDelete: 'cascade' }),
@@ -347,7 +325,7 @@ export const emailDrafts = pgTable(
     status: text('status').notNull().default('pending'), // pending | sent | cancelled
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('email_drafts_chat_status_idx').on(t.chatId, t.status)],
+  (t) => [index('email_drafts_member_status_idx').on(t.memberId, t.status)],
 )
 
 /** A named shared list: groceries, packing, jobs to do. */
@@ -377,15 +355,15 @@ export const listItems = pgTable(
 )
 
 /**
- * A calendar event the bot spotted somewhere (an email, a photographed notice)
- * and wants a human to confirm. Events found this way are never added silently.
- * `source` is the thing it came from, so the same email is never proposed twice.
+ * A calendar event found somewhere (an email, a notice, a page) that a person
+ * has to confirm. Events found this way are never added silently, and any
+ * member may settle one. `source` is the thing it came from, so the same
+ * email is never proposed twice.
  */
 export const eventProposals = pgTable(
   'event_proposals',
   {
     id: serial('id').primaryKey(),
-    chatId: text('chat_id').notNull(),
     memberId: integer('member_id').references(() => members.id, { onDelete: 'set null' }),
     title: text('title').notNull(),
     description: text('description'),
@@ -434,9 +412,9 @@ export const modelEvents = pgTable(
   {
     id: serial('id').primaryKey(),
     slot: text('slot').notNull(),
-    /** hearth.chat, hearth.watcher, hearth.gate, hearth.decision, hearth.verify, hearth.claim */
+    /** hearth.watcher, hearth.decision, hearth.verify */
     purpose: text('purpose').notNull(),
-    /** answered | failed | claim_retry */
+    /** answered | failed */
     outcome: text('outcome').notNull(),
     ms: integer('ms').notNull().default(0),
     error: text('error'),
@@ -446,9 +424,11 @@ export const modelEvents = pgTable(
 )
 
 export type Member = typeof members.$inferSelect
+export type McpKey = typeof mcpKeys.$inferSelect
 export type Connection = typeof connections.$inferSelect
 export type FamilyEvent = typeof familyEvents.$inferSelect
 export type Automation = typeof automations.$inferSelect
+export type AutomationReport = typeof automationReports.$inferSelect
 export type EmailDraft = typeof emailDrafts.$inferSelect
 export type List = typeof lists.$inferSelect
 export type ListItem = typeof listItems.$inferSelect

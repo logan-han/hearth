@@ -6,27 +6,29 @@ import { describeWrite, noteActivity } from '@/lib/activity'
 import { buildTools, type ToolContext } from '@/lib/tools'
 import { activityLine } from '@/lib/tools/activity'
 import { gatherFamilyStats } from '@/lib/stats'
+import { localDateKey } from '@/lib/cron'
 
 let client: PGlite
 let ctx: ToolContext
 
 const call = (tools: Record<string, unknown>, name: string, args: unknown) =>
   ((tools[name] as { execute: unknown }).execute as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)(args, {})
+const sam = () => q.saveMember({ name: 'Sam', email: 'sam@hearth.example', allowed: true, isAdmin: false })
 
 beforeEach(async () => {
   client = (await freshDb()).client
-  const member = await q.upsertMember('111', 'Rowan', { allowed: true })
-  ctx = { chatId: '-100', member, memberName: 'Rowan', now: new Date(), notices: [], shared: true }
+  const member = await q.saveMember({ name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false })
+  ctx = { member, memberName: 'Rowan', now: new Date(), via: 'mcp', cursorScope: 'key:1' }
 })
 afterEach(async () => closeDb(client))
 
 describe('describeWrite', () => {
-  it("uses the line a tool posted in the chat, in plain words", () => {
-    expect(describeWrite('add_family_event', { title: 'Dentist' }, { posted: 'Added to the family calendar: **Dentist** — Tue 3 Nov, 9:00 am' }))
-      .toBe('Added to the family calendar: Dentist — Tue 3 Nov, 9:00 am')
-  })
-
-  it('words the rest from what was asked and what came back', () => {
+  it('words a write from what was asked and what came back', () => {
+    expect(describeWrite('add_family_event', { title: 'Dentist' }, { title: 'Dentist', start_local: 'Tue 3 Nov, 9:00 am' }))
+      .toBe('put "Dentist" on the family calendar, Tue 3 Nov, 9:00 am')
+    expect(describeWrite('add_family_event', { title: 'Dentist' }, {})).toBe('put "Dentist" on the family calendar')
+    expect(describeWrite('jira_create_issue', { summary: 'Fix gutter' }, { key: 'HTL-9', summary: 'Fix gutter' })).toBe('added HTL-9 "Fix gutter" to the board')
+    expect(describeWrite('jira_create_issue', { summary: 'Fix gutter' }, { key: 'HTL-9' })).toBe('added HTL-9 "Fix gutter" to the board')
     expect(describeWrite('add_to_list', { items: ['milk', 'eggs'] }, { list: 'shopping', added: ['milk', 'eggs'] })).toBe('added milk, eggs to the shopping list')
     expect(describeWrite('add_to_list', { items: ['nails'], list: 'hardware' }, {})).toBe('added nails to the hardware list')
     expect(describeWrite('check_off_list', { items: ['milk'] }, { list: 'shopping', ticked_off: ['2L milk'] })).toBe('ticked off 2L milk on the shopping list')
@@ -39,6 +41,10 @@ describe('describeWrite', () => {
     expect(describeWrite('create_automation', { label: 'bins' }, { next_run_local: 'Mon 2 Nov, 7:00 pm' })).toBe('set up "bins", first Mon 2 Nov, 7:00 pm')
     expect(describeWrite('answer_question', { id: 2 }, { kept: 'Ada is in year 4' })).toBe('kept "Ada is in year 4"')
     expect(describeWrite('answer_question', { id: 2 }, { dismissed: 2 })).toBe('settled question 2')
+  })
+
+  it('reads no posted line, since nothing is posted anywhere', () => {
+    expect(describeWrite('add_family_event', { title: 'Dentist' }, { posted: 'Added to the family calendar: **Dentist**' })).toBe('put "Dentist" on the family calendar')
   })
 
   it('words every other write, from what came back or else from what was asked', () => {
@@ -70,6 +76,9 @@ describe('describeWrite', () => {
       ['jira_attach_email_file', { key: 'HTL-1', filename: 'notice.pdf' }, {}, 'attached notice.pdf to HTL-1'],
       ['create_automation', { label: 'bins' }, {}, 'set up "bins"'],
       ['delete_automation', { id: 5 }, {}, 'deleted automation 5'],
+      ['create_helper', { name: 'Chef' }, {}, 'added the helper Chef'],
+      ['save_routine', { name: 'Bins' }, {}, 'kept the routine "Bins"'],
+      ['delete_routine', { name: 'Bins' }, {}, 'forgot the routine "Bins"'],
     ]
     for (const [tool, input, result, line] of cases) expect(describeWrite(tool, input, result), tool).toBe(line)
   })
@@ -83,7 +92,7 @@ describe('describeWrite', () => {
 })
 
 describe('the activity log', () => {
-  it('keeps every write that goes through, with who asked, how, and where', async () => {
+  it('keeps every write that goes through, on the record of the member it was done for, with how', async () => {
     const tools = buildTools(ctx)
     await call(tools, 'add_to_list', { items: ['milk'], list: 'shopping' })
     await call(tools, 'remember', { fact: 'Bin night is Monday' })
@@ -92,32 +101,52 @@ describe('the activity log', () => {
     // Nor is a write that failed.
     await call(tools, 'check_off_list', { items: ['bread'], list: 'nowhere' })
 
-    const rows = await q.recentActivity({ chatId: '-100' })
+    const rows = await q.recentActivity({ memberId: ctx.member!.id })
     expect(rows.map((r) => [r.tool, r.summary, r.via, r.who])).toEqual([
-      ['remember', 'remembered "Bin night is Monday"', 'chat', 'Rowan'],
-      ['add_to_list', 'added milk to the shopping list', 'chat', 'Rowan'],
+      ['remember', 'remembered "Bin night is Monday"', 'mcp', 'Rowan'],
+      ['add_to_list', 'added milk to the shopping list', 'mcp', 'Rowan'],
     ])
   })
 
-  it('says how a run came to be, and keeps a chat to its own', async () => {
-    await call(buildTools({ ...ctx, via: 'watcher', member: null }), 'add_to_list', { items: ['bread'], list: 'shopping' })
-    const here = await q.recentActivity({ chatId: '-100' })
-    expect(here.map((r) => [r.summary, r.via, r.who])).toEqual([['added bread to the shopping list', 'watcher', null]])
+  it('keeps nothing for a write that turned out to change nothing', async () => {
+    const tools = buildTools(ctx)
+    // A fact already known, a question already put, an event already there.
+    await call(tools, 'remember', { fact: 'Bin night is Monday' })
+    await call(tools, 'remember', { fact: 'Bin night is Monday by the way' })
+    await call(tools, 'unsure', { question: 'Who is at Hillside?', fact: 'Juno attends Hillside' })
+    await call(tools, 'unsure', { question: 'Who goes to Hillside?', fact: 'Juno attends Hillside' })
+    await call(tools, 'add_family_event', { title: 'Soccer', start: '2026-12-05T09:00', all_day: false })
+    await call(tools, 'add_family_event', { title: 'soccer', start: '2026-12-05T09:00', all_day: false })
+    // A proposal already standing, and one still to be judged against the same day.
+    const soon = localDateKey(new Date(Date.now() + 30 * 86_400_000))
+    await call(tools, 'propose_family_event', { title: 'Swim carnival', start: soon, source: 'google:m1' })
+    expect((await call(tools, 'propose_family_event', { title: 'Swim carnival', start: soon, source: 'google:m1' })).already_proposed).toBe(true)
+    expect((await call(tools, 'propose_family_event', { title: 'Parent night', start: `${soon}T18:00` })).not_proposed_yet).toBe(true)
+    expect((await q.recentActivity({ memberId: ctx.member!.id })).map((r) => r.tool)).toEqual([
+      'propose_family_event', 'add_family_event', 'unsure', 'remember',
+    ])
   })
 
-  it("files what an MCP client changed on its member's own record, though the client acts in the group", async () => {
+  it('says how a run came to be: a scheduled job, a client, a click on Home', async () => {
+    await call(buildTools({ ...ctx, via: 'watcher', cursorScope: 'auto:1' }), 'add_to_list', { items: ['bread'], list: 'shopping' })
+    await call(buildTools({ ...ctx, via: undefined }), 'add_to_list', { items: ['jam'], list: 'shopping' })
+    const rows = await q.recentActivity({ memberId: ctx.member!.id })
+    // A call that does not say how is an MCP client's, the only other way in.
+    expect(rows.map((r) => [r.summary, r.via])).toEqual([['added jam to the shopping list', 'mcp'], ['added bread to the shopping list', 'watcher']])
+  })
+
+  it("files what a member's client changed on their own record, and shows it to them alone", async () => {
     process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
     await q.saveConnection({ memberId: ctx.member!.id, provider: 'google', email: 'r@gmail.example', refreshToken: 'r', scopes: null })
-    // As lib/mcp.ts runs a call: in the room the member last talked in, a group.
-    const drafted = await call(buildTools({ ...ctx, chatId: '-100', via: 'mcp', shared: false }), 'draft_email', { to: ['clinic@example.org'], subject: 'Results', body: 'x' })
+    const drafted = await call(buildTools(ctx), 'draft_email', { to: ['clinic@example.org'], subject: 'Results', body: 'x' })
     expect(drafted.draft_id).toBeDefined()
-    await call(buildTools({ ...ctx, chatId: '-100', via: 'mcp', shared: false }), 'add_to_list', { items: ['jam'], list: 'shopping' })
-    expect(await q.recentActivity({ chatId: '-100' })).toEqual([])
-    const own = await q.recentActivity({ chatId: '111' })
+    await call(buildTools(ctx), 'add_to_list', { items: ['jam'], list: 'shopping' })
+    const own = await q.recentActivity({ memberId: ctx.member!.id })
     expect(own.map((r) => [r.tool, r.via])).toEqual([['add_to_list', 'mcp'], ['draft_email', 'mcp']])
     // Home shows it to its member, and to nobody else.
-    const sam = await q.upsertMember('222', 'Sam', { allowed: true })
-    expect((await gatherFamilyStats(undefined, sam.id)).activity).toEqual([])
+    const other = await sam()
+    expect(await q.recentActivity({ memberId: other.id })).toEqual([])
+    expect((await gatherFamilyStats(undefined, other.id)).activity).toEqual([])
     expect((await gatherFamilyStats(undefined, ctx.member!.id)).activity.map((a) => a.summary)).toContain('added jam to the shopping list')
   })
 
@@ -130,19 +159,19 @@ describe('the activity log', () => {
     warn.mockRestore()
   })
 
-  it('records directly too, with no member, as the nightly pass does under its own id', async () => {
-    await noteActivity({ chatId: 'memory-sweep', memberId: null, via: 'sweep', tool: 'remember', input: { fact: 'Ada is 8' }, result: {} })
-    const [row] = await q.recentActivity()
-    expect(row).toMatchObject({ via: 'sweep', summary: 'remembered "Ada is 8"', who: null })
-    // Home shows what the nightly pass filed, as it shows the facts themselves to everyone.
-    expect((await gatherFamilyStats()).activity).toEqual([
-      expect.objectContaining({ summary: 'remembered "Ada is 8"', who: 'Hearth, on its own', chat: 'the nightly memory pass' }),
-    ])
+  it('records directly too, with no member, and every member\'s record together for the admin pages', async () => {
+    await noteActivity({ memberId: null, via: 'watcher', tool: 'remember', input: { fact: 'Ada is 8' }, result: {} })
+    await noteActivity({ memberId: ctx.member!.id, via: 'web', tool: 'cancel_draft', input: { draft_id: 2 }, result: {} })
+    const all = await q.recentActivity()
+    expect(all.map((r) => [r.summary, r.who])).toEqual([['discarded email draft 2', 'Rowan'], ['remembered "Ada is 8"', null]])
+    // Nobody's record holds the one with no member, Home's included.
+    expect((await gatherFamilyStats()).activity).toEqual([])
+    expect((await gatherFamilyStats(undefined, ctx.member!.id)).activity.map((a) => a.summary)).toEqual(['discarded email draft 2'])
   })
 
   it('forgets what is older than ninety days', async () => {
-    await noteActivity({ chatId: '-100', memberId: null, via: 'chat', tool: 'remember', input: { fact: 'old' }, result: {} })
-    await noteActivity({ chatId: '-100', memberId: null, via: 'chat', tool: 'remember', input: { fact: 'new' }, result: {} })
+    await noteActivity({ memberId: null, via: 'mcp', tool: 'remember', input: { fact: 'old' }, result: {} })
+    await noteActivity({ memberId: null, via: 'mcp', tool: 'remember', input: { fact: 'new' }, result: {} })
     await client.query(`update activity set created_at = now() - interval '91 days' where summary like '%old%'`)
     expect(await q.pruneActivity(90)).toBe(1)
     expect((await q.recentActivity()).map((r) => r.summary)).toEqual(['remembered "new"'])
@@ -150,46 +179,44 @@ describe('the activity log', () => {
 })
 
 describe('recent_activity', () => {
-  it("lists this chat's changes, newest first, and says so when there are none", async () => {
-    expect(await call(buildTools(ctx), 'recent_activity', { limit: 5 })).toMatchObject({ activity: [], note: expect.stringContaining('Nothing has been changed') })
+  it("lists the caller's own changes, newest first, and says so when there are none", async () => {
+    expect(await call(buildTools(ctx), 'recent_activity', { limit: 5 })).toMatchObject({ activity: [], note: expect.stringContaining('Nothing has been changed in your name') })
     await call(buildTools(ctx), 'add_to_list', { items: ['milk'], list: 'shopping' })
-    await call(buildTools({ ...ctx, chatId: '-200' }), 'add_to_list', { items: ['secret'], list: 'shopping' })
+    const other = await sam()
+    await call(buildTools({ ...ctx, member: other, memberName: 'Sam' }), 'add_to_list', { items: ['secret'], list: 'shopping' })
     const r = await call(buildTools(ctx), 'recent_activity', { limit: 5 })
-    expect(r.activity).toEqual([expect.stringMatching(/: added milk to the shopping list \(Rowan, asked in the chat\)$/)])
+    expect(r.activity).toEqual([expect.stringMatching(/: added milk to the shopping list \(Rowan, through an MCP client\)$/)])
   })
 
-  it('names who did it, or that nobody asked', () => {
+  it('needs a member to say whose record to read', async () => {
+    await expect(call(buildTools({ ...ctx, member: null }), 'recent_activity', { limit: 5 })).rejects.toThrow(/family member/)
+  })
+
+  it('says how each change came to be', () => {
     const at = new Date('2026-10-30T09:00:00Z')
     expect(activityLine({ createdAt: at, who: null, via: 'watcher', summary: 'x' })).toMatch(/: x \(Hearth, on a schedule\)$/)
-    expect(activityLine({ createdAt: at, who: null, via: 'sweep', summary: 'x' })).toMatch(/\(Hearth, in the nightly memory pass\)$/)
-    expect(activityLine({ createdAt: at, who: null, via: 'mcp', summary: 'x' })).toMatch(/\(someone, through an MCP client\)$/)
+    expect(activityLine({ createdAt: at, who: 'Ada', via: 'mcp', summary: 'x' })).toMatch(/\(Ada, through an MCP client\)$/)
+    expect(activityLine({ createdAt: at, who: 'Ada', via: 'web', summary: 'x' })).toMatch(/\(Ada, on Home\)$/)
     expect(activityLine({ createdAt: at, who: 'Ada', via: 'other', summary: 'x' })).toMatch(/\(Ada, other\)$/)
   })
 })
 
 describe('Home lists what changed lately', () => {
-  it("shows the family's groups and the viewer's own chats, never another member's private chat", async () => {
-    const ada = await q.upsertMember('222', 'Ada', { allowed: true })
-    await q.rememberChat('-100', 'group', 'Family')
-    await noteActivity({ chatId: '-100', memberId: ctx.member!.id, via: 'chat', tool: 'add_to_list', input: { items: ['milk'] }, result: {} })
-    await noteActivity({ chatId: '222', memberId: ada.id, via: 'chat', tool: 'draft_email', input: { to: ['x@y.com'], subject: 'Private' }, result: {} })
-    await noteActivity({ chatId: '111', memberId: ctx.member!.id, via: 'chat', tool: 'remember', input: { fact: 'mine' }, result: {} })
-    await noteActivity({ chatId: '-100', memberId: null, via: 'watcher', tool: 'add_to_list', input: { items: ['bread'] }, result: {} })
+  it("shows the viewer's own changes with how each was asked for, never another member's", async () => {
+    const other = await sam()
+    await noteActivity({ memberId: ctx.member!.id, via: 'mcp', tool: 'add_to_list', input: { items: ['milk'] }, result: {} })
+    await noteActivity({ memberId: other.id, via: 'mcp', tool: 'draft_email', input: { to: ['x@y.com'], subject: 'Private' }, result: {} })
+    await noteActivity({ memberId: ctx.member!.id, via: 'web', tool: 'remember', input: { fact: 'mine' }, result: {} })
+    await noteActivity({ memberId: ctx.member!.id, via: 'watcher', tool: 'add_to_list', input: { items: ['bread'] }, result: {} })
 
     const rowan = await gatherFamilyStats(undefined, ctx.member!.id)
-    expect(rowan.activity.map((a) => [a.summary, a.who, a.chat])).toEqual([
-      ['added bread to the shopping list', 'Hearth, on its own', 'Family'],
-      ['remembered "mine"', 'Rowan', 'Rowan'],
-      ['added milk to the shopping list', 'Rowan', 'Family'],
+    expect(rowan.activity.map((a) => [a.summary, a.how])).toEqual([
+      ['added bread to the shopping list', 'by a scheduled job'],
+      ['remembered "mine"', 'on Home'],
+      ['added milk to the shopping list', 'through an MCP client'],
     ])
-    const ada2 = await gatherFamilyStats(undefined, ada.id)
-    expect(ada2.activity.map((a) => a.summary)).toContain('drafted an email to x@y.com, "Private", waiting on a yes')
-    // An admin signed in with no member row sees the groups alone.
-    expect((await gatherFamilyStats()).activity.map((a) => a.summary)).toEqual(['added bread to the shopping list', 'added milk to the shopping list'])
-  })
-
-  it('says someone when the member has gone', async () => {
-    await noteActivity({ chatId: '-100', memberId: null, via: 'mcp', tool: 'add_to_list', input: { items: ['tea'] }, result: {} })
-    expect((await gatherFamilyStats()).activity[0]).toMatchObject({ who: 'someone', chat: '-100' })
+    expect((await gatherFamilyStats(undefined, other.id)).activity.map((a) => a.summary)).toEqual(['drafted an email to x@y.com, "Private", waiting on a yes'])
+    // An admin signed in with no member row has no record of their own.
+    expect((await gatherFamilyStats()).activity).toEqual([])
   })
 })

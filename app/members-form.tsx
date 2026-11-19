@@ -3,14 +3,14 @@
 import { useState } from 'react'
 import type { MemberRow } from '@/lib/db/queries'
 
-const BLANK = { telegramUserId: '', name: '', email: '', isAdmin: false }
+const BLANK = { name: '', email: '', isAdmin: false }
 
 export function MembersForm({ initial }: { initial: MemberRow[] }) {
   const [members, setMembers] = useState(initial)
   const [draft, setDraft] = useState(BLANK)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<string | null>(null)
-  const [emailFor, setEmailFor] = useState<string | null>(null)
+  const [emailFor, setEmailFor] = useState<number | null>(null)
   const [emailDraft, setEmailDraft] = useState('')
 
   async function send(method: 'POST' | 'DELETE', body?: unknown, query = '') {
@@ -34,14 +34,13 @@ export function MembersForm({ initial }: { initial: MemberRow[] }) {
     }
   }
 
-  // Only what was filled in: for an id already here, a blank email or an
-  // unticked admin box leaves theirs as it is, so this row can fix a name.
+  // Only what was filled in: for an address already here, an unticked admin
+  // box leaves theirs as it is, so this row can fix a name.
   async function add() {
-    const known = members.some((m) => m.telegramUserId === draft.telegramUserId)
+    const known = members.some((m) => (m.email ?? '').toLowerCase() === draft.email.trim().toLowerCase())
     const body = {
-      telegramUserId: draft.telegramUserId,
       name: draft.name,
-      email: draft.email.trim() || undefined,
+      email: draft.email.trim(),
       isAdmin: draft.isAdmin || undefined,
     }
     if (await send('POST', body)) {
@@ -52,16 +51,15 @@ export function MembersForm({ initial }: { initial: MemberRow[] }) {
 
   const toggle = (m: MemberRow, field: 'allowed' | 'isAdmin') =>
     send('POST', {
-      telegramUserId: m.telegramUserId,
+      id: m.id,
       name: m.name,
-      email: m.email ?? '',
       allowed: field === 'allowed' ? !m.allowed : m.allowed,
       isAdmin: field === 'isAdmin' ? !m.isAdmin : m.isAdmin,
     })
 
   async function saveEmail(m: MemberRow) {
     const ok = await send('POST', {
-      telegramUserId: m.telegramUserId,
+      id: m.id,
       name: m.name,
       email: emailDraft.trim(),
       allowed: m.allowed,
@@ -86,14 +84,14 @@ export function MembersForm({ initial }: { initial: MemberRow[] }) {
       {note ? <p className="flash">{note}</p> : null}
 
       {members.map((m) => (
-        <div className="person" key={m.telegramUserId}>
+        <div className="person" key={m.id}>
           <div>
             <span className="who">
               {m.name}
               {m.isAdmin ? <span className="tag admin">admin</span> : null}
               {!m.allowed ? <span className="tag none">no access</span> : null}
             </span>
-            {emailFor === m.telegramUserId ? (
+            {emailFor === m.id ? (
               <span className="detail-edit">
                 <input
                   autoFocus
@@ -114,8 +112,7 @@ export function MembersForm({ initial }: { initial: MemberRow[] }) {
               </span>
             ) : (
               <span className="detail">
-                <span className="mono">{m.telegramUserId}</span>
-                {m.email ? ` · ${m.email}` : ''}
+                {m.email ? <span className="mono">{m.email}</span> : 'no address'}
                 {m.linked.length ? ` · ${m.linked.map((l) => l.provider).join(' and ')} linked` : ''}
               </span>
             )}
@@ -124,7 +121,7 @@ export function MembersForm({ initial }: { initial: MemberRow[] }) {
             <button
               disabled={busy}
               onClick={() => {
-                setEmailFor(m.telegramUserId)
+                setEmailFor(m.id)
                 setEmailDraft(m.email ?? '')
               }}
             >
@@ -148,7 +145,7 @@ export function MembersForm({ initial }: { initial: MemberRow[] }) {
               disabled={busy || lastAdmin(m)}
               title={lastAdmin(m) ? 'The only admin cannot be removed. Make someone else an admin first.' : undefined}
               onClick={() =>
-                confirm(`Remove ${m.name} from the family?`) && send('DELETE', undefined, `?telegramUserId=${m.telegramUserId}`)
+                confirm(`Remove ${m.name} from the family?`) && send('DELETE', undefined, `?id=${m.id}`)
               }
             >
               Remove
@@ -159,17 +156,13 @@ export function MembersForm({ initial }: { initial: MemberRow[] }) {
 
       <div className="newperson">
         <input
-          placeholder="Telegram id"
-          value={draft.telegramUserId}
-          onChange={(e) => setDraft({ ...draft, telegramUserId: e.target.value.replace(/[^0-9]/g, '') })}
-        />
-        <input
           placeholder="Name"
           value={draft.name}
           onChange={(e) => setDraft({ ...draft, name: e.target.value })}
         />
         <input
-          placeholder="Email (optional)"
+          placeholder="Email they sign in with"
+          type="email"
           value={draft.email}
           onChange={(e) => setDraft({ ...draft, email: e.target.value })}
         />
@@ -181,17 +174,16 @@ export function MembersForm({ initial }: { initial: MemberRow[] }) {
           />{' '}
           admin
         </label>
-        <button className="primary" disabled={busy || !draft.telegramUserId || !draft.name} onClick={add}>
+        <button className="primary" disabled={busy || !draft.email.trim() || !draft.name.trim()} onClick={add}>
           Add
         </button>
       </div>
 
       <p className="empty" style={{ marginTop: '0.8rem' }}>
-        The Telegram id lets someone talk to the bot; they can find theirs by sending it{' '}
-        <span className="mono">/whoami</span>. The email lets them sign in here, and is optional:
-        anyone who has linked a mailbox can already sign in with that address. Adding an id that is
-        already here renames that person and changes only what you filled in; someone with no access
-        keeps none until you Allow them.
+        The email is how someone signs in here, with Google or Microsoft; once they have linked a
+        mailbox they can sign in with that address too. Signed in, they link their accounts and make
+        keys for their MCP clients. Adding an address that is already here renames that person and
+        changes only what you filled in; someone with no access keeps none until you Allow them.
       </p>
       </div>
     </section>

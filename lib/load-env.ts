@@ -1,5 +1,5 @@
 /**
- * Load .env.local for the CLI entry points (drizzle-kit, set-webhook).
+ * Load .env.local for the CLI entry points (drizzle-kit, npm run probe).
  * Next.js does this itself; standalone scripts do not.
  */
 import { existsSync } from 'node:fs'

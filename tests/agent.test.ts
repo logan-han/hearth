@@ -3,26 +3,26 @@ import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
 import { recordModelEvent } from '@/lib/model-events'
-import { WATCHERS } from '@/lib/watchers'
 
 const generateText = vi.hoisted(() => vi.fn())
 vi.mock('ai', async (orig) => ({ ...(await orig<typeof import('ai')>()), generateText }))
 
-// Nobody Telegram is asked about is in the room: a group turn that reaches
-// that question has been let past the shared-room rule, which is the point.
-vi.mock('@/lib/headcount', () => ({ presentIn: vi.fn(async () => []), unaccountedIn: vi.fn(async () => 0) }))
-// The gate is a trace of its own; what it notes there is what Langfuse shows.
-const { traceRun, noteRun } = vi.hoisted(() => ({
-  traceRun: vi.fn(async (_name: string, _attrs: unknown, fn: () => Promise<unknown>) => fn()),
-  noteRun: vi.fn(),
-}))
-vi.mock('@/lib/telemetry', async (orig) => ({ ...(await orig<typeof import('@/lib/telemetry')>()), traceRun, noteRun }))
+// What each model call is traced under, which is what Langfuse groups it by.
+const traced = vi.hoisted(() => vi.fn(async (_attrs: unknown, fn: () => Promise<unknown>) => fn()))
+vi.mock('@/lib/telemetry', async (orig) => ({ ...(await orig<typeof import('@/lib/telemetry')>()), traced }))
 
-const { runAgent, shouldChimeIn, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence, decideWatcherPost, reviewDraft, cutFromDraft, dropEmptiedHeadings, isStructuredOutputError, unconfirmedLine } = await import('@/lib/agent')
+const {
+  runAgent, knownFacts, systemPrompt, stripPreamble, stripWorking, stripReasoning, cleanReply, collectEvidence,
+  decideWatcherPost, reviewDraft, cutFromDraft, dropEmptiedHeadings, isStructuredOutputError, TURN_BUDGET_MS, CHAIN_POST_CONFIDENCE,
+  scheduledInstruction,
+} = await import('@/lib/agent')
+const { CUSTOM_AUTOMATION_TOOLS } = await import('@/lib/tools')
 const { generateText: sdkGenerateText } = await vi.importActual<typeof import('ai')>('ai')
 const { MockLanguageModelV4 } = await import('ai/test')
 
 let client: PGlite
+
+type Tools = Record<string, { execute: (a: unknown, o: unknown) => Promise<Record<string, unknown>> }>
 
 const reply = (text: string) => ({ text, steps: [], usage: {} })
 
@@ -51,10 +51,13 @@ async function keepsAnsweringInProse(slot: string) {
   }
 }
 
+const rowan = () => q.saveMember({ name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false })
+
 beforeEach(async () => {
   vi.clearAllMocks()
   vi.spyOn(console, 'error').mockImplementation(() => {})
   vi.spyOn(console, 'info').mockImplementation(() => {})
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
   process.env.GEMINI_API_KEY = 'k'
   process.env.GEMINI_MODEL = 'gemini-3.5-flash-lite'
@@ -62,136 +65,114 @@ beforeEach(async () => {
   process.env.LLM_ORDER = 'gemini,openrouter'
   delete process.env.LLM_BASE_URL
   delete process.env.OPENROUTER_API_KEY
+  delete process.env.OPENROUTER_MODEL
   client = (await freshDb()).client
 })
 afterEach(async () => closeDb(client))
 
 describe('systemPrompt', () => {
-  const base = { memberName: 'Rowan', now: new Date('2026-08-27T00:00:00Z'), context: '' }
+  const base = { now: new Date('2026-08-27T00:00:00Z'), context: '' }
+  afterEach(() => {
+    delete process.env.ASSISTANT_NAME
+    delete process.env.LANGUAGE
+    delete process.env.UNITS
+  })
 
   it('states the date and timezone so relative dates resolve', () => {
-    const p = systemPrompt({ ...base, chatType: 'private' })
+    const p = systemPrompt(base)
     expect(p).toContain('Australia/Melbourne')
     expect(p).toContain('2026-08-27')
   })
 
-  it('tells the model who it is talking to', () => {
-    expect(systemPrompt({ ...base, chatType: 'private' })).toContain('Rowan')
+  it('says it is a scheduled job, whose writing is kept as a report for whoever set it up', () => {
+    const p = systemPrompt(base)
+    expect(p).toContain('This is a scheduled job, not a conversation.')
+    expect(p).toContain('kept as a report for the family member who set it up')
+    expect(p).not.toMatch(/telegram|chat|posted to/i)
   })
 
-  it('differs between a group and a direct message', () => {
-    expect(systemPrompt({ ...base, chatType: 'group' })).toContain('family group chat')
-    expect(systemPrompt({ ...base, chatType: 'private' })).toContain('direct message')
+  it('gives the run grounding rules and examples, and a way to stay quiet or flag a fault', () => {
+    const p = systemPrompt(base)
+    expect(p).toContain('WRITE using only the tool results you fetch')
+    expect(p).toContain('purpose not recorded')
+    expect(p).toContain('reply with exactly SKIP')
+    expect(p).toContain('PROBLEMS: if a tool fails, write PROBLEM:')
+    expect(p).toContain('No source names a trip')
+    expect(p).not.toContain('draft_email')
   })
 
-  it('always carries the no-silent-email rule', () => {
-    expect(systemPrompt({ ...base, chatType: 'group' })).toContain('draft_email')
-    expect(systemPrompt({ ...base, chatType: 'group' })).toContain('LATER turn')
-  })
-
-  it('tells the model a confirmed send means send_email with the context draft_id', () => {
-    expect(systemPrompt({ ...base, chatType: 'private' })).toContain('call send_email NOW with that draft_id')
-  })
-
-  it('leaves proactive memory filing to the nightly pass, and keeps corrections in the chat', () => {
-    const p = systemPrompt({ ...base, chatType: 'group' })
-    expect(p).toContain('Do not file facts on your own initiative')
-    expect(p).toContain('pass the old id as replaces')
+  it('tells the run to follow a standing instruction among the Known facts, and shows it those facts', () => {
+    const p = systemPrompt({ ...base, context: 'Known household facts:\n- [7] leave the gym newsletter out of the brief' })
+    expect(p).toContain('HOUSE RULES: a Known household fact under Context can be a standing instruction')
+    expect(p).toContain('do not say that you did')
+    expect(p).toContain('Context:\nKnown household facts:\n- [7] leave the gym newsletter out of the brief')
+    expect(systemPrompt(base)).not.toContain('Context:')
   })
 
   it('speaks the household language and units', () => {
-    const p = systemPrompt({ ...base, chatType: 'private' })
-    expect(p).toContain('Australian English with metric units')
+    expect(systemPrompt(base)).toContain('Australian English with metric units')
     process.env.LANGUAGE = 'American English'
     process.env.UNITS = 'imperial'
-    try {
-      expect(systemPrompt({ ...base, chatType: 'private' })).toContain('American English with imperial units')
-    } finally {
-      delete process.env.LANGUAGE
-      delete process.env.UNITS
-    }
+    expect(systemPrompt(base)).toContain('American English with imperial units')
   })
 
-  it('explains what to do with a photo', () => {
-    expect(systemPrompt({ ...base, chatType: 'private' })).toContain('propose_family_event')
-  })
-
-  it('includes household context when there is some', () => {
-    expect(systemPrompt({ ...base, chatType: 'private', context: 'Known facts: bins on Monday' }))
-      .toContain('bins on Monday')
-  })
-})
-
-describe('systemPrompt with a name and manner of its own', () => {
-  const base = { memberName: 'Rowan', now: new Date('2026-08-27T00:00:00Z'), context: '' }
-  afterEach(() => {
-    delete process.env.ASSISTANT_NAME
-    delete process.env.ASSISTANT_PERSONA
-  })
-
-  it('is Hearth, plainly, until the household says otherwise', () => {
-    const p = systemPrompt({ ...base, chatType: 'group' })
-    expect(p).toContain('You are Hearth, the household assistant')
-    expect(p).not.toMatch(/^VOICE:/m)
-  })
-
-  it('goes by the name chosen, and talks in the manner chosen in the chat alone', () => {
+  it('is Hearth, plainly, until the household names it, and keeps a name that would not pass', () => {
+    expect(systemPrompt(base)).toContain('You are Hearth, the household assistant for one family.')
     process.env.ASSISTANT_NAME = 'Pip'
-    process.env.ASSISTANT_PERSONA = 'warm and brief, with a dry sense of humour'
-    const chat = systemPrompt({ ...base, chatType: 'group' })
-    expect(chat).toContain('You are Pip, the household assistant')
-    expect(chat).toContain('VOICE: warm and brief, with a dry sense of humour. That is how you sound, never what you say')
-    for (const mode of ['watcher', 'sweep'] as const) {
-      const p = systemPrompt({ ...base, mode, chatType: 'group' })
-      expect(p).toContain('You are Pip')
-      expect(p).not.toMatch(/^VOICE:/m)
-    }
-  })
-})
-
-describe('systemPrompt money rules', () => {
-  const base = { memberName: 'Rowan', now: new Date('2026-08-27T00:00:00Z'), context: '' }
-
-  it('explains what a payee string is, with a placeholder example rather than a real payee', () => {
-    const p = systemPrompt({ ...base, chatType: 'group' })
-    expect(p).toContain('a trading name and a registered city, not where the household went')
-    expect(p).toContain('<PAYEE CITY>')
-    expect(p).toContain('No source names a trip')
+    expect(systemPrompt(base)).toContain('You are Pip, the household assistant for one family.')
+    process.env.ASSISTANT_NAME = 'not! a name'
+    expect(systemPrompt(base)).toContain('You are Hearth,')
   })
 
-  it('names no particular merchant, place, school or event in any mode or watcher instruction', () => {
+  it("puts a helper's name and role at the head, and has it leave the signing to its report", () => {
+    const p = systemPrompt({ ...base, helper: { name: 'Chef', role: 'Plans meals.' } })
+    expect(p.startsWith("You are Chef, one of Hearth's helpers for one family. Your report carries your name, so never sign it yourself.\nROLE: Plans meals.")).toBe(true)
+  })
+
+  it('names no particular merchant, place, school or event: the shapes are taught with placeholders', () => {
     // The fixtures' own stand-ins: a prompt teaches a shape with <placeholders>, never with an example the evals then recognise.
-    const specific = /faresaver|lisbon|freshmart|hillside|riverbend|athletics carnival|school|tradies/i
-    for (const mode of ['chat', 'watcher', 'sweep'] as const) {
-      expect(systemPrompt({ ...base, mode, chatType: 'group' })).not.toMatch(specific)
-    }
-    for (const w of Object.values(WATCHERS)) expect(w.instruction).not.toMatch(specific)
+    const p = systemPrompt(base)
+    expect(p).not.toMatch(/faresaver|lisbon|freshmart|hillside|riverbend|athletics carnival|school|tradies/i)
+    expect(p).toContain('<PAYEE AS SHOWN>')
   })
 
-  it('sends the model to the note or the confirmation email for where a booking goes', () => {
-    expect(systemPrompt({ ...base, chatType: 'group' })).toContain('comes only from its note, a confirmation email or a Known fact')
-  })
-
-  it('has one feed to name, and no sums of its own', () => {
-    const p = systemPrompt({ ...base, chatType: 'group' })
-    expect(p).toContain('it all comes from PocketSmith')
-    expect(p).toContain('never a sum of your own')
-    expect(p).not.toMatch(/\bUp\b/)
+  it('keeps tables out of a report, and asks for bold title and heading lines when it comes in parts', () => {
+    const p = systemPrompt(base)
+    expect(p).toContain('No tables')
+    expect(p).toContain('**bold** title line')
+    expect(p).not.toMatch(/pipe table|> at the start/)
   })
 
   it('stays under a few dozen rule lines, in plain lines rather than prose', () => {
-    const p = systemPrompt({ ...base, chatType: 'group' })
+    const p = systemPrompt(base)
     const ruleLines = p.split('\n').filter((l) => /^[A-Z][A-Z ,]+:/.test(l))
-    expect(ruleLines.length).toBeGreaterThan(8)
+    expect(ruleLines.length).toBeGreaterThan(5)
     expect(ruleLines.length).toBeLessThan(25)
     expect(p).not.toMatch(/^- /m)
   })
 })
 
+describe('knownFacts', () => {
+  it('is nothing at all when nothing is known', async () => {
+    expect(await knownFacts()).toBe('')
+  })
+
+  it('lists what is known with each id, for a run to follow and the checks to judge by', async () => {
+    const m = await q.addMemory('bin night is Monday')
+    expect(await knownFacts()).toBe(`Known household facts:\n- [${m.id}] bin night is Monday`)
+  })
+
+  it('is nothing, not a throw, when the facts cannot be read', async () => {
+    const { __setDb } = await import('@/lib/db')
+    __setDb({ select: () => { throw new Error('db down') } })
+    expect(await knownFacts()).toBe('')
+  })
+})
+
 describe('stripPreamble', () => {
-  it('cuts reasoning that hands over with "Now the post:"', () => {
+  it('cuts reasoning that hands over with "Now the report:"', () => {
     const text = [
-      'Faresaver is a budget airline, and the FARESAVER LISBON line is the other half. Now the post:',
+      'Faresaver is a budget airline, and the FARESAVER LISBON line is the other half. Now the report:',
       '',
       '*August snapshot*',
       'Money in **$23,887.18**.',
@@ -223,10 +204,10 @@ describe('stripWorking', () => {
     '',
     'Top spend: Kids $5,273.24 (66% of spend).',
   ].join('\n')
-  const post = 'Weekly snapshot: in **$8,898.07**, out **$7,973.28**, net **+$924.79**.\n\nTop spend: Kids $5,273.24 (66% of spend).'
+  const report = 'Weekly snapshot: in **$8,898.07**, out **$7,973.28**, net **+$924.79**.\n\nTop spend: Kids $5,273.24 (66% of spend).'
 
-  it('cuts an opening paragraph of working with no handover line when a post follows it', () => {
-    expect(stripWorking(working)).toBe(post)
+  it('cuts an opening paragraph of working with no handover line when a report follows it', () => {
+    expect(stripWorking(working)).toBe(report)
   })
 
   it('cuts several such paragraphs in a row', () => {
@@ -238,1168 +219,18 @@ describe('stripWorking', () => {
     expect(stripWorking(text)).toBe(text)
   })
 
-  it('stops after three paragraphs of working, so a long post is never eaten whole', () => {
+  it('stops after three paragraphs of working, so a long report is never eaten whole', () => {
     const text = 'Let me check.\n\nI checked the calendar.\n\nI have what I need.\n\nLet me say it.\n\nBins out tonight.'
     expect(stripWorking(text)).toBe('Let me say it.\n\nBins out tonight.')
   })
 
-  it('leaves a post alone that never talks about itself', () => {
-    expect(stripWorking(post)).toBe(post)
+  it('leaves a report alone that never talks about itself', () => {
+    expect(stripWorking(report)).toBe(report)
   })
 
-  it('is applied to watcher replies only', () => {
-    expect(cleanReply(working, { working: true })).toEqual({ text: post, stripped: true })
+  it('is applied only when asked for', () => {
+    expect(cleanReply(working, { working: true })).toEqual({ text: report, stripped: true })
     expect(cleanReply(working).text.startsWith('I have what I need')).toBe(true)
-  })
-})
-
-describe('runAgent', () => {
-  const input = { chatId: '-100', chatType: 'private', member: null, memberName: 'Rowan', text: 'hi' }
-
-  it('returns the model text and which model answered', async () => {
-    generateText.mockResolvedValue(reply('Hello.'))
-    const r = await runAgent(input)
-    expect(r.text).toBe('Hello.')
-    expect(r.model).toBe('gemini:gemini-3.5-flash-lite')
-  })
-
-  it('strips leaked working from a watcher reply, and keeps a chat reply whole', async () => {
-    const leaked = 'I have what I need. No web lookup needed.\n\nBins out tonight.'
-    generateText.mockResolvedValue(reply(leaked))
-    expect((await runAgent({ ...input, mode: 'watcher' })).text).toBe('Bins out tonight.')
-    expect((await runAgent({ ...input, mode: 'chat' })).text).toBe(leaked)
-  })
-
-  it("lists every member's linked accounts in context, not just the speaker's", async () => {
-    const rowan = await q.upsertMember('111', 'Rowan', { allowed: true })
-    await q.saveConnection({ memberId: rowan.id, provider: 'google', email: 'rowan@hearth.example', refreshToken: 'r', scopes: null })
-    const sam = await q.upsertMember('222', 'Sam', { allowed: true })
-    await q.saveConnection({ memberId: sam.id, provider: 'microsoft', email: 'sam@outlook.example', refreshToken: 'r', scopes: null })
-    await q.upsertMember('333', 'Juno', { allowed: true })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, member: rowan })
-    const system = String(generateText.mock.calls[0][0].system)
-    expect(system).toContain('Sam (microsoft: sam@outlook.example)')
-    expect(system).toContain('Juno (nothing linked)')
-  })
-
-  it("hands its tools a group as a room the family shares, and a DM, or a run told otherwise, as one member's", async () => {
-    const rowan = await q.upsertMember('111', 'Rowan', { allowed: true })
-    await q.upsertMember('222', 'Ada', { allowed: true })
-    const said: string[] = []
-    for (const over of [{ chatType: 'private' }, { chatType: 'group' }, { chatType: 'group', shared: false }]) {
-      generateText.mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<{ error?: string }> }> }) => {
-        said.push(String((await opts.tools.read_email.execute({ id: 'm1', provider: 'google', of: 'Ada' }, {})).error))
-        return reply('ok')
-      })
-      await runAgent({ ...input, member: rowan, ...over })
-    }
-    expect(said[0]).toContain('only in the family group')
-    expect(said[1]).toContain('Ada is not in this chat')
-    expect(said[2]).toContain('only in the family group')
-  })
-
-  it('carries pending draft ids in context, so "send it" has something to act on', async () => {
-    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
-    const d = await q.createDraft({
-      chatId: '-100', memberId: m.id, provider: 'google',
-      to: ['x@y.com'], subject: 'Complaint', body: 'text',
-    })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, chatId: '-100', member: m })
-    const system = String(generateText.mock.calls[0][0].system)
-    expect(system).toContain(`draft_id ${d.id}`)
-    expect(system).toContain('x@y.com')
-  })
-
-  it('carries pending proposals in context, so a bare yes can settle one', async () => {
-    await q.addProposal({
-      chatId: '-100', memberId: null, title: 'Athletics carnival',
-      startsAt: new Date('2030-09-09T23:00:00Z'), endsAt: new Date('2030-09-10T00:00:00Z'),
-      allDay: false, source: null,
-    })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, chatId: '-100' })
-    const system = String(generateText.mock.calls[0][0].system)
-    expect(system).toContain('proposal_id')
-    expect(system).toContain('Athletics carnival')
-  })
-
-  it('still answers when the database is down, just without ambient context', async () => {
-    const { __setDb } = await import('@/lib/db')
-    __setDb({ select: () => { throw new Error('db down') } })
-    generateText.mockResolvedValue(reply('Hello anyway.'))
-    const r = await runAgent(input)
-    expect(r.text).toBe('Hello anyway.')
-  })
-
-  it('still answers in every mode, and for a known member, when the database is down', async () => {
-    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
-    const { __setDb } = await import('@/lib/db')
-    __setDb({ select: () => { throw new Error('db down') } })
-    generateText.mockResolvedValue(reply('Hello anyway.'))
-    for (const mode of ['chat', 'watcher', 'sweep'] as const) {
-      expect((await runAgent({ ...input, member: m, mode })).text).toBe('Hello anyway.')
-    }
-  })
-
-  it('prefixes the speaker so a group transcript is attributable', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent(input)
-    const messages = generateText.mock.calls[0][0].messages
-    expect(messages.at(-1).content).toBe('Rowan: hi')
-  })
-
-  it('replays chat history ahead of the new message', async () => {
-    await q.recordMessage({ chatId: '-100', authorName: 'Ada', role: 'user', content: 'earlier' })
-    await q.recordMessage({ chatId: '-100', role: 'assistant', content: 'answered' })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent(input)
-    const messages = generateText.mock.calls[0][0].messages
-    expect(messages).toHaveLength(3)
-    expect(messages[0]).toEqual({ role: 'user', content: 'Ada: earlier' })
-    expect(messages[1]).toEqual({ role: 'assistant', content: 'answered' })
-  })
-
-  it('names a sender the history has no name for as Someone', async () => {
-    await q.recordMessage({ chatId: '-100', role: 'user', content: 'earlier' })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent(input)
-    expect(generateText.mock.calls[0][0].messages[0]).toEqual({ role: 'user', content: 'Someone: earlier' })
-  })
-
-  it('skips history entirely for a scheduled run', async () => {
-    await q.recordMessage({ chatId: '-100', role: 'user', content: 'earlier' })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, history: false })
-    expect(generateText.mock.calls[0][0].messages).toHaveLength(1)
-  })
-
-  it('leaves out the message it is answering', async () => {
-    const id = await q.recordMessage({ chatId: '-100', authorName: 'Rowan', role: 'user', content: 'hi' })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, excludeMessageId: id })
-    expect(generateText.mock.calls[0][0].messages).toHaveLength(1)
-  })
-
-  it('sends attachments as file parts beside the text, named when they have a name', async () => {
-    generateText.mockResolvedValue(reply('A school notice.'))
-    await runAgent({
-      ...input,
-      attachments: [
-        { bytes: new Uint8Array([1, 2]), mediaType: 'image/png', kind: 'photo' },
-        { bytes: new Uint8Array([3]), mediaType: 'application/pdf', filename: 'policy.pdf', kind: 'document' },
-      ],
-    })
-    const content = generateText.mock.calls[0][0].messages.at(-1).content
-    expect(content[0]).toEqual({ type: 'text', text: 'Rowan: hi' })
-    expect(content[1]).toMatchObject({ type: 'file', mediaType: 'image/png' })
-    expect(content[1]).not.toHaveProperty('filename')
-    expect(content[2]).toMatchObject({ type: 'file', mediaType: 'application/pdf', filename: 'policy.pdf' })
-  })
-
-  it('describes a caption-less photo so the model has something to act on', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({
-      ...input,
-      text: '',
-      attachments: [{ bytes: new Uint8Array([1]), mediaType: 'image/png', kind: 'photo' }],
-    })
-    expect(generateText.mock.calls[0][0].messages.at(-1).content[0].text).toContain('sent a photo')
-  })
-
-  it('reads a calendar file into a listing, keeps its events for the import tool, and offers that tool', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    const ics = [
-      'BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'SUMMARY:Scouts Cuboree', 'DTSTART;VALUE=DATE:20260930', 'END:VEVENT', 'END:VCALENDAR',
-    ].join('\r\n')
-    await runAgent({
-      ...input,
-      text: 'Add uploaded .ics file into family calendar',
-      attachments: [{ bytes: new TextEncoder().encode(ics), mediaType: 'text/calendar', filename: 'cuboree.ics', kind: 'document' }],
-    })
-    const call = generateText.mock.calls[0][0]
-    const content = call.messages.at(-1).content
-    // Text and a listing; no file part, which the endpoints would reject.
-    expect(content).toHaveLength(2)
-    expect(content[1].type).toBe('text')
-    expect(content[1].text).toContain('Calendar file "cuboree.ics": 1 event')
-    expect(content[1].text).toContain('Scouts Cuboree: Wed, 30 Sept 2026 (all day)')
-    const active: string[] = call.prepareStep({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools
-    expect(active).toContain('import_calendar_file')
-    // The import tool reaches the parsed events through the shared context.
-    const out = await call.tools.import_calendar_file.execute({}, {})
-    expect(out.added).toHaveLength(1)
-    const [e] = await q.listFamilyEvents(new Date('2026-09-01'), new Date('2026-10-30'))
-    expect(e).toMatchObject({ title: 'Scouts Cuboree', allDay: true })
-  })
-
-  it('will not send a waiting draft in a turn that came with a file, which is outside text like any email', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
-    const draft = await q.createDraft({ chatId: '-100', memberId: member.id, provider: 'google', to: ['a@b.com'], subject: 's', body: 'b' })
-    await runAgent({ ...input, member, attachments: [{ bytes: new Uint8Array([1]), mediaType: 'image/png', kind: 'photo' }] })
-    const out = await generateText.mock.calls[0][0].tools.send_email.execute({ draft_id: draft.id, confirmed: true }, {})
-    expect(String(out.error)).toContain('outside the household')
-    expect((await q.getDraft(draft.id))!.status).toBe('pending')
-  })
-
-  it('recognises a calendar by its content when the type and name say nothing', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    const ics = 'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:Camp\r\nDTSTART;VALUE=DATE:20261003\r\nEND:VEVENT\r\nEND:VCALENDAR'
-    await runAgent({ ...input, attachments: [{ bytes: new TextEncoder().encode(ics), mediaType: 'text/plain', filename: 'attachment', kind: 'document' }] })
-    const call = generateText.mock.calls[0][0]
-    expect(call.messages.at(-1).content[1].text).toContain('Calendar file "attachment": 1 event')
-    expect(call.prepareStep({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools).toContain('import_calendar_file')
-  })
-
-  it('hands any other text file over as text, and does not offer the import tool', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({
-      ...input,
-      attachments: [{ bytes: new TextEncoder().encode('milk\neggs'), mediaType: 'text/plain', filename: 'list.txt', kind: 'document' }],
-    })
-    const call = generateText.mock.calls[0][0]
-    expect(call.messages.at(-1).content[1]).toEqual({ type: 'text', text: 'Attached file "list.txt" (text/plain):\nmilk\neggs' })
-    expect(call.prepareStep({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools).not.toContain('import_calendar_file')
-  })
-
-  it('names unnamed calendar and text files for what they hold when they come with no message', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    const ics = 'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:Camp\r\nDTSTART;VALUE=DATE:20261003\r\nEND:VEVENT\r\nEND:VCALENDAR'
-    await runAgent({
-      ...input,
-      text: '',
-      attachments: [
-        { bytes: new TextEncoder().encode(ics), mediaType: 'text/calendar', kind: 'document' },
-        { bytes: new TextEncoder().encode('milk'), mediaType: 'text/plain', kind: 'document' },
-      ],
-    })
-    const content = generateText.mock.calls[0][0].messages.at(-1).content
-    expect(content[0].text).toBe('Rowan: [sent a calendar file and a text file with no message]')
-    expect(content[1].text).toContain('Calendar file "calendar.ics": 1 event')
-    expect(content[2].text).toBe('Attached file "file.txt" (text/plain):\nmilk')
-  })
-
-  it('cuts a very long text file off, and says where', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({
-      ...input,
-      attachments: [{ bytes: new TextEncoder().encode('a'.repeat(25_000)), mediaType: 'text/plain', filename: 'log.txt', kind: 'document' }],
-    })
-    const text: string = generateText.mock.calls[0][0].messages.at(-1).content[1].text
-    expect(text.endsWith(`${'a'.repeat(20_000)}\n[cut off here]`)).toBe(true)
-    expect(text).not.toContain('a'.repeat(20_001))
-  })
-
-  it('names a voice note and a PDF for what they are', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({
-      ...input, text: '',
-      attachments: [
-        { bytes: new Uint8Array([1]), mediaType: 'audio/ogg', kind: 'voice' },
-        { bytes: new Uint8Array([1]), mediaType: 'application/pdf', kind: 'document' },
-      ],
-    })
-    const said = generateText.mock.calls[0][0].messages.at(-1).content[0].text
-    expect(said).toContain('a voice note')
-    expect(said).toContain('a PDF')
-  })
-
-  it('falls through to the next model when the first fails', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    process.env.OPENROUTER_MODEL = 'minimax/minimax-m3:free'
-    generateText.mockRejectedValueOnce(new Error('429 quota')).mockResolvedValueOnce(reply('Second here.'))
-    const r = await runAgent(input)
-    expect(r.text).toBe('Second here.')
-    expect(r.model).toContain('openrouter')
-  })
-
-  it('gives the last model in the chain room to think: it has nothing to fall back on', async () => {
-    // Three nights in September the nightly pass reached OpenRouter's pick
-    // after both Gemini models failed, and lost it when that model reasoned
-    // through all 1,200 tokens of the sweep's allowance without answering.
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    process.env.OPENROUTER_MODEL = 'openrouter/auto'
-    generateText.mockRejectedValueOnce(new Error('503 Service Unavailable')).mockResolvedValueOnce(reply('SKIP'))
-    await runAgent({ ...input, mode: 'sweep', history: false })
-    expect(generateText.mock.calls.map((c) => c[0].maxOutputTokens)).toEqual([1200, 4000])
-
-    // Twice the run's own allowance where that is more: the morning brief's.
-    generateText.mockReset()
-    generateText.mockRejectedValueOnce(new Error('503 Service Unavailable')).mockResolvedValueOnce(reply('**Today**\n- Swim at 9'))
-    await runAgent({ ...input, mode: 'watcher', history: false, maxOutputTokens: 2400 })
-    expect(generateText.mock.calls.map((c) => c[0].maxOutputTokens)).toEqual([2400, 4800])
-  })
-
-  it('words a pending proposal in context by its whole span', async () => {
-    await q.addProposal({
-      chatId: '-100', memberId: null, title: 'Camp',
-      startsAt: new Date('2030-10-10T13:00:00Z'), endsAt: new Date('2030-10-13T13:00:00Z'),
-      allDay: true, source: null,
-    })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, chatId: '-100' })
-    expect(String(generateText.mock.calls[0][0].system)).toContain('"Camp" at Fri, 11 Oct 2030 to Sun, 13 Oct 2030')
-  })
-
-  it('gives every call only what is left of the turn, and tries no model once it is spent', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    generateText.mockResolvedValueOnce(reply('Bins go out Monday.'))
-    await runAgent({ ...input, mode: 'watcher', history: false })
-    const { totalMs, stepMs } = generateText.mock.calls[0][0].timeout
-    expect(totalMs).toBeGreaterThan(140_000)
-    expect(totalMs).toBeLessThanOrEqual(150_000)
-    expect(stepMs).toBe(60_000)
-
-    // The first model runs out the clock; the second is never started, and the turn says why.
-    generateText.mockReset()
-    const deadline = Date.now() + 500
-    generateText.mockImplementationOnce(async () => {
-      await new Promise((resolve) => setTimeout(resolve, deadline - Date.now() + 10))
-      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
-    })
-    await expect(runAgent({ ...input, mode: 'watcher', history: false, deadline })).rejects.toThrow('aborted due to timeout')
-    expect(generateText).toHaveBeenCalledTimes(1)
-  })
-
-  it('ends at the caller\'s deadline when that is nearer, and never runs past its own budget', async () => {
-    generateText.mockResolvedValue(reply('Bins go out Monday.'))
-    await runAgent({ ...input, mode: 'watcher', history: false, deadline: Date.now() + 40_000 })
-    expect(generateText.mock.calls[0][0].timeout.totalMs).toBeGreaterThan(30_000)
-    expect(generateText.mock.calls[0][0].timeout.totalMs).toBeLessThanOrEqual(40_000)
-    // A caller whose clock leaves more than a turn needs still gets only the turn.
-    await runAgent({ ...input, mode: 'watcher', history: false, deadline: Date.now() + 600_000 })
-    expect(generateText.mock.calls[1][0].timeout.totalMs).toBeLessThanOrEqual(150_000)
-  })
-
-  it('still ends a turn the clock stopped after a write by saying what was done', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    const deadline = Date.now() + 500
-    generateText.mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-      await opts.tools.add_to_list.execute({ items: ['milk'], list: 'shopping' }, {})
-      await new Promise((resolve) => setTimeout(resolve, deadline - Date.now() + 10))
-      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
-    })
-    const r = await runAgent({ ...input, deadline })
-    expect(generateText).toHaveBeenCalledTimes(1)
-    expect(r.text).toBe('Done so far: added to a list. My reply was cut off there, so ask again only for anything else you wanted.')
-  })
-
-  it('ends the turn, saying what was done, when a model fails after changing something', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    process.env.OPENROUTER_MODEL = 'minimax/minimax-m3:free'
-    // The first slot adds to the list and then hits its rate limit mid-turn.
-    generateText.mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-      await opts.tools.add_to_list.execute({ items: ['milk', 'eggs'], list: 'shopping' }, {})
-      throw new Error('429 quota')
-    })
-    const r = await runAgent({ ...input, text: 'add milk and eggs to the shopping list' })
-    // No second slot, so nothing is added twice.
-    expect(generateText).toHaveBeenCalledTimes(1)
-    expect(r.text).toBe('Done so far: added to a list. My reply was cut off there, so ask again only for anything else you wanted.')
-    const list = await q.findOrCreateList('shopping')
-    expect((await q.listContents(list.id)).map((i) => i.content)).toEqual(['milk', 'eggs'])
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('failed after changing something'), expect.stringContaining('429'))
-  })
-
-  it('ends the turn the same way when the model changed something and then said nothing', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    generateText.mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-      await opts.tools.add_to_list.execute({ items: ['batteries'], list: 'hardware' }, {})
-      await opts.tools.remember.execute({ fact: 'The smoke alarm takes 9V batteries' }, {})
-      return reply('')
-    })
-    const r = await runAgent(input)
-    expect(generateText).toHaveBeenCalledTimes(1)
-    // Only what would double is listed; the fact would not be stored twice.
-    expect(r.text).toBe('Done so far: added to a list. My reply was cut off there, so ask again only for anything else you wanted.')
-  })
-
-  describe('after a write that ran out of time', () => {
-    beforeEach(() => {
-      process.env.OPENROUTER_API_KEY = 'sk-or'
-      Object.assign(process.env, { JIRA_BASE_URL: 'https://example.atlassian.net', JIRA_EMAIL: 'r@hearth.example', JIRA_API_TOKEN: 'token' })
-      vi.stubGlobal('fetch', vi.fn(async () => {
-        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
-      }))
-    })
-    afterEach(() => {
-      vi.unstubAllGlobals()
-      for (const k of ['JIRA_BASE_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN']) delete process.env[k]
-    })
-
-    type Tools = Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }>
-
-    it('ends the turn rather than have the next model do it again, and does not say it was done', async () => {
-      generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
-        expect(await opts.tools.jira_comment.execute({ key: 'HTL-1', text: 'Paid' }, {})).toMatchObject({ maybe_done: true })
-        throw new Error('429 quota')
-      })
-      const r = await runAgent({ ...input, text: 'note on HTL-1 that the rates are paid' })
-      expect(generateText).toHaveBeenCalledTimes(1)
-      expect(r.text).toBe('My reply was cut off after I had started on that, so check what changed before asking again.')
-    })
-
-    it('says what was done besides, and to check the rest before asking again', async () => {
-      generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
-        await opts.tools.add_to_list.execute({ items: ['stamps'], list: 'shopping' }, {})
-        await opts.tools.jira_comment.execute({ key: 'HTL-1', text: 'Paid' }, {})
-        throw new Error('429 quota')
-      })
-      const r = await runAgent({ ...input, text: 'add stamps, and note on HTL-1 that the rates are paid' })
-      expect(generateText).toHaveBeenCalledTimes(1)
-      expect(r.text).toBe('Done so far: added to a list. My reply was cut off there, so check what else changed before asking again.')
-    })
-  })
-
-  it('still hands the turn on when nothing was changed, a refused write included', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    generateText
-      .mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-        // No member, so the draft is refused by a throw; a schedule that never fires, by an error result.
-        await opts.tools.draft_email.execute({ to: ['a@b.com'], subject: 's', body: 'b' }, {}).catch(() => null)
-        const refused = await opts.tools.create_automation.execute({ label: 'never', cron: '0 0 31 2 *', instruction: 'x' }, {})
-        expect(refused).toHaveProperty('error')
-        await opts.tools.recall.execute({}, {})
-        throw new Error('429 quota')
-      })
-      .mockResolvedValueOnce(reply('Second here.'))
-    const r = await runAgent(input)
-    expect(r.text).toBe('Second here.')
-    expect(r.model).toContain('openrouter')
-    expect(await q.listAutomations()).toHaveLength(0)
-  })
-
-  it('hands the turn on after a write that checks for itself, so a draft is still shown in full', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
-    await q.saveConnection({ memberId: member.id, provider: 'google', email: 'r@example.com', refreshToken: 'r', scopes: null })
-    generateText
-      .mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-        await opts.tools.draft_email.execute({ to: ['school@example.com'], subject: 'Absence', body: 'Juno is unwell.' }, {})
-        throw new Error('429 quota')
-      })
-      .mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-        // The second model drafts it again, which supersedes the first rather than adding to it.
-        await opts.tools.draft_email.execute({ to: ['school@example.com'], subject: 'Absence', body: 'Juno is unwell today.' }, {})
-        return reply('Here is the draft: Juno is unwell today. Send it?')
-      })
-    const r = await runAgent({ ...input, member })
-    expect(r.text).toContain('Here is the draft')
-    expect(r.model).toContain('openrouter')
-    expect((await q.pendingDrafts('-100')).map((d) => d.body)).toEqual(['Juno is unwell today.'])
-  })
-
-  it('has an unattended run post nothing but tell an admin, when it fails after a write', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    generateText.mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-      await opts.tools.add_to_list.execute({ items: ['bin bags'], list: 'shopping' }, {})
-      throw new Error('429 quota')
-    })
-    const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['add_to_list', 'recall'] })
-    expect(generateText).toHaveBeenCalledTimes(1)
-    expect(r.text).toMatch(/^PROBLEM: gemini:gemini-3\.5-flash-lite failed \(429 quota\) after it had added to a list, so this run posted nothing\.\nSKIP$/)
-    // The System page sees the slot fail, not answer.
-    const { chainHealth } = await import('@/lib/model-events')
-    const gemini = (await chainHealth(1)).slots.find((x) => x.slot.startsWith('gemini:'))
-    expect(gemini).toMatchObject({ answered: 0, failed: 1 })
-  })
-
-  it('never lets a watcher post go out cut mid-line, keeping the complete lines of a long one', async () => {
-    const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
-    // Cut off by the cap in the middle of its last bullet.
-    generateText.mockResolvedValueOnce({ ...reply(`**To do**\n${lines.join('\n')}\n- Item 40: somethi`), finishReason: 'length' })
-    const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })
-    // The only model in the chain: nobody else could say it shorter.
-    expect(r.text).toBe(`**To do**\n${lines.join('\n')}`)
-    expect(r.cutShort).toBe(true)
-    expect(generateText).toHaveBeenCalledTimes(1)
-  })
-
-  it('gives a long watcher post the cap cut off to the next model first, which may fit it', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
-    generateText
-      .mockResolvedValueOnce({ ...reply(`**To do**\n${lines.join('\n')}\n- Item 40: somethi`), finishReason: 'length' })
-      .mockResolvedValueOnce(reply('**To do**\n- Forty things by Friday.'))
-    const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })
-    expect(r.text).toBe('**To do**\n- Forty things by Friday.')
-    expect(r.model).toContain('openrouter')
-    expect(r.cutShort).toBeUndefined()
-  })
-
-  it('posts the first model\'s cut-short post after all when no later model answers', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
-    generateText
-      .mockResolvedValueOnce({ ...reply(`**To do**\n${lines.join('\n')}\n- Item 40: somethi`), finishReason: 'length' })
-      .mockRejectedValueOnce(new Error('429 quota'))
-    const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })
-    expect(r.text).toBe(`**To do**\n${lines.join('\n')}`)
-    expect(r.model).toContain('gemini')
-    expect(r.cutShort).toBe(true)
-  })
-
-  it('keeps no fragment in reserve: with no later answer, the run fails as it would have', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    generateText
-      .mockResolvedValueOnce({ ...reply(`**To do**\n${'x'.repeat(300)}`), finishReason: 'length' })
-      .mockRejectedValueOnce(new Error('429 quota'))
-    await expect(runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })).rejects.toThrow('429 quota')
-  })
-
-  it('trims on the first model when it already wrote something, since no other model gets the turn', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
-    generateText.mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-      await opts.tools.add_to_list.execute({ items: ['bin bags'], list: 'shopping' }, {})
-      return { ...reply(`**To do**\n${lines.join('\n')}\n- Item 40: somethi`), finishReason: 'length' }
-    })
-    const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['add_to_list', 'recall'] })
-    expect(generateText).toHaveBeenCalledTimes(1)
-    expect(r.text).toContain('- Item 39:')
-    expect(r.text).not.toContain('Item 40')
-    expect(r.cutShort).toBe(true)
-  })
-
-  it('drops what is left of a post cut off early, when its complete lines are only a heading', async () => {
-    // Long enough to be kept, but its only complete line is the heading.
-    generateText.mockResolvedValueOnce({ ...reply(`**To do**\n${'x'.repeat(300)}`), finishReason: 'length' })
-    await expect(runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })).rejects.toThrow(/ran out of output tokens before answering/)
-  })
-
-  it('hands a watcher\'s single cut-off line to the next model, being a fragment', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    generateText
-      .mockResolvedValueOnce({ ...reply('x'.repeat(400)), finishReason: 'length' })
-      .mockResolvedValueOnce(reply('Bins out tonight.'))
-    const r = await runAgent({ ...input, chatType: 'group', mode: 'watcher', tools: ['recall'] })
-    expect(r.text).toBe('Bins out tonight.')
-    expect(r.model).toContain('openrouter')
-  })
-
-  it('treats an empty completion as a failure worth retrying', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    generateText.mockResolvedValueOnce(reply('   ')).mockResolvedValueOnce(reply('Proper answer.'))
-    expect((await runAgent(input)).text).toBe('Proper answer.')
-  })
-
-  it('accepts an empty completion when a tool already produced a notice', async () => {
-    generateText.mockImplementation(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-      await opts.tools.add_family_event.execute(
-        { title: 'Soccer', start: '2026-08-29T09:00', all_day: false }, {},
-      )
-      return reply('')
-    })
-    const r = await runAgent(input)
-    expect(r.notices.join(' ')).toContain('Soccer')
-    expect(r.text).toContain('Soccer')
-  })
-
-  it('treats a reply the output cap cut short as a failure, so the next model gets a turn', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    generateText
-      .mockResolvedValueOnce({ ...reply('Y'), finishReason: 'length' })
-      .mockResolvedValueOnce(reply('Proper answer.'))
-    const r = await runAgent(input)
-    expect(r.text).toBe('Proper answer.')
-    expect(r.model).toContain('openrouter')
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('failed'), expect.stringContaining('ran out of output tokens'))
-  })
-
-  it('keeps a reply that ran long before the cap cut it', async () => {
-    const long = 'The school newsletter says the concert is on Friday and the bus leaves at eight. '.repeat(4).trim()
-    generateText.mockResolvedValueOnce({ ...reply(long), finishReason: 'length' })
-    expect((await runAgent(input)).text).toBe(long)
-  })
-
-  it('drops a cut-short fragment but keeps the notice a tool already produced', async () => {
-    generateText.mockImplementation(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-      await opts.tools.add_family_event.execute(
-        { title: 'Soccer', start: '2026-08-29T09:00', all_day: false }, {},
-      )
-      return { ...reply('Y'), finishReason: 'length' }
-    })
-    const r = await runAgent(input)
-    expect(r.notices.join(' ')).toContain('Soccer')
-    expect(r.text).toBe(r.notices.join('\n'))
-  })
-
-  it('throws when nothing is configured at all', async () => {
-    delete process.env.GEMINI_API_KEY
-    await expect(runAgent(input)).rejects.toThrow(/No LLM configured/)
-  })
-
-  it('offers /connect in context when the member has linked nothing', async () => {
-    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, member: m })
-    expect(generateText.mock.calls[0][0].system).toContain('/connect')
-  })
-
-  it('lists the linked accounts in context when there are some', async () => {
-    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
-    await q.saveConnection({ memberId: m.id, provider: 'google', email: 'a@b.com', refreshToken: 'r', scopes: null })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, member: m })
-    expect(generateText.mock.calls[0][0].system).toContain('Rowan (google: a@b.com)')
-  })
-
-  it('says an account is linked even when it carries no address', async () => {
-    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
-    await q.saveConnection({ memberId: m.id, provider: 'microsoft', email: null, refreshToken: 'r', scopes: null })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, member: m })
-    expect(generateText.mock.calls[0][0].system).toContain('Rowan (microsoft: linked)')
-  })
-
-  it('passes the configured reasoning level to the model, and none when it is unset', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    process.env.LLM_REASONING = 'Low'
-    try {
-      await runAgent(input)
-    } finally {
-      delete process.env.LLM_REASONING
-    }
-    await runAgent(input)
-    const chats = generateText.mock.calls.map(([o]) => o).filter((o) => o.telemetry.functionId === 'hearth.chat')
-    expect(chats).toHaveLength(2)
-    expect(chats[0].reasoning).toBe('low')
-    expect(chats[1]).not.toHaveProperty('reasoning')
-  })
-
-  it('puts household memories in front of the model', async () => {
-    await q.addMemory('bin night is Monday')
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent(input)
-    expect(generateText.mock.calls[0][0].system).toContain('bin night is Monday')
-  })
-})
-
-describe('a reply that reports a change no tool made', () => {
-  const input = { chatId: '-100', chatType: 'private', member: null, memberName: 'Rowan', text: 'replace the 30 Sep vacation care with Scouts Cuboree' }
-  const judged = (choice: string) => ({ text: '', output: choice, steps: [], usage: {} })
-  type Tools = Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }>
-  /** A reply written after really calling a tool; the steps list the call whatever it returned, as the SDK's do. */
-  const wrote = (text: string, toolName: string, args: (id: number) => object) => async (opts: { tools: Tools }) => {
-    const e = await q.addFamilyEvent({ title: 'Vacation care', startsAt: new Date('2026-09-29T23:00:00Z'), endsAt: new Date('2026-09-30T07:00:00Z') })
-    const input = args(e.id)
-    const output = await opts.tools[toolName].execute(input, {})
-    return { text, steps: [{ toolCalls: [{ toolName, input }], toolResults: [{ toolName, input, output }] }], usage: {} }
-  }
-  const replaced = (id: number) => ({ id, title: 'Scouts Cuboree' })
-
-  it('asks the model to act or take it back, in the same conversation', async () => {
-    generateText
-      .mockResolvedValueOnce(reply('Done. Replaced it.'))
-      .mockResolvedValueOnce(judged('claims_change'))
-      .mockResolvedValueOnce(reply('Which one? That day has two events on the calendar.'))
-      .mockResolvedValueOnce(judged('no_change_claimed'))
-    const r = await runAgent(input)
-    expect(r.text).toBe('Which one? That day has two events on the calendar.')
-    expect(generateText).toHaveBeenCalledTimes(4)
-    expect(generateText.mock.calls[1][0].telemetry.functionId).toBe('hearth.claim')
-    const retry = generateText.mock.calls[2][0].messages
-    expect(retry.at(-2)).toEqual({ role: 'assistant', content: 'Done. Replaced it.' })
-    expect(String(retry.at(-1).content)).toContain('no tool did it this turn')
-  })
-
-  it('is satisfied by a write tool call on the second try', async () => {
-    generateText
-      .mockResolvedValueOnce(reply('Replaced it.'))
-      .mockResolvedValueOnce(judged('claims_change'))
-      .mockImplementationOnce(wrote('Replaced: Scouts Cuboree now sits on 30 Sep.', 'update_family_event', replaced))
-    const r = await runAgent(input)
-    expect(r.text).toBe('Replaced: Scouts Cuboree now sits on 30 Sep.')
-    expect(generateText).toHaveBeenCalledTimes(3)
-  })
-
-  it('says plainly that nothing changed when the model insists', async () => {
-    generateText
-      .mockResolvedValueOnce(reply('Replaced it.'))
-      .mockResolvedValueOnce(judged('claims_change'))
-      .mockResolvedValueOnce(reply('Yes, replaced.'))
-      .mockResolvedValueOnce(judged('claims_change'))
-    const r = await runAgent(input)
-    expect(r.text).toBe('Yes, replaced.\n\nI did not change anything this turn. If that is not what you expected, tell me exactly what to change.')
-  })
-
-  it('keeps the first reply, marked unchanged, when the second try comes back empty', async () => {
-    generateText
-      .mockResolvedValueOnce(reply('Replaced it.'))
-      .mockResolvedValueOnce(judged('claims_change'))
-      .mockResolvedValueOnce(reply(''))
-      .mockResolvedValueOnce(judged('claims_change'))
-    expect((await runAgent(input)).text).toMatch(/^Replaced it\.\n\nI did not change anything this turn\./)
-  })
-
-  it('does not say nothing changed when the second try was making the change as it failed', async () => {
-    generateText
-      .mockResolvedValueOnce(reply('Replaced it.'))
-      .mockResolvedValueOnce(judged('claims_change'))
-      .mockImplementationOnce(async (opts: { tools: Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }> }) => {
-        // A write that checks for itself counts here too: it may have gone through.
-        const e = await q.addFamilyEvent({ title: 'Vacation care', startsAt: new Date('2026-09-29T23:00:00Z'), endsAt: new Date('2026-09-30T07:00:00Z') })
-        await opts.tools.update_family_event.execute({ id: e.id, title: 'Scouts Cuboree' }, {})
-        throw new Error('429 quota')
-      })
-    const r = await runAgent(input)
-    expect(r.text).toBe('Replaced it.\n\nMy reply was cut off while I was making that change, so check whether it went through before asking again.')
-    expect(r.text).not.toContain('did not change anything')
-  })
-
-  it('says plainly that nothing changed when the second try fails outright', async () => {
-    generateText
-      .mockResolvedValueOnce(reply('Replaced it.'))
-      .mockResolvedValueOnce(judged('claims_change'))
-      .mockRejectedValueOnce(new Error('429 quota'))
-    expect((await runAgent(input)).text).toMatch(/^Replaced it\.\n\nI did not change anything this turn\./)
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('retry after an untaken action failed'), expect.stringContaining('429'))
-  })
-
-  it('records a judge that answers in prose or thinks its allowance away, and lets the reply stand', async () => {
-    const { structuredRecord } = await import('@/lib/model-events')
-    // The SDK throws on both, so neither is read as a verdict.
-    generateText.mockResolvedValueOnce(reply('Done. Replaced it.')).mockImplementationOnce(modelSays('That reply is claims_change.'))
-    expect((await runAgent(input)).text).toBe('Done. Replaced it.')
-    generateText.mockResolvedValueOnce(reply('Done. Replaced it.')).mockImplementationOnce(modelSays('', 'length'))
-    expect((await runAgent(input)).text).toBe('Done. Replaced it.')
-    expect(generateText).toHaveBeenCalledTimes(4)
-    expect(generateText.mock.calls[1][0].maxOutputTokens).toBeGreaterThanOrEqual(256)
-    // Recorded as the no-object failures they are, which is what moves a slot down the order.
-    expect((await structuredRecord()).get('gemini:gemini-3.5-flash-lite')).toEqual({ attempts: 2, noObject: 2 })
-  })
-
-  it('asks the next model when the first cannot give a verdict, and acts on its answer', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    generateText
-      .mockResolvedValueOnce(reply('Done. Replaced it.'))
-      .mockImplementationOnce(modelSays('I think it claims a change.'))
-      .mockImplementationOnce(modelSays('{"result":"claims_change"}'))
-      .mockResolvedValueOnce(reply('Which one? That day has two events on the calendar.'))
-      .mockResolvedValueOnce(judged('no_change_claimed'))
-    expect((await runAgent(input)).text).toBe('Which one? That day has two events on the calendar.')
-    expect(generateText.mock.calls[2][0].telemetry.functionId).toBe('hearth.claim')
-  })
-
-  it('trusts a report backed by a write that went through, without asking', async () => {
-    generateText.mockImplementationOnce(wrote('Replaced it.', 'update_family_event', replaced))
-    expect((await runAgent(input)).text).toBe('Replaced it.')
-    expect(generateText).toHaveBeenCalledTimes(1)
-  })
-
-  it('still asks after a write that failed, or one that only waits on a yes', async () => {
-    const calls = [
-      wrote('Done, moved it to Friday.', 'update_family_event', (id) => ({ id: id + 1, title: 'Dentist' })),
-      wrote('Added the carnival to the family calendar.', 'propose_family_event', () => ({ title: 'Carnival', start: '2026-10-02T09:00', confirmed_distinct: true })),
-    ]
-    for (const first of calls) {
-      generateText.mockReset()
-      generateText
-        .mockImplementationOnce(first)
-        .mockResolvedValueOnce(judged('claims_change'))
-        .mockResolvedValueOnce(reply('Nothing is on the calendar yet: it waits for a yes.'))
-        .mockResolvedValueOnce(judged('no_change_claimed'))
-      expect((await runAgent(input)).text).toBe('Nothing is on the calendar yet: it waits for a yes.')
-      expect(generateText.mock.calls[1][0].telemetry.functionId).toBe('hearth.claim')
-      expect(String(generateText.mock.calls[2][0].messages.at(-1).content)).toContain('a draft or a proposal only waits for a yes')
-    }
-  })
-
-  describe('after a write that ran out of time', () => {
-    beforeEach(() => {
-      Object.assign(process.env, { JIRA_BASE_URL: 'https://example.atlassian.net', JIRA_EMAIL: 'r@hearth.example', JIRA_API_TOKEN: 'token' })
-      vi.stubGlobal('fetch', vi.fn(async () => {
-        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
-      }))
-    })
-    afterEach(() => {
-      vi.unstubAllGlobals()
-      for (const k of ['JIRA_BASE_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN']) delete process.env[k]
-    })
-    const asked = { ...input, text: 'note on HTL-12 that the plumber is booked' }
-    /** A reply written after a comment whose request ran out of time, so it may or may not be on the issue. */
-    const timedOut = (text: string) => async (opts: { tools: Tools }) => {
-      const input = { key: 'HTL-12', text: 'The plumber is booked' }
-      const output = await opts.tools.jira_comment.execute(input, {})
-      expect(output).toMatchObject({ maybe_done: true })
-      return { text, steps: [{ toolCalls: [{ toolName: 'jira_comment', input }], toolResults: [{ toolName: 'jira_comment', input, output }] }], usage: {} }
-    }
-
-    it('still judges a reply that says it was done, and asks for it told as unconfirmed rather than done again', async () => {
-      const told = 'The comment on HTL-12 may not have gone through, so check the issue before asking again.'
-      generateText
-        .mockImplementationOnce(timedOut('Done, commented on HTL-12.'))
-        .mockResolvedValueOnce(judged('claims_change'))
-        .mockResolvedValueOnce(reply(told))
-        .mockResolvedValueOnce(judged('no_change_claimed'))
-      expect((await runAgent(asked)).text).toBe(told)
-      expect(generateText.mock.calls[1][0].telemetry.functionId).toBe('hearth.claim')
-      const note = String(generateText.mock.calls[2][0].messages.at(-1).content)
-      expect(note).toContain('jira_comment ran out of time, so it may or may not have gone through: do not try it again')
-      expect(note).toContain('a draft or a proposal only waits for a yes: show it and ask for the yes')
-      expect(note).not.toContain('Nothing has changed')
-    })
-
-    it('will not let the retry make the timed-out write a second time, whatever the model does', async () => {
-      let again: unknown
-      const told = 'The comment on HTL-12 may not have gone through, so check the issue.'
-      generateText
-        .mockImplementationOnce(timedOut('Done, commented on HTL-12.'))
-        .mockResolvedValueOnce(judged('claims_change'))
-        .mockImplementationOnce(async (opts: { tools: Tools }) => {
-          again = await opts.tools.jira_comment.execute({ key: 'HTL-12', text: 'The plumber is booked' }, {})
-          return reply(told)
-        })
-        .mockResolvedValueOnce(judged('no_change_claimed'))
-      const fetched = vi.mocked(fetch).mock.calls.length
-      expect((await runAgent(asked)).text).toBe(told)
-      expect(again).toMatchObject({ error: expect.stringContaining('Not tried again: jira_comment ran out of time') })
-      // The first comment's request went out; the second never did.
-      expect(vi.mocked(fetch).mock.calls.length).toBe(fetched + 1)
-    })
-
-    it('says the change could not be confirmed, not that nothing changed, when the model insists or cannot be asked again', async () => {
-      generateText
-        .mockImplementationOnce(timedOut('Done, commented on HTL-12.'))
-        .mockResolvedValueOnce(judged('claims_change'))
-        .mockResolvedValueOnce(reply('Yes, commented.'))
-        .mockResolvedValueOnce(judged('claims_change'))
-      expect((await runAgent(asked)).text).toBe('Yes, commented.\n\nI could not confirm that change went through, so check whether it did before asking again.')
-
-      generateText.mockReset()
-      generateText.mockImplementationOnce(timedOut('Done, commented on HTL-12.')).mockResolvedValueOnce(judged('claims_change'))
-      const r = await runAgent({ ...asked, deadline: Date.now() + 20_000 })
-      expect(r.text).toBe('Done, commented on HTL-12.\n\nI could not confirm that change went through, so check whether it did before asking again.')
-    })
-  })
-
-  it('tells the judge a reply that shows a draft and asks for the yes claims nothing, and sends it as written', async () => {
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
-    await q.saveConnection({ memberId: member.id, provider: 'google', email: 'r@example.com', refreshToken: 'r', scopes: null })
-    const shown = 'I\'ve drafted your reply to Mrs Lee: "Juno will be away on Friday." Shall I send it?'
-    generateText
-      .mockImplementationOnce(async (opts: { tools: Tools }) => {
-        const input = { to: ['lee@school.example'], subject: 'Absence', body: 'Juno will be away on Friday.' }
-        const output = await opts.tools.draft_email.execute(input, {})
-        return { text: shown, steps: [{ toolCalls: [{ toolName: 'draft_email', input }], toolResults: [{ toolName: 'draft_email', input, output }] }], usage: {} }
-      })
-      .mockResolvedValueOnce(judged('no_change_claimed'))
-    expect((await runAgent({ ...input, member })).text).toBe(shown)
-    expect(generateText).toHaveBeenCalledTimes(2)
-    // The judge is told where the line is: a draft shown for a yes is no change.
-    const judge = generateText.mock.calls[1][0]
-    expect(judge.telemetry.functionId).toBe('hearth.claim')
-    expect(judge.system).toContain('shows a draft or a proposal and asks for a yes before sending or adding it is no_change_claimed')
-  })
-
-  it('says nothing changed without asking again when too little of the turn is left for a retry', async () => {
-    generateText.mockResolvedValueOnce(reply('Replaced it.')).mockResolvedValueOnce(judged('claims_change'))
-    const r = await runAgent({ ...input, deadline: Date.now() + 20_000 })
-    expect(r.text).toMatch(/^Replaced it\.\n\nI did not change anything this turn\./)
-    expect(generateText).toHaveBeenCalledTimes(2)
-  })
-
-  it('leaves an ordinary answer alone once judged, and fails open when the judgement errors', async () => {
-    generateText.mockResolvedValueOnce(reply('Bins go out Monday.')).mockResolvedValueOnce(judged('no_change_claimed'))
-    expect((await runAgent(input)).text).toBe('Bins go out Monday.')
-    expect(generateText).toHaveBeenCalledTimes(2)
-
-    generateText.mockReset()
-    generateText.mockResolvedValueOnce(reply('Replaced it.')).mockRejectedValueOnce(new Error('429 quota'))
-    expect((await runAgent(input)).text).toBe('Replaced it.')
-  })
-
-  it('judges chat turns only, never a watcher or the sweep', async () => {
-    generateText.mockResolvedValue(reply('Replaced it.'))
-    await runAgent({ ...input, mode: 'watcher', history: false })
-    expect(generateText).toHaveBeenCalledTimes(1)
-  })
-})
-
-describe('shouldChimeIn', () => {
-  const input = { chatId: '-100', text: 'anyone know the wifi password?', memberName: 'Ada' }
-
-  it('says yes when the question answered from both sides agrees', async () => {
-    generateText.mockResolvedValue({ ...reply(''), output: 'reply' })
-    expect(await shouldChimeIn(input)).toBe(true)
-    expect(generateText).toHaveBeenCalledTimes(2)
-    expect(String(generateText.mock.calls[0][0].messages.at(-1).content)).toContain('Should the assistant reply?')
-    expect(String(generateText.mock.calls[1][0].messages.at(-1).content)).toContain('Should the assistant stay silent?')
-  })
-
-  it('stays quiet when the two framings disagree', async () => {
-    generateText.mockResolvedValueOnce({ ...reply(''), output: 'reply' }).mockResolvedValueOnce({ ...reply(''), output: 'stay_silent' })
-    expect(await shouldChimeIn(input)).toBe(false)
-  })
-
-  it('settles banter with a single call', async () => {
-    generateText.mockResolvedValue({ ...reply(''), output: 'stay_silent' })
-    expect(await shouldChimeIn(input)).toBe(false)
-    expect(generateText).toHaveBeenCalledTimes(1)
-  })
-
-  it('stays quiet on a yes in prose, which the SDK will not take for the choice, and records it', async () => {
-    const { structuredRecord } = await import('@/lib/model-events')
-    generateText.mockImplementation(modelSays('YES, reply to this one.'))
-    expect(await shouldChimeIn(input)).toBe(false)
-    expect((await structuredRecord()).get('gemini:gemini-3.5-flash-lite')).toEqual({ attempts: 1, noObject: 1 })
-  })
-
-  it('fails closed when the gate model errors', async () => {
-    generateText.mockRejectedValue(new Error('down'))
-    expect(await shouldChimeIn(input)).toBe(false)
-  })
-
-  it('fails closed on an answer it cannot read, or none', async () => {
-    generateText.mockImplementation(modelSays('perhaps'))
-    expect(await shouldChimeIn(input)).toBe(false)
-    generateText.mockImplementation(modelSays('', 'length'))
-    expect(await shouldChimeIn(input)).toBe(false)
-  })
-
-  it('is a trace of its own, with what was said and what the gate made of it', async () => {
-    generateText.mockResolvedValue({ ...reply(''), output: 'reply' })
-    await shouldChimeIn({ ...input, userId: '111' })
-    expect(traceRun).toHaveBeenCalledWith('hearth.gate', { sessionId: '-100', userId: '111', tags: ['gate'] }, expect.any(Function))
-    expect(noteRun).toHaveBeenCalledWith({ input: 'Ada: anyone know the wifi password?' })
-    expect(noteRun).toHaveBeenLastCalledWith({ output: 'reply' })
-
-    noteRun.mockClear()
-    generateText.mockRejectedValue(new Error('down'))
-    await shouldChimeIn(input)
-    expect(traceRun).toHaveBeenLastCalledWith('hearth.gate', { sessionId: '-100', tags: ['gate'] }, expect.any(Function))
-    expect(noteRun).toHaveBeenCalledWith({ metadata: { gate: 'failed, so silent' } })
-    expect(noteRun).toHaveBeenLastCalledWith({ output: 'stay silent' })
-  })
-
-  it('spends only one call, on the head of the chain', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    generateText.mockRejectedValue(new Error('down'))
-    await shouldChimeIn(input)
-    expect(generateText).toHaveBeenCalledTimes(1)
-  })
-
-  it('keeps the gate cheap, with room for a model that thinks before it answers', async () => {
-    generateText.mockResolvedValue({ ...reply(''), output: 'stay_silent' })
-    await shouldChimeIn(input)
-    expect(generateText.mock.calls[0][0].maxOutputTokens).toBe(256)
-    expect(generateText.mock.calls[0][0].tools).toBeUndefined()
-  })
-
-  it('asks for a typed choice and trusts it over the prose', async () => {
-    generateText.mockResolvedValue({ ...reply('no idea'), output: 'reply' })
-    expect(await shouldChimeIn(input)).toBe(true)
-    expect(generateText.mock.calls[0][0].output).toBeDefined()
-  })
-
-  it('stays quiet, asking nobody, when no model is configured', async () => {
-    delete process.env.GEMINI_API_KEY
-    expect(await shouldChimeIn(input)).toBe(false)
-    expect(generateText).not.toHaveBeenCalled()
-  })
-
-  it('fails closed if the second framing errors', async () => {
-    generateText.mockResolvedValueOnce({ ...reply(''), output: 'reply' }).mockRejectedValueOnce(new Error('down'))
-    expect(await shouldChimeIn(input)).toBe(false)
-  })
-
-  it('treats unsure as silence', async () => {
-    generateText.mockResolvedValue({ ...reply(''), output: 'unsure' })
-    expect(await shouldChimeIn(input)).toBe(false)
-  })
-})
-
-describe('per-mode prompts', () => {
-  const base = { memberName: 'the family', now: new Date('2026-08-27T00:00:00Z'), context: '' }
-
-  it('gives a watcher grounding rules and examples, not the chat rules', () => {
-    const p = systemPrompt({ ...base, mode: 'watcher', chatType: 'group' })
-    expect(p).toContain('WRITE using only the information under DATA')
-    expect(p).toContain('purpose not recorded')
-    expect(p).toContain('reply with exactly SKIP')
-    expect(p).toContain('No source names a trip')
-    expect(p).not.toContain('draft_email')
-    expect(p).not.toContain('/connect')
-  })
-
-  it('tells a watcher to follow a standing instruction among the Known facts, and shows it those facts', () => {
-    const p = systemPrompt({ ...base, mode: 'watcher', chatType: 'group', context: 'Known household facts:\n- [7] leave the gym newsletter out of the brief' })
-    expect(p).toContain('HOUSE RULES: a Known household fact under Context can be a standing instruction')
-    expect(p).toContain('do not say that you did')
-    expect(p).toContain('Context:\nKnown household facts:\n- [7] leave the gym newsletter out of the brief')
-  })
-
-  it('gives the sweep only the memory rules', () => {
-    const p = systemPrompt({ ...base, mode: 'sweep', chatType: 'private' })
-    expect(p).toContain('nightly memory pass')
-    expect(p).toContain('replaces set to the old id')
-    expect(p).not.toContain('send_email')
-  })
-
-  it('has the sweep ask rather than guess, and never file from its own posts', () => {
-    const p = systemPrompt({ ...base, mode: 'sweep', chatType: 'private' })
-    expect(p).toContain('call unsure')
-    expect(p).toContain('never file anything from them')
-    expect(p).toContain("that turns up in a parent's mail is a child's")
-    expect(p).toContain('one-off events and everything about them')
-    expect(p).toContain('never with a "Source:" note')
-  })
-
-  it('tells a chat turn to settle an answered question', () => {
-    expect(systemPrompt({ ...base, chatType: 'group' })).toContain('settle it with answer_question')
-  })
-})
-
-describe('tool scoping by mode', () => {
-  const input = { chatId: '-100', chatType: 'group', member: null, memberName: 'the family', text: 'go', history: false }
-
-  it('routes a chat turn: core tools plus the groups its wording calls for', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, mode: 'chat', text: 'how much did we spend this month?' })
-    const call = generateText.mock.calls[0][0]
-    expect(call.activeTools).toBeUndefined()
-    const first: string[] = call.prepareStep({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools
-    expect(first).toContain('spending_summary')
-    expect(first).toContain('web_search')
-    expect(first).toContain('more_tools')
-    expect(first).not.toContain('list_email')
-    expect(first).not.toContain('jira_search')
-  })
-
-  it('widens a chat turn when the model asks for more tools', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, mode: 'chat', text: 'what did the school say about athletics carnival?' })
-    const prepare = generateText.mock.calls[0][0].prepareStep
-    const before: string[] = prepare({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools
-    expect(before).not.toContain('list_email')
-    const after: string[] = prepare({
-      steps: [{ toolCalls: [{ toolName: 'more_tools', input: { group: 'mail' } }] }],
-      stepNumber: 1, model: {}, messages: [],
-    }).activeTools
-    expect(after).toContain('list_email')
-    expect(after).toContain('read_email')
-  })
-
-  it('opens the mail tools when a draft is waiting, whatever the wording', async () => {
-    const m = await q.upsertMember('111', 'Rowan', { allowed: true })
-    await q.createDraft({ chatId: '-100', memberId: m.id, provider: 'google', to: ['x@y.com'], subject: 'Hi', body: 'b' })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, mode: 'chat', member: m, text: 'yes send it' })
-    const first: string[] = generateText.mock.calls[0][0].prepareStep({ steps: [], stepNumber: 0, model: {}, messages: [] }).activeTools
-    expect(first).toContain('send_email')
-  })
-
-  it('does not route watchers or the sweep', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, mode: 'watcher', text: 'how much did we spend?' })
-    expect(generateText.mock.calls[0][0].prepareStep).toBeUndefined()
-  })
-
-  it('gives the sweep only the memory tools', async () => {
-    generateText.mockResolvedValue(reply('SKIP'))
-    await runAgent({ ...input, mode: 'sweep' })
-    expect(generateText.mock.calls[0][0].activeTools).toEqual(['remember', 'forget', 'recall', 'unsure'])
-  })
-
-  it('keeps a custom watcher read-only', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, mode: 'watcher' })
-    const active: string[] = generateText.mock.calls[0][0].activeTools
-    expect(active).toContain('list_transactions')
-    expect(active).toContain('propose_family_event')
-    expect(active).not.toContain('send_email')
-    expect(active).not.toContain('add_family_event')
-    expect(active).not.toContain('remember')
-    expect(active).not.toContain('create_automation')
-  })
-
-  it('names every call for the tracer, by mode', async () => {
-    const named = () => generateText.mock.calls.map((c) => (c[0] as { telemetry: { functionId: string } }).telemetry.functionId)
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, mode: 'chat' })
-    // A chat turn with no write behind it is judged for an unmade change, in a named call of its own.
-    expect(named()).toEqual(['hearth.chat', 'hearth.claim'])
-    expect(generateText.mock.calls[0][0].telemetry).toMatchObject({ functionId: 'hearth.chat', recordInputs: true })
-    await runAgent({ ...input, mode: 'watcher' })
-    expect(named().at(-1)).toBe('hearth.watcher')
-    generateText.mockResolvedValue({ ...reply(''), output: 'stay_silent' })
-    await shouldChimeIn({ chatId: '-100', text: 'hi', memberName: 'Ada' })
-    expect(named().at(-1)).toBe('hearth.gate')
-    generateText.mockResolvedValue({ ...reply(''), output: { invented: false, nothing_new: true, confidence: 1 } })
-    await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
-    expect(named().at(-1)).toBe('hearth.decision')
-  })
-
-  it('honours an explicit tool list', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, mode: 'watcher', tools: ['recall'] })
-    expect(generateText.mock.calls[0][0].activeTools).toEqual(['recall'])
-  })
-
-  it('runs watchers and the sweep cooler than chat', async () => {
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, mode: 'chat' })
-    await runAgent({ ...input, mode: 'watcher' })
-    expect(generateText.mock.calls[0][0].temperature).toBeUndefined()
-    expect(generateText.mock.calls[1][0].temperature).toBeLessThan(0.5)
-  })
-
-  it('gives a watcher the household facts but none of a chat turn\'s other business, and the sweep all of the facts', async () => {
-    await q.addMemory('bin night is Monday')
-    await q.upsertMember('111', 'Rowan', { allowed: true })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, mode: 'watcher' })
-    const watcher = String(generateText.mock.calls[0][0].system)
-    expect(watcher).toContain('Known household facts:')
-    expect(watcher).toContain('bin night is Monday')
-    expect(watcher).not.toContain('Family members')
-    await runAgent({ ...input, mode: 'sweep' })
-    expect(String(generateText.mock.calls[1][0].system)).toContain('bin night is Monday')
-    await runAgent({ ...input, mode: 'chat' })
-    expect(String(generateText.mock.calls[2][0].system)).toContain('Family members and their linked accounts: Rowan')
-  })
-
-  it('lists the open questions for a chat turn with their ids, and for the sweep so it does not ask twice', async () => {
-    await q.askQuestion({ question: 'Who attends Hillside Grammar?', candidate: 'Juno attends Hillside Grammar' })
-    generateText.mockResolvedValue(reply('ok'))
-    await runAgent({ ...input, mode: 'chat' })
-    const chat = String(generateText.mock.calls[0][0].system)
-    expect(chat).toContain('question_id')
-    expect(chat).toContain('Who attends Hillside Grammar?')
-    expect(chat).toContain('would keep: "Juno attends Hillside Grammar"')
-    await runAgent({ ...input, mode: 'sweep' })
-    const sweep = String(generateText.mock.calls.at(-1)![0].system)
-    expect(sweep).toContain('do not ask again')
-    expect(sweep).toContain('Who attends Hillside Grammar?')
-  })
-
-  it('returns what the tools said as evidence for a watcher run', async () => {
-    generateText.mockResolvedValue({
-      ...reply('2Up: **$389.60** FARESAVER LISBON.'),
-      steps: [{ toolResults: [{ toolName: 'list_transactions', input: { search: 'faresaver' }, output: { count: 1 } }] }],
-    })
-    const r = await runAgent({ ...input, mode: 'watcher' })
-    expect(r.evidence).toContain('list_transactions')
-    expect(r.evidence).toContain('"count":1')
-    generateText.mockResolvedValue(reply('hello'))
-    expect((await runAgent({ ...input, mode: 'chat' })).evidence).toBeUndefined()
-  })
-
-  it('hands back empty evidence when a watcher run reports no steps at all', async () => {
-    generateText.mockResolvedValue({ text: 'Bins out tonight.' })
-    const r = await runAgent({ ...input, mode: 'watcher' })
-    expect(r.text).toBe('Bins out tonight.')
-    expect(r.evidence).toBe('')
-  })
-
-  it('hands back the facts a watcher wrote with, so the post checks see the same sources', async () => {
-    await q.addMemory('bin night is Monday')
-    generateText.mockResolvedValue(reply('Bins out tonight.'))
-    const r = await runAgent({ ...input, mode: 'watcher' })
-    expect(r.facts).toContain('bin night is Monday')
-    expect((await runAgent({ ...input, mode: 'chat' })).facts).toBeUndefined()
   })
 })
 
@@ -1415,16 +246,6 @@ describe('leaked reasoning', () => {
   it('reports whether anything was cut', () => {
     expect(cleanReply('Plain answer.')).toEqual({ text: 'Plain answer.', stripped: false })
     expect(cleanReply('<think>hm</think>Answer.').stripped).toBe(true)
-  })
-
-  it('strips thinking from a live reply, and moves on when that leaves nothing', async () => {
-    process.env.OPENROUTER_API_KEY = 'sk-or'
-    generateText
-      .mockResolvedValueOnce(reply('<think>never mind'))
-      .mockResolvedValueOnce(reply('<think>ok</think>Bins out tonight.'))
-    const r = await runAgent({ chatId: '-100', chatType: 'private', member: null, memberName: 'Rowan', text: 'hi' })
-    expect(r.text).toBe('Bins out tonight.')
-    expect(r.model).toContain('openrouter')
   })
 })
 
@@ -1463,36 +284,427 @@ describe('collectEvidence', () => {
   })
 })
 
-describe('unconfirmedLine', () => {
-  it('names what a finished turn did, and without a name still warns against doing it again', () => {
-    expect(unconfirmedLine(undefined)).toMatch(/Ask again if you did not see it\.$/)
-    expect(unconfirmedLine(['add_to_list', 'add_to_list', 'create_automation'])).toContain(
-      'What I did stands: added to a list, set up a reminder, so ask again only for anything else you wanted.',
-    )
-    // A new ticket has no words of its own here: it announces itself, in the reply that may be missing.
-    expect(unconfirmedLine(['jira_create_issue'])).toMatch(/What I did stands, so check what changed before asking again\.$/)
+describe('runAgent', () => {
+  const input = { member: null, memberName: 'Rowan', text: 'Remind everyone the bins go out tonight.' }
+
+  it('returns the report and which model wrote it', async () => {
+    generateText.mockResolvedValue(reply('Bins out tonight.'))
+    const r = await runAgent(input)
+    expect(r.text).toBe('Bins out tonight.')
+    expect(r.model).toBe('gemini:gemini-3.5-flash-lite')
   })
 
-  it('does not say a write that ran out of time was done', () => {
-    const line = unconfirmedLine(['add_to_list', 'create_calendar_event'], ['create_calendar_event'])
-    expect(line).toContain('What I did stands: added to a list, so check what else changed before asking again.')
-    expect(line).not.toContain('calendar')
+  it('hands the model the instruction alone, in the name of whoever set it up, with no conversation before it', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    await runAgent(input)
+    expect(generateText.mock.calls[0][0].messages).toEqual([{ role: 'user', content: 'Rowan: Remind everyone the bins go out tonight.' }])
+    expect(String(generateText.mock.calls[0][0].system)).toContain('This is a scheduled job')
+  })
+
+  it('strips working that leaked into a report, and says so in the log', async () => {
+    generateText.mockResolvedValue(reply('I have what I need. No web lookup needed.\n\nBins out tonight.'))
+    expect((await runAgent(input)).text).toBe('Bins out tonight.')
+    expect(console.warn).toHaveBeenCalledWith('[agent] gemini:gemini-3.5-flash-lite leaked its working into the report; stripped')
+  })
+
+  it('writes with the household facts in view, and hands them back so the checks judge against the same sources', async () => {
+    await q.addMemory('bin night is Monday')
+    generateText.mockResolvedValue(reply('Bins out tonight.'))
+    const r = await runAgent(input)
+    expect(String(generateText.mock.calls[0][0].system)).toContain('Known household facts:')
+    expect(String(generateText.mock.calls[0][0].system)).toContain('bin night is Monday')
+    expect(r.facts).toContain('bin night is Monday')
+  })
+
+  it('still runs when the database is down, just without the facts', async () => {
+    const { __setDb } = await import('@/lib/db')
+    __setDb({ select: () => { throw new Error('db down') } })
+    generateText.mockResolvedValue(reply('Bins out tonight.'))
+    const r = await runAgent(input)
+    expect(r.text).toBe('Bins out tonight.')
+    expect(r.facts).toBe('')
+  })
+
+  it('reaches only for what a scheduled run may, read-only, unless told a narrower list', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    await runAgent(input)
+    const active: string[] = generateText.mock.calls[0][0].activeTools
+    expect(active).toEqual(CUSTOM_AUTOMATION_TOOLS)
+    for (const write of ['send_email', 'add_family_event', 'remember', 'create_automation', 'accept_event_proposal']) expect(active).not.toContain(write)
+    expect(active).toContain('propose_family_event')
+    await runAgent({ ...input, tools: ['recall'] })
+    expect(generateText.mock.calls[1][0].activeTools).toEqual(['recall'])
+  })
+
+  it('names each call for the tracer, cool and short, with its member as the user and its helper in the metadata', async () => {
+    const member = await rowan()
+    generateText.mockResolvedValue(reply('ok'))
+    await runAgent({ ...input, member, helper: { id: 3, name: 'Chef', role: 'Plans meals.', createdBy: null, createdAt: new Date() } })
+    const call = generateText.mock.calls[0][0]
+    expect(call.telemetry).toMatchObject({ functionId: 'hearth.watcher', recordInputs: true })
+    expect(call.temperature).toBe(0.3)
+    expect(call.maxOutputTokens).toBe(4000)
+    expect(String(call.system)).toContain('You are Chef')
+    expect(traced).toHaveBeenCalledWith(
+      { traceName: 'hearth.watcher', userId: String(member.id), tags: ['watcher'], metadata: { model: 'gemini:gemini-3.5-flash-lite', helper: 'Chef' } },
+      expect.any(Function),
+    )
+    // With nobody behind it, there is no user to name.
+    traced.mockClear()
+    await runAgent(input)
+    expect(traced).toHaveBeenCalledWith({ traceName: 'hearth.watcher', tags: ['watcher'], metadata: { model: 'gemini:gemini-3.5-flash-lite' } }, expect.any(Function))
+  })
+
+  it('passes the configured reasoning level to the model, and none when it is unset', async () => {
+    generateText.mockResolvedValue(reply('ok'))
+    process.env.LLM_REASONING = 'Low'
+    try {
+      await runAgent(input)
+    } finally {
+      delete process.env.LLM_REASONING
+    }
+    await runAgent(input)
+    expect(generateText.mock.calls[0][0].reasoning).toBe('low')
+    expect(generateText.mock.calls[1][0]).not.toHaveProperty('reasoning')
+  })
+
+  it("files what its tools change on its member's record, as done on a schedule", async () => {
+    const member = await rowan()
+    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+      await opts.tools.add_to_list.execute({ items: ['bin bags'], list: 'shopping' }, {})
+      return reply('Added bin bags to the shopping list.')
+    })
+    const r = await runAgent({ ...input, member })
+    expect(r.wrote).toEqual(['add_to_list'])
+    const [a] = await q.recentActivity({ memberId: member.id })
+    expect(a).toMatchObject({ via: 'watcher', tool: 'add_to_list', summary: 'added bin bags to the shopping list' })
+  })
+
+  it('returns what the tools said as evidence, and empty evidence when there were no steps at all', async () => {
+    generateText.mockResolvedValue({
+      ...reply('2Up: **$389.60** FARESAVER LISBON.'),
+      steps: [{ toolResults: [{ toolName: 'list_transactions', input: { search: 'faresaver' }, output: { count: 1 } }] }],
+    })
+    const r = await runAgent(input)
+    expect(r.evidence).toContain('list_transactions')
+    expect(r.evidence).toContain('"count":1')
+    generateText.mockResolvedValue({ text: 'Bins out tonight.' })
+    expect((await runAgent(input)).evidence).toBe('')
+  })
+
+  it('falls through to the next model when the first fails', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    process.env.OPENROUTER_MODEL = 'minimax/minimax-m3:free'
+    generateText.mockRejectedValueOnce(new Error('429 quota')).mockResolvedValueOnce(reply('Second here.'))
+    const r = await runAgent(input)
+    expect(r.text).toBe('Second here.')
+    expect(r.model).toContain('openrouter')
+  })
+
+  it('gives the last model in the chain room to think: it has nothing to fall back on', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    process.env.OPENROUTER_MODEL = 'openrouter/auto'
+    generateText.mockRejectedValueOnce(new Error('503 Service Unavailable')).mockResolvedValueOnce(reply('SKIP'))
+    await runAgent(input)
+    expect(generateText.mock.calls.map((c) => c[0].maxOutputTokens)).toEqual([800, 4000])
+
+    // Twice the run's own allowance where that is more.
+    generateText.mockReset()
+    generateText.mockRejectedValueOnce(new Error('503 Service Unavailable')).mockResolvedValueOnce(reply('**Today**\n- Swim at 9'))
+    await runAgent({ ...input, maxOutputTokens: 2400 })
+    expect(generateText.mock.calls.map((c) => c[0].maxOutputTokens)).toEqual([2400, 4800])
+  })
+
+  it('gives every call only what is left of the run, and tries no model once it is spent', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText.mockResolvedValueOnce(reply('Bins go out Monday.'))
+    await runAgent(input)
+    const { totalMs, stepMs } = generateText.mock.calls[0][0].timeout
+    expect(totalMs).toBeGreaterThan(TURN_BUDGET_MS - 10_000)
+    expect(totalMs).toBeLessThanOrEqual(TURN_BUDGET_MS)
+    expect(stepMs).toBe(60_000)
+
+    // The first model runs out the clock; the second is never started, and the run says why.
+    generateText.mockReset()
+    const deadline = Date.now() + 500
+    generateText.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, deadline - Date.now() + 10))
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    })
+    await expect(runAgent({ ...input, deadline })).rejects.toThrow('aborted due to timeout')
+    expect(generateText).toHaveBeenCalledTimes(1)
+  })
+
+  it("ends at the caller's deadline when that is nearer, and never runs past its own budget", async () => {
+    generateText.mockResolvedValue(reply('Bins go out Monday.'))
+    await runAgent({ ...input, deadline: Date.now() + 40_000 })
+    expect(generateText.mock.calls[0][0].timeout.totalMs).toBeGreaterThan(30_000)
+    expect(generateText.mock.calls[0][0].timeout.totalMs).toBeLessThanOrEqual(40_000)
+    // A caller whose clock leaves more than a run needs still gets only the run.
+    await runAgent({ ...input, deadline: Date.now() + 600_000 })
+    expect(generateText.mock.calls[1][0].timeout.totalMs).toBeLessThanOrEqual(TURN_BUDGET_MS)
+  })
+
+  it('reports nothing but the problem when a model fails after changing something, and hands the run to no other', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    process.env.OPENROUTER_MODEL = 'minimax/minimax-m3:free'
+    const member = await rowan()
+    // The first slot adds to the list and then hits its rate limit mid-run.
+    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+      await opts.tools.add_to_list.execute({ items: ['milk', 'eggs'], list: 'shopping' }, {})
+      throw new Error('429 quota')
+    })
+    const r = await runAgent({ ...input, member })
+    // No second slot, so nothing is added twice.
+    expect(generateText).toHaveBeenCalledTimes(1)
+    expect(r.text).toBe('PROBLEM: gemini:gemini-3.5-flash-lite failed (429 quota) after it had added to a list, so this run reported nothing.\nSKIP')
+    expect(r.wrote).toEqual(['add_to_list'])
+    expect(r.evidence).toBeUndefined()
+    const list = await q.findOrCreateList('shopping')
+    expect((await q.listContents(list.id)).map((i) => i.content)).toEqual(['milk', 'eggs'])
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('failed after changing something'), expect.stringContaining('429'))
+    // The System page sees the slot fail, not answer.
+    const { chainHealth } = await import('@/lib/model-events')
+    const gemini = (await chainHealth(1)).slots.find((x) => x.slot.startsWith('gemini:'))
+    expect(gemini).toMatchObject({ answered: 0, failed: 1 })
+  })
+
+  it('ends the same way when the model changed something and then said nothing', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+      await opts.tools.add_to_list.execute({ items: ['batteries'], list: 'hardware' }, {})
+      return reply('')
+    })
+    const r = await runAgent(input)
+    expect(generateText).toHaveBeenCalledTimes(1)
+    expect(r.text).toMatch(/^PROBLEM: gemini:gemini-3\.5-flash-lite failed \(gemini:gemini-3\.5-flash-lite returned no text\) after it had added to a list/)
+  })
+
+  it('still ends a run the clock stopped after a write by reporting the problem', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    const deadline = Date.now() + 500
+    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+      await opts.tools.add_to_list.execute({ items: ['milk'], list: 'shopping' }, {})
+      await new Promise((resolve) => setTimeout(resolve, deadline - Date.now() + 10))
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    })
+    const r = await runAgent({ ...input, deadline })
+    expect(generateText).toHaveBeenCalledTimes(1)
+    expect(r.text).toMatch(/^PROBLEM: .*after it had added to a list, so this run reported nothing\.\nSKIP$/)
+  })
+
+  describe('after a write that ran out of time', () => {
+    beforeEach(() => {
+      process.env.OPENROUTER_API_KEY = 'sk-or'
+      Object.assign(process.env, { JIRA_BASE_URL: 'https://example.atlassian.net', JIRA_EMAIL: 'r@hearth.example', JIRA_API_TOKEN: 'token' })
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+      }))
+    })
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      for (const k of ['JIRA_BASE_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN']) delete process.env[k]
+    })
+
+    it('ends the run rather than have the next model do it again, and does not say it was done', async () => {
+      generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+        expect(await opts.tools.jira_comment.execute({ key: 'HTL-1', text: 'Paid' }, {})).toMatchObject({ maybe_done: true })
+        throw new Error('429 quota')
+      })
+      const r = await runAgent(input)
+      expect(generateText).toHaveBeenCalledTimes(1)
+      expect(r.text).toMatch(/after it had changed something, so this run reported nothing/)
+      expect(r.unconfirmed).toEqual(['jira_comment'])
+    })
+
+    it('says what was done besides, and nothing of the write that may not have been', async () => {
+      generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+        await opts.tools.add_to_list.execute({ items: ['stamps'], list: 'shopping' }, {})
+        await opts.tools.jira_comment.execute({ key: 'HTL-1', text: 'Paid' }, {})
+        throw new Error('429 quota')
+      })
+      const r = await runAgent(input)
+      expect(generateText).toHaveBeenCalledTimes(1)
+      expect(r.text).toMatch(/after it had added to a list, so this run reported nothing/)
+      expect(r.text).not.toContain('commented')
+    })
+  })
+
+  it('still hands the run on when nothing was changed, a refused write included', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText
+      .mockImplementationOnce(async (opts: { tools: Tools }) => {
+        // A schedule that never fires is refused with an error result.
+        const refused = await opts.tools.create_automation.execute({ label: 'never', cron: '0 0 31 2 *', instruction: 'x' }, {})
+        expect(refused).toHaveProperty('error')
+        await opts.tools.recall.execute({}, {})
+        throw new Error('429 quota')
+      })
+      .mockResolvedValueOnce(reply('Second here.'))
+    const r = await runAgent(input)
+    expect(r.text).toBe('Second here.')
+    expect(r.model).toContain('openrouter')
+    expect(await q.listAutomations()).toHaveLength(0)
+  })
+
+  it('hands the run on after a write that checks for itself, so a proposal is made once however many models try', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    const member = await rowan()
+    const propose = (opts: { tools: Tools }) =>
+      opts.tools.propose_family_event.execute({ title: 'Athletics carnival', start: '2030-10-15T09:00', source: 'google:m1', description: 'From the school office.' }, {})
+    generateText
+      .mockImplementationOnce(async (opts: { tools: Tools }) => {
+        await propose(opts)
+        throw new Error('429 quota')
+      })
+      .mockImplementationOnce(async (opts: { tools: Tools }) => {
+        // The second model proposes it again, which finds the first rather than adding to it.
+        expect(await propose(opts)).toMatchObject({ already_proposed: true })
+        return reply('Proposed the athletics carnival for the family calendar.')
+      })
+    const r = await runAgent({ ...input, member })
+    expect(r.model).toContain('openrouter')
+    expect((await q.pendingProposals()).map((p) => p.title)).toEqual(['Athletics carnival'])
+  })
+
+  it('never lets a report end mid-line, keeping the complete lines of a long one', async () => {
+    const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
+    // Cut off by the cap in the middle of its last bullet.
+    generateText.mockResolvedValueOnce({ ...reply(`**To do**\n${lines.join('\n')}\n- Item 40: somethi`), finishReason: 'length' })
+    const r = await runAgent({ ...input, tools: ['recall'] })
+    // The only model in the chain: nobody else could say it shorter.
+    expect(r.text).toBe(`**To do**\n${lines.join('\n')}`)
+    expect(r.cutShort).toBe(true)
+    expect(generateText).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives a long report the cap cut off to the next model first, which may fit it', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
+    generateText
+      // A provider that reports no steps at all, as some do on a cut-off answer.
+      .mockResolvedValueOnce({ text: `**To do**\n${lines.join('\n')}\n- Item 40: somethi`, finishReason: 'length' })
+      .mockResolvedValueOnce(reply('**To do**\n- Forty things by Friday.'))
+    const r = await runAgent({ ...input, tools: ['recall'] })
+    expect(r.text).toBe('**To do**\n- Forty things by Friday.')
+    expect(r.model).toContain('openrouter')
+    expect(r.cutShort).toBeUndefined()
+  })
+
+  it("keeps the first model's cut-short report after all when no later model answers", async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
+    generateText
+      .mockResolvedValueOnce({ ...reply(`**To do**\n${lines.join('\n')}\n- Item 40: somethi`), finishReason: 'length' })
+      .mockRejectedValueOnce(new Error('429 quota'))
+    const r = await runAgent({ ...input, tools: ['recall'] })
+    expect(r.text).toBe(`**To do**\n${lines.join('\n')}`)
+    expect(r.model).toContain('gemini')
+    expect(r.cutShort).toBe(true)
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("no later model answered (429 quota); keeping gemini:gemini-3.5-flash-lite's report, cut short"))
+  })
+
+  it('keeps the first long report the cap cut off, not a later one, when no model after them answers', async () => {
+    process.env.GEMINI_MODEL = 'gemini-3.5-flash-lite,gemini-3.5-flash'
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    const first = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
+    const second = Array.from({ length: 40 }, (_, i) => `- Thing ${i}: something else to attend to by Friday`)
+    generateText
+      .mockResolvedValueOnce({ ...reply(`**To do**\n${first.join('\n')}\n- Item 40: somethi`), finishReason: 'length' })
+      .mockResolvedValueOnce({ ...reply(`**To do**\n${second.join('\n')}\n- Thing 40: somethi`), finishReason: 'length' })
+      .mockRejectedValueOnce(new Error('429 quota'))
+    const r = await runAgent({ ...input, tools: ['recall'] })
+    expect(generateText).toHaveBeenCalledTimes(3)
+    expect(r.model).toBe('gemini:gemini-3.5-flash-lite')
+    expect(r.text).toBe(`**To do**\n${first.join('\n')}`)
+  })
+
+  it('copes with a model that throws something other than an error', async () => {
+    generateText.mockRejectedValueOnce('the provider hung up')
+    await expect(runAgent(input)).rejects.toThrow('the provider hung up')
+  })
+
+  it('keeps no fragment in reserve: with no later answer, the run fails as it would have', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText
+      .mockResolvedValueOnce({ ...reply(`**To do**\n${'x'.repeat(300)}`), finishReason: 'length' })
+      .mockRejectedValueOnce(new Error('429 quota'))
+    await expect(runAgent({ ...input, tools: ['recall'] })).rejects.toThrow('429 quota')
+  })
+
+  it('trims on the first model when it already wrote something, since no other model gets the run', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    const lines = Array.from({ length: 40 }, (_, i) => `- Item ${i}: something to attend to by Friday`)
+    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+      await opts.tools.add_to_list.execute({ items: ['bin bags'], list: 'shopping' }, {})
+      return { ...reply(`**To do**\n${lines.join('\n')}\n- Item 40: somethi`), finishReason: 'length' }
+    })
+    const r = await runAgent({ ...input, tools: ['add_to_list', 'recall'] })
+    expect(generateText).toHaveBeenCalledTimes(1)
+    expect(r.text).toContain('- Item 39:')
+    expect(r.text).not.toContain('Item 40')
+    expect(r.cutShort).toBe(true)
+  })
+
+  it('drops what is left of a report cut off early, when its complete lines are only a heading', async () => {
+    // Long enough to be kept, but its only complete line is the heading.
+    generateText.mockResolvedValueOnce({ ...reply(`**To do**\n${'x'.repeat(300)}`), finishReason: 'length' })
+    await expect(runAgent({ ...input, tools: ['recall'] })).rejects.toThrow(/ran out of output tokens before answering/)
+  })
+
+  it("hands a single cut-off line to the next model, being a fragment, and so too a reply the cap cut short", async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText
+      .mockResolvedValueOnce({ ...reply('x'.repeat(400)), finishReason: 'length' })
+      .mockResolvedValueOnce(reply('Bins out tonight.'))
+    const r = await runAgent({ ...input, tools: ['recall'] })
+    expect(r.text).toBe('Bins out tonight.')
+    expect(r.model).toContain('openrouter')
+
+    generateText.mockReset()
+    generateText.mockResolvedValueOnce({ ...reply('Y'), finishReason: 'length' }).mockResolvedValueOnce(reply('Proper answer.'))
+    const again = await runAgent(input)
+    expect(again.text).toBe('Proper answer.')
+    expect(console.warn).toHaveBeenCalledWith('[agent] gemini:gemini-3.5-flash-lite ran out of output tokens after 1 characters of reply; dropped')
+  })
+
+  it('treats an empty completion as a failure worth retrying', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText.mockResolvedValueOnce(reply('   ')).mockResolvedValueOnce(reply('Proper answer.'))
+    expect((await runAgent(input)).text).toBe('Proper answer.')
+  })
+
+  it('strips thinking from a live reply, and moves on when that leaves nothing', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText
+      .mockResolvedValueOnce(reply('<think>never mind'))
+      .mockResolvedValueOnce(reply('<think>ok</think>Bins out tonight.'))
+    const r = await runAgent(input)
+    expect(r.text).toBe('Bins out tonight.')
+    expect(r.model).toContain('openrouter')
+  })
+
+  it('throws when nothing is configured at all', async () => {
+    delete process.env.GEMINI_API_KEY
+    await expect(runAgent(input)).rejects.toThrow(/No LLM configured/)
   })
 })
 
 describe('decideWatcherPost', () => {
   const answers = (o: object) => ({ ...reply(''), output: { invented: false, nothing_new: false, confidence: 0.9, ...o } })
 
-  it('asks the chain the two questions with no tools, and posts when neither is a yes', async () => {
+  it('asks the chain the two questions with no tools, and keeps the draft when neither is a yes', async () => {
     generateText.mockResolvedValue(answers({}))
-    const d = await decideWatcherPost({ label: '2Up transactions', draft: 'draft', evidence: 'evidence' })
+    const d = await decideWatcherPost({ label: 'bin night', draft: 'draft', evidence: 'evidence' })
     expect(d).toEqual({ decision: 'post', confidence: 0.9, model: 'gemini:gemini-3.5-flash-lite' })
     const call = generateText.mock.calls[0][0]
     expect(call.output).toBeDefined()
     expect(call.tools).toBeUndefined()
     expect(String(call.system)).toContain('invented: does the draft state anything')
     expect(String(call.system)).toContain('nothing_new: does the draft only say')
-    expect(String(call.prompt)).toContain('DRAFT:\ndraft')
+    expect(String(call.system)).toContain('a draft report from a scheduled family-assistant check')
+    expect(String(call.prompt)).toBe('Job: bin night\n\nDRAFT:\ndraft\n\nEVIDENCE:\nevidence')
+    expect(call.telemetry.functionId).toBe('hearth.decision')
   })
 
   it('tells the chain plainly when no tool returned anything to check against', async () => {
@@ -1501,7 +713,7 @@ describe('decideWatcherPost', () => {
     expect(String(generateText.mock.calls[0][0].prompt)).toContain('EVIDENCE:\n(no tool results)')
   })
 
-  it('skips an invented statement, quoting it, and a draft that only says there is nothing new', async () => {
+  it('holds an invented statement back, quoting it, and a draft that only says there is nothing new', async () => {
     generateText.mockResolvedValueOnce(answers({ invented: true, not_in_evidence: 'a time the evidence does not give', confidence: 0.8 }))
     const invented = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
     expect(invented).toEqual({
@@ -1518,21 +730,21 @@ describe('decideWatcherPost', () => {
     expect(quiet).toMatchObject({ decision: 'skip', confidence: 1, reason: 'the draft only says there is nothing new' })
   })
 
-  it('skips when the chain is not sure enough of its answers, the grey zone being its own line', async () => {
-    generateText.mockResolvedValueOnce(answers({ confidence: 0.6 }))
+  it('holds the draft when the chain is not sure enough of its answers, the grey zone being its own line', async () => {
+    generateText.mockResolvedValueOnce(answers({ confidence: CHAIN_POST_CONFIDENCE - 0.1 }))
     const d = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
-    expect(d).toMatchObject({ decision: 'skip', confidence: 0.6, reason: 'the judge was not sure enough of its answers' })
-    generateText.mockResolvedValueOnce(answers({ confidence: 0.7 }))
+    expect(d).toMatchObject({ decision: 'skip', reason: 'the judge was not sure enough of its answers' })
+    generateText.mockResolvedValueOnce(answers({ confidence: CHAIN_POST_CONFIDENCE }))
     expect((await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })).decision).toBe('post')
   })
 
-  it('lets a claim check that has passed every statement carry the chain\'s doubt and its unsure invention', async () => {
+  it("lets a claim check that has passed every statement carry the chain's doubt and its unsure invention", async () => {
     const checked = { label: 'x', draft: 'd', evidence: 'e', verified: true }
     generateText.mockResolvedValueOnce(answers({ invented: true, confidence: 0.6 }))
     expect((await decideWatcherPost(checked)).decision).toBe('post')
     generateText.mockResolvedValueOnce(answers({ confidence: 0.5 }))
     expect((await decideWatcherPost(checked)).decision).toBe('post')
-    // What it is sure of still overrides the check, and nothing new always skips.
+    // What it is sure of still overrides the check, and nothing new always holds it.
     generateText.mockResolvedValueOnce(answers({ invented: true, confidence: 0.9 }))
     expect((await decideWatcherPost(checked)).decision).toBe('skip')
     generateText.mockResolvedValueOnce(answers({ nothing_new: true, confidence: 0.5 }))
@@ -1541,7 +753,7 @@ describe('decideWatcherPost', () => {
 
   it('is never asked for a verdict, so the instruction cannot be enforced through it', async () => {
     generateText.mockResolvedValue(answers({}))
-    await decideWatcherPost({ label: 'Morning brief', draft: 'd', evidence: 'e' })
+    await decideWatcherPost({ label: 'Morning summary', draft: 'd', evidence: 'e' })
     const system = String(generateText.mock.calls[0][0].system)
     expect(system).toContain('whether the writer obeyed it is not asked')
     expect(system).toContain("was the writer's call to make")
@@ -1561,6 +773,15 @@ describe('decideWatcherPost', () => {
     expect(d.model).toContain('openrouter')
   })
 
+  it('records a judge that answers in prose as one that returned no object, and asks the next', async () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or'
+    generateText.mockImplementationOnce(modelSays('It looks grounded to me.')).mockResolvedValueOnce(answers({}))
+    const d = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
+    expect(d.model).toContain('openrouter')
+    const { structuredRecord } = await import('@/lib/model-events')
+    expect((await structuredRecord(1)).get('gemini:gemini-3.5-flash-lite')).toEqual({ attempts: 1, noObject: 1 })
+  })
+
   it('asks first the model that has been returning objects, whatever the chain order', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     await keepsAnsweringInProse('gemini:gemini-3.5-flash-lite')
@@ -1570,7 +791,7 @@ describe('decideWatcherPost', () => {
     expect(generateText).toHaveBeenCalledTimes(1)
   })
 
-  it('is over by the caller\'s deadline, and asks no model once it has passed', async () => {
+  it("is over by the caller's deadline, and asks no model once it has passed", async () => {
     generateText.mockResolvedValue(answers({}))
     await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e', deadline: Date.now() + 10_000 })
     const { totalMs, stepMs } = generateText.mock.calls[0][0].timeout
@@ -1581,8 +802,19 @@ describe('decideWatcherPost', () => {
     expect(generateText).toHaveBeenCalledTimes(1)
   })
 
-  it('tells a plain error apart from a structured-output failure', () => {
+  it('has no clock of its own without a deadline, only one for each step', async () => {
+    generateText.mockResolvedValue(answers({}))
+    await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' })
+    expect(generateText.mock.calls[0][0].timeout).toEqual({ stepMs: 30_000 })
+  })
+})
+
+describe('isStructuredOutputError', () => {
+  it('tells a structured-output failure apart from a plain error', async () => {
     expect(isStructuredOutputError(new Error('boom'))).toBe(false)
+    generateText.mockImplementationOnce(modelSays('Not an object.'))
+    const err = await decideWatcherPost({ label: 'x', draft: 'd', evidence: 'e' }).catch((e: unknown) => e)
+    expect(isStructuredOutputError(err)).toBe(true)
   })
 })
 
@@ -1598,6 +830,7 @@ describe('reviewDraft', () => {
     expect(r.unsupported).toEqual([])
     expect(r.message).toBe('2Up: $389.60 FARESAVER LISBON, Tue 26 Aug. Purpose not recorded.')
     expect(generateText).toHaveBeenCalledTimes(3)
+    expect(String(generateText.mock.calls[0][0].prompt)).toContain('REPORT:\n2Up: $389.60')
     // The checker never sees the draft, only the evidence and one statement.
     const check = String(generateText.mock.calls[1][0].prompt)
     expect(check).toContain('EVIDENCE:')
@@ -1616,19 +849,19 @@ describe('reviewDraft', () => {
     // The rewrite edits the draft itself rather than rebuilding it from the list,
     // so whatever the capped list left out survives.
     const rewrite = String(generateText.mock.calls[3][0].prompt)
-    expect(rewrite).toContain('POST:\n2Up: $389.60 FARESAVER LISBON. Looks like a trip to Lisbon!')
+    expect(rewrite).toContain('REPORT:\n2Up: $389.60 FARESAVER LISBON. Looks like a trip to Lisbon!')
     expect(rewrite).toContain('NOT SUPPORTED, remove wherever they appear:\n- a trip to Lisbon was booked')
     expect(rewrite).toContain('SUPPORTED, keep as written:\n- $389.60 to FARESAVER')
   })
 
-  it("posts no heading over nothing once the rewrite has cut a part's only bullet", async () => {
+  it("keeps no heading over nothing once the rewrite has cut a part's only bullet", async () => {
     const draft = '**Today**\n- After School Care, 3:00 pm – 6:00 pm\n\n**Heads up**\n- A payslip arrived.'
     generateText
       .mockResolvedValueOnce(out({ claims: ['After School Care is on today', 'a payslip arrived'] }))
       .mockResolvedValueOnce(out({ supported: false }))
       .mockResolvedValueOnce(out({ supported: true }))
       .mockResolvedValueOnce(out({ message: '**Today**\n\n**Heads up**\n- A payslip arrived.' }))
-    const r = await reviewDraft({ label: 'Morning brief', draft, evidence: 'DATA ...' })
+    const r = await reviewDraft({ label: 'Morning summary', draft, evidence: 'DATA ...' })
     expect(r.unsupported).toEqual(['After School Care is on today'])
     expect(r.message).toBe('**Heads up**\n- A payslip arrived.')
   })
@@ -1643,7 +876,7 @@ describe('reviewDraft', () => {
     expect(generateText).toHaveBeenCalledTimes(3)
   })
 
-  it('asks the next model when the rewrite comes back empty with statements still supported in the post', async () => {
+  it('asks the next model when the rewrite comes back empty with statements still supported in the report', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     generateText
       .mockResolvedValueOnce(out({ claims: ['Swimming is at 9 on Friday', "Logan and Meg Treeby are Winter's parents"] }))
@@ -1652,7 +885,7 @@ describe('reviewDraft', () => {
       .mockResolvedValueOnce(out({ message: '' }))
       .mockResolvedValueOnce(out({ message: 'Swimming is at 9 on Friday.' }))
     const r = await reviewDraft({
-      label: 'Morning brief',
+      label: 'Morning summary',
       draft: "**Coming up**\n- Fri 30 Oct: swimming at 9 am.\n\n**Not sure about:**\nAre Logan and Meg Treeby Winter's parents?",
       evidence: 'DATA ...',
     })
@@ -1661,7 +894,7 @@ describe('reviewDraft', () => {
     expect(generateText).toHaveBeenCalledTimes(5)
   })
 
-  it('reports a rewrite that stays empty on every model as failed, not as nothing worth posting, while statements are still supported', async () => {
+  it('reports a rewrite that stays empty on every model as failed, not as nothing worth keeping, while statements are still supported', async () => {
     process.env.OPENROUTER_API_KEY = 'sk-or'
     generateText
       .mockResolvedValueOnce(out({ claims: ['Swimming is at 9 on Friday', 'a trip to Lisbon was booked'] }))
@@ -1686,11 +919,11 @@ describe('reviewDraft', () => {
   it('asks for at most six claims, checks no more than that, and keeps the draft when they hold', async () => {
     generateText.mockResolvedValueOnce(out({ claims: Array.from({ length: 8 }, (_, i) => `claim ${i}`) }))
     for (let i = 0; i < 6; i++) generateText.mockResolvedValueOnce(out({ supported: true }))
-    const r = await reviewDraft({ label: 'x', draft: 'A long post.', evidence: 'DATA ...' })
+    const r = await reviewDraft({ label: 'x', draft: 'A long report.', evidence: 'DATA ...' })
     expect(String(generateText.mock.calls[0][0].prompt)).toContain('at most 6 statements')
     expect(generateText).toHaveBeenCalledTimes(7)
     expect(r.claims).toHaveLength(6)
-    expect(r.message).toBe('A long post.')
+    expect(r.message).toBe('A long report.')
   })
 
   it('runs the checks first on the model that has been returning objects, whatever the chain order', async () => {
@@ -1708,7 +941,7 @@ describe('reviewDraft', () => {
     expect(generateText).toHaveBeenCalledTimes(1)
   })
 
-  it('gives the extract, every check and the rewrite only what is left before the caller\'s deadline', async () => {
+  it("gives the extract, every check and the rewrite only what is left before the caller's deadline", async () => {
     generateText
       .mockResolvedValueOnce(out({ claims: ['a trip to Lisbon was booked'] }))
       .mockResolvedValueOnce(out({ supported: false }))
@@ -1746,17 +979,17 @@ describe('cutFromDraft', () => {
 
   it('takes the statements it is given out of the draft, by the rewrite the claim check uses', async () => {
     generateText.mockResolvedValueOnce(out({ message: 'Bins out tonight.' }))
-    const rest = await cutFromDraft({ label: 'Morning brief', draft: 'Bins out tonight. The swimming form is due Friday.', unsupported: ['the swimming form is due Friday'] })
+    const rest = await cutFromDraft({ label: 'Morning summary', draft: 'Bins out tonight. The swimming form is due Friday.', unsupported: ['the swimming form is due Friday'] })
     expect(rest).toBe('Bins out tonight.')
     expect(generateText).toHaveBeenCalledTimes(1)
     const call = generateText.mock.calls[0][0]
-    expect(String(call.prompt)).toContain('POST:\nBins out tonight. The swimming form is due Friday.')
+    expect(String(call.prompt)).toContain('REPORT:\nBins out tonight. The swimming form is due Friday.')
     expect(String(call.prompt)).toContain('NOT SUPPORTED, remove wherever they appear:\n- the swimming form is due Friday')
     expect(String(call.prompt)).not.toContain('SUPPORTED, keep as written')
     expect(String(call.system)).toContain('Everything else stays exactly as written')
   })
 
-  it('answers null when nothing worth posting is left, and throws when the rewrite cannot be made', async () => {
+  it('answers null when nothing worth keeping is left, and throws when the rewrite cannot be made', async () => {
     generateText.mockResolvedValueOnce(out({ message: '' }))
     expect(await cutFromDraft({ label: 'x', draft: 'Due Friday.', unsupported: ['due Friday'] })).toBeNull()
     generateText.mockRejectedValue(new Error('No object generated'))
@@ -1772,24 +1005,19 @@ describe('cutFromDraft', () => {
   })
 })
 
-describe('watcher formatting', () => {
-  const base = { memberName: 'Rowan', now: new Date('2026-08-27T00:00:00Z'), context: '' }
-
-  it('offers Telegram markdown and a fold-away quote, and never asks for plain text', () => {
-    const p = systemPrompt({ ...base, mode: 'watcher', chatType: 'group' })
-    expect(p).toContain('**bold**')
-    expect(p).toContain('> at the start of each line')
-    expect(p).toContain('**bold** title line')
-    expect(p).not.toMatch(/plain Telegram text/)
+describe('what a scheduled run is told', () => {
+  it('names the job, carries its instruction, and says how to stay quiet, report a problem or report', () => {
+    const text = scheduledInstruction({ label: 'Bin night', instruction: 'Remind us to put the bins out.', repeat: 'always' }, 'Rowan')
+    expect(text).toContain('Scheduled automation "Bin night" is due now.')
+    expect(text).toContain('kept as a report for Rowan to read later')
+    expect(text).toContain('Remind us to put the bins out.')
+    expect(text).toContain('reply with exactly SKIP')
+    expect(text).toContain('write PROBLEM:')
+    expect(text).not.toContain('stops for good')
   })
 
-  it('keeps tables out of a post: a phone wraps their monospace rows', () => {
-    // A snapshot's figures table went out as rows of about 32 characters and
-    // wrapped on a phone that holds about 28, each label a line above its figure.
-    const p = systemPrompt({ ...base, mode: 'watcher', chatType: 'group' })
-    expect(p).toContain('No tables')
-    expect(p).not.toMatch(/pipe table/)
-    for (const w of Object.values(WATCHERS)) expect(w.instruction).not.toMatch(/pipe table|\| \|/)
+  it('tells a watch that runs until it finds something that reporting ends it', () => {
+    const text = scheduledInstruction({ label: 'Camp dates', instruction: 'Look for the camp dates.', repeat: 'until' }, 'Sam')
+    expect(text).toContain('This check stops for good once it reports anything')
   })
 })
-

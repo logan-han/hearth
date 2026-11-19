@@ -9,9 +9,6 @@ import { localToUtc, localDateKey, daysAfter } from '@/lib/cron'
 const listEvents = vi.fn()
 const clientsFor = vi.fn(async (_id: number) => [{ provider: 'google', listEvents }] as unknown[])
 vi.mock('@/lib/providers', async (orig) => ({ ...(await orig<typeof import('@/lib/providers')>()), clientsFor: (id: number) => clientsFor(id) }))
-type Person = { telegramUserId: string; name: string }
-const presentIn = vi.hoisted(() => vi.fn(async (_chatId: string, people: Person[]) => people))
-vi.mock('@/lib/headcount', () => ({ presentIn }))
 
 const { calendarTools } = await import('@/lib/tools/calendar')
 
@@ -54,7 +51,7 @@ describe('find_free_time', () => {
   let ctx: ToolContext
   const call = (args: Record<string, unknown>, over: Partial<ToolContext> = {}) =>
     ((calendarTools({ ...ctx, ...over }) as Record<string, { execute: unknown }>).find_free_time.execute as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)(
-      { minutes: 60, everyone: false, earliest: '08:00', latest: '20:00', days: 'any', family_calendar: true, ...args },
+      { minutes: 60, earliest: '08:00', latest: '20:00', days: 'any', family_calendar: true, ...args },
       {},
     )
   // A fixed Monday well ahead, so "now" never trims the windows.
@@ -64,9 +61,9 @@ describe('find_free_time', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     client = (await freshDb()).client
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
-    await q.upsertMember('222', 'Ada', { allowed: true })
-    ctx = { chatId: '-100', member, memberName: 'Rowan', now: new Date('2026-10-30T00:00:00Z'), notices: [], shared: true }
+    const member = await q.saveMember({ name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false })
+    await q.saveMember({ name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
+    ctx = { member, memberName: 'Rowan', now: new Date('2026-10-30T00:00:00Z') }
     listEvents.mockResolvedValue({ events: [], more: false })
   })
   afterEach(async () => closeDb(client))
@@ -94,13 +91,26 @@ describe('find_free_time', () => {
     expect(listEvents).toHaveBeenCalledWith(at(`${monday}T00:00`), at(`${tuesday}T00:00`))
   })
 
-  it("reads everyone's calendars in a group, and keeps to the days and hours asked", async () => {
+  it("reads the caller's own calendars alone, never another member's, and keeps to the days and hours asked", async () => {
     const r = await call({ from: monday, to: daysAfter(monday, 6), everyone: true, days: 'weekends', earliest: '10:00', latest: '12:00', family_calendar: false })
-    expect(clientsFor).toHaveBeenCalledTimes(2)
-    expect(r.checked).toEqual(["Rowan's Google Calendar", "Ada's Google Calendar"])
+    expect(clientsFor).toHaveBeenCalledTimes(1)
+    expect(clientsFor).toHaveBeenCalledWith(ctx.member!.id)
+    expect(r.checked).toEqual(["Rowan's Google Calendar"])
     expect((r.free as { from: string; until: string }[]).map((f) => [f.from, f.until])).toEqual([['10:00 am', '12:00 pm'], ['10:00 am', '12:00 pm']])
     const weekdays = await call({ from: monday, to: daysAfter(monday, 6), days: 'weekdays', family_calendar: false })
     expect((weekdays.free as unknown[]).length).toBe(5)
+  })
+
+  it('lists the all-day entries day by day, in date order', async () => {
+    listEvents.mockResolvedValue({
+      events: [
+        { id: 'b', title: 'Camp', start: tuesday, end: daysAfter(tuesday, 1), allDay: true },
+        { id: 'a', title: 'Holiday', start: monday, end: tuesday, allDay: true },
+      ],
+      more: false,
+    })
+    const r = await call({ from: monday, to: tuesday, family_calendar: false })
+    expect((r.all_day as { on: string[] }[]).map((d) => d.on)).toEqual([["Holiday (Rowan's Google Calendar)"], ["Camp (Rowan's Google Calendar)"]])
   })
 
   it('offers nothing after the point a calendar could not be read past, and says so', async () => {
@@ -137,8 +147,8 @@ describe('find_free_time', () => {
     expect(listEvents).not.toHaveBeenCalled()
   })
 
-  it('needs a known member to read their own calendar', async () => {
-    await expect(call({ from: monday }, { member: null })).rejects.toThrow(/known family member/)
+  it('needs a member to read their own calendar', async () => {
+    await expect(call({ from: monday }, { member: null })).rejects.toThrow(/family member/)
   })
 
   it('starts no sooner than the next quarter hour, today included', async () => {
@@ -148,23 +158,19 @@ describe('find_free_time', () => {
     if (free.length) expect(free[0].from).toMatch(/:(00|15|30|45) [ap]m$/)
   })
 
-  it('refuses what it cannot search, and anyone else\'s calendar outside a group or with a stranger in it', async () => {
+  it('refuses what it cannot search', async () => {
     expect(await call({ from: 'Monday' })).toEqual({ error: 'Give the days as YYYY-MM-DD.' })
     expect(await call({ from: tuesday, to: monday })).toEqual({ error: 'The last day comes before the first.' })
     expect(await call({ from: monday, to: daysAfter(monday, 40) })).toEqual({ error: 'Look at 31 days at most at a time.' })
     expect(String((await call({ from: monday, earliest: '9am' })).error)).toContain('HH:mm')
     expect(String((await call({ from: monday, earliest: '18:00', latest: '09:00' })).error)).toContain('earliest first')
-    expect(String((await call({ from: monday, everyone: true }, { shared: false })).error)).toContain('only in the family group')
-    await q.rememberChat('-100', 'group', 'Family')
-    await q.noteStranger('-100', { id: '9', name: 'Visitor' })
-    expect(String((await call({ from: monday, everyone: true })).error)).toContain('Not while someone unrecognised')
   })
 
   it('says when there is nothing to read at all', async () => {
+    process.env.APP_URL = 'https://hearth.example'
     clientsFor.mockResolvedValue([])
-    expect(await call({ from: monday, family_calendar: false })).toEqual({ error: 'No calendar linked. Send /connect to link one.' })
-    expect(String((await call({ from: monday, family_calendar: false, everyone: true })).error)).toContain('Nobody in this chat')
-    presentIn.mockRejectedValueOnce(new Error('429'))
-    expect(String((await call({ from: monday, everyone: true })).error)).toContain('Could not check who is in this chat: 429')
+    expect(await call({ from: monday, family_calendar: false })).toEqual({ error: "No calendar linked. Link one on Hearth's Connect page: https://hearth.example/connect." })
+    // The family calendar alone is still something to read.
+    expect((await call({ from: monday, to: monday })).checked).toEqual(['the family calendar'])
   })
 })

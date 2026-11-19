@@ -6,9 +6,9 @@ import type { ToolContext } from '@/lib/tools/context'
 import type { Helper } from '@/lib/db/schema'
 import { helperTools } from '@/lib/tools/helpers'
 import { automationTools } from '@/lib/tools/automation'
-import { HELPER_TEMPLATES, templateNamed, helperGroups, calledHelper, repliedHelper, signed, roleInBrief } from '@/lib/helpers'
-import { routeGroups } from '@/lib/tools/router'
-import { ambientContext, systemPrompt } from '@/lib/agent'
+import { HELPER_TEMPLATES, templateNamed, roleInBrief, namesSomeone, firstName } from '@/lib/helpers'
+import { systemPrompt } from '@/lib/agent'
+import { context } from '@/lib/mcp'
 import { describeWrite } from '@/lib/activity'
 import { cronAt, localDateKey } from '@/lib/cron'
 
@@ -19,42 +19,23 @@ const call = (tools: Record<string, unknown>, name: string, args: unknown) =>
   ((tools[name] as { execute: unknown }).execute as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)(args, {})
 const helpers = (over: Partial<ToolContext> = {}) => helperTools({ ...ctx, ...over })
 
-const row = (over: Partial<Helper> = {}): Helper =>
-  ({ id: 1, name: 'Chef', role: 'Cooks. Plans meals.', groups: '[]', createdBy: null, createdAt: new Date(), ...over }) as Helper
 
 beforeEach(async () => {
   client = (await freshDb()).client
-  const member = await q.upsertMember('111', 'Rowan Smith', { allowed: true })
-  ctx = { chatId: '-100', member, memberName: 'Rowan', now: new Date(), notices: [], shared: true }
+  const member = await q.saveMember({ name: 'Rowan Smith', email: 'rowan@hearth.example', allowed: true, isAdmin: false })
+  ctx = { member, memberName: 'Rowan', now: new Date() }
   delete process.env.ASSISTANT_NAME
 })
 afterEach(async () => closeDb(client))
 
-describe('who a message is for', () => {
-  const crew = [row(), row({ id: 2, name: 'Aunty Bot' })]
-
-  it('is the helper it opens by calling, not one it only mentions', () => {
-    expect(calledHelper('Chef, what is for dinner?', crew)?.name).toBe('Chef')
-    expect(calledHelper('hey aunty bot are you there', crew)?.name).toBe('Aunty Bot')
-    expect(calledHelper('I asked Chef already', crew)).toBeUndefined()
-  })
-
-  it('is the helper that signed the message it replies to', () => {
-    expect(repliedHelper('Chef: Try a leek and potato soup.', crew)?.name).toBe('Chef')
-    expect(repliedHelper('Added to the family calendar', crew)).toBeUndefined()
-    expect(repliedHelper(undefined, crew)).toBeUndefined()
-  })
-
-  it('signs a helper\'s words, and leaves the house\'s own alone', () => {
-    expect(signed(row(), 'Soup.')).toBe('**Chef:** Soup.')
-    expect(signed(undefined, 'Soup.')).toBe('Soup.')
-    expect(signed(row(), '')).toBe('')
-  })
-
-  it('reads the groups a helper starts with, passing over anything that is not one', () => {
-    expect(helperGroups(row({ groups: '["money","nonsense",3]' }))).toEqual(['money'])
-    expect(helperGroups(row({ groups: 'not json' }))).toEqual([])
-    expect(helperGroups(row({ groups: '{"money":true}' }))).toEqual([])
+describe('helper names and roles', () => {
+  it('knows a family member by their first name or their whole name', () => {
+    const family = [{ name: 'Rowan Smith' }, { name: 'Max' }]
+    expect(firstName('  Rowan Smith ')).toBe('rowan')
+    expect(namesSomeone('rowan', family)).toBe(true)
+    expect(namesSomeone('Rowan Smith', family)).toBe(true)
+    expect(namesSomeone('MAX', family)).toBe(true)
+    expect(namesSomeone('Chef', family)).toBe(false)
   })
 
   it('has ready-made helpers to add by name, and says each role in brief', () => {
@@ -62,39 +43,46 @@ describe('who a message is for', () => {
     expect(templateNamed('Butler')).toBeUndefined()
     expect(roleInBrief('Cooks. Plans meals.')).toBe('Cooks.')
     expect(roleInBrief('No full stop here')).toBe('No full stop here')
-    for (const t of HELPER_TEMPLATES) expect(t.role.length).toBeGreaterThan(40)
+    for (const t of HELPER_TEMPLATES) {
+      expect(t.role.length).toBeGreaterThan(40)
+      expect(t).not.toHaveProperty('groups')
+    }
   })
 })
 
 describe('create_helper, list_helpers and remove_helper', () => {
   it('adds a ready-made helper by name alone, and a new one with a role of its own', async () => {
-    const chef = await call(helpers(), 'create_helper', { name: 'treasurer' })
-    expect(chef).toMatchObject({ helper: 'treasurer', groups: ['money', 'mail'] })
-    expect(String(chef.note)).toContain('("treasurer, ...")')
-    const custom = await call(helpers(), 'create_helper', { name: 'Gardener', role: 'Looks after the garden.', groups: ['automations'] })
-    expect(custom).toMatchObject({ helper: 'Gardener', role: 'Looks after the garden.', groups: ['automations'] })
-    expect(helperGroups((await q.helperNamed('GARDENER'))!)).toEqual(['automations'])
+    const treasurer = await call(helpers(), 'create_helper', { name: 'treasurer' })
+    expect(treasurer).toMatchObject({ helper: 'treasurer', role: templateNamed('Treasurer')!.role })
+    expect(treasurer).not.toHaveProperty('groups')
+    expect(String(treasurer.note)).toContain('hand_off gives it a job')
+    expect(String(treasurer.note)).toContain('take its role up yourself')
+    const custom = await call(helpers(), 'create_helper', { name: 'Gardener', role: 'Looks after the garden.' })
+    expect(custom).toMatchObject({ helper: 'Gardener', role: 'Looks after the garden.' })
+    expect(await q.helperNamed('GARDENER')).toMatchObject({ name: 'Gardener', role: 'Looks after the garden.' })
 
     const listed = await call(helpers(), 'list_helpers', {})
     expect((listed.helpers as { name: string }[]).map((h) => h.name)).toEqual(['treasurer', 'Gardener'])
+    expect((listed.helpers as Record<string, unknown>[])[1]).toEqual({ name: 'Gardener', role: 'Looks after the garden.' })
     expect((listed.ready_to_add as { name: string }[]).map((h) => h.name)).toEqual(['Chef', 'Planner', 'Researcher', 'Secretary', 'Coach'])
   })
 
   it('turns away a name it could not answer to, its own, a family member\'s, one taken, or a new one with no role', async () => {
     expect(String((await call(helpers(), 'create_helper', { name: 'Chef 2000' })).error)).toContain('one or two words of letters')
     process.env.ASSISTANT_NAME = 'Pip'
-    expect(String((await call(helpers(), 'create_helper', { name: 'pip', role: 'x' })).error)).toContain("the bot's own name")
+    expect(String((await call(helpers(), 'create_helper', { name: 'pip', role: 'x' })).error)).toContain("Hearth's own name")
     expect(String((await call(helpers(), 'create_helper', { name: 'Rowan', role: 'x' })).error)).toContain('what someone in the family is called')
     expect(String((await call(helpers(), 'create_helper', { name: 'Gardener' })).error)).toContain('every helper needs a role')
     await call(helpers(), 'create_helper', { name: 'Chef' })
     expect(String((await call(helpers(), 'create_helper', { name: 'CHEF' })).error)).toBe('There is already a helper called CHEF.')
   })
 
-  it('adds one for nobody in particular, with no groups unless given, and hands it a job the same way', async () => {
+  it('adds one for nobody in particular, but hands it a job only for a member, whose report it is', async () => {
     const r = await call(helpers({ member: null }), 'create_helper', { name: 'Gardener', role: 'Looks after the garden.' })
-    expect(r.groups).toEqual([])
-    const job = await call(helpers({ member: null }), 'hand_off', { helper: 'Gardener', task: 'Check the frost forecast' })
-    expect((await q.getAutomation(Number(job.automation_id)))!.memberId).toBeNull()
+    expect(r.helper).toBe('Gardener')
+    expect((await q.helperNamed('gardener'))!.createdBy).toBeNull()
+    await expect(call(helpers({ member: null }), 'hand_off', { helper: 'Gardener', task: 'Check the frost forecast' })).rejects.toThrow(/family member/)
+    expect(await q.listAutomations()).toEqual([])
     const helper = (await q.helperNamed('gardener'))!
     expect(await q.getHelper(helper.id)).toMatchObject({ name: 'Gardener' })
     expect(await q.getHelper(999)).toBeUndefined()
@@ -115,8 +103,9 @@ describe('hand_off', () => {
     await q.recordTick(new Date(hour))
     const r = await call(helpers(), 'hand_off', { helper: 'chef', task: '  Plan five dinners for next week, no mushrooms.  ' })
     expect(r).toMatchObject({ handed_to: chef.helper, task: 'Plan five dinners for next week, no mushrooms.' })
+    expect(String(r.note)).toBe('Chef leaves a report when it is done, or nothing if there is nothing to say. It is listed with your reminders until then.')
     const job = (await q.getAutomation(Number(r.automation_id)))!
-    expect(job).toMatchObject({ repeat: 'once', label: 'Chef: Plan five dinners for next week, no mushrooms.', chatId: '-100', memberId: ctx.member!.id })
+    expect(job).toMatchObject({ repeat: 'once', label: 'Chef: Plan five dinners for next week, no mushrooms.', memberId: ctx.member!.id })
     expect(job.helperId).toBe((await q.helperNamed('Chef'))!.id)
     // The next tick, on the hour, within the hour.
     expect(job.nextRunAt.getTime() % 3_600_000).toBe(0)
@@ -160,23 +149,19 @@ describe('hand_off', () => {
   })
 })
 
-describe('helpers in the conversation', () => {
-  it('are listed in the chat context, and their names bring the helper tools', async () => {
+describe('helpers for an MCP client', () => {
+  it('are listed in the context, with what hand_off is for', async () => {
     await call(helpers(), 'create_helper', { name: 'Chef' })
-    const ambient = await ambientContext('-100', ctx.member, 'chat')
-    expect(ambient.text).toContain('Helpers (each answers when a message opens with its name;')
-    expect(ambient.text).toContain("- Chef: Plans the household's meals:")
-    expect(ambient.helperNames).toEqual(['Chef'])
-    expect(routeGroups('can you ask chef to sort dinner', { helperNames: ['Chef'] })).toContain('helpers')
-    expect(routeGroups('hand this over to the gardener please')).toContain('helpers')
-    expect(routeGroups('the chefs kiss', { helperNames: ['Gardener'] })).not.toContain('helpers')
-    expect(routeGroups('nothing here', { helperNames: ['Gardener', ' '] })).not.toContain('helpers')
+    const text = await context(ctx.member!, new Date())
+    expect(text).toContain('Helpers (hand_off gives one a job to do in the background; asked to talk to one, take its role up):')
+    expect(text).toContain("- Chef: Plans the household's meals:")
   })
 
-  it('speak as themselves, in their role, and never sign their own replies', () => {
-    const p = systemPrompt({ chatType: 'group', memberName: 'Rowan', now: new Date(), context: '', helper: { name: 'Chef', role: 'Plans meals.' } })
-    expect(p).toContain("You are Chef, one of Hearth's helpers for one family, on Telegram. Your replies are signed with your name, so never sign them yourself.\nROLE: Plans meals.")
+  it('do a job as themselves, in their role, and never sign their own report', () => {
+    const p = systemPrompt({ now: new Date(), context: '', helper: { name: 'Chef', role: 'Plans meals.' } })
+    expect(p).toContain("You are Chef, one of Hearth's helpers for one family. Your report carries your name, so never sign it yourself.\nROLE: Plans meals.")
     expect(p).not.toContain('You are Hearth, the household assistant')
+    expect(systemPrompt({ now: new Date(), context: '' })).toContain('You are Hearth, the household assistant for one family.')
   })
 
   it('are on the record in words', () => {

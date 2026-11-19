@@ -1,33 +1,36 @@
 /**
  * Hearth's tools, offered over the Model Context Protocol.
  *
- * The same tool objects the agent loop is handed: an MCP client gets the whole
- * set at once rather than the routed subset a small model sees, because a
- * capable client picks well from a long list and has no `more_tools` step to
- * spend a round trip on.
+ * An MCP client is the only way in besides the dashboard, and it gets every
+ * tool at once: a capable client picks well from a long list. Every call runs
+ * as the member whose key it carries: their mailbox, their calendar, their
+ * name on what it writes.
  *
  * Nothing here imports the MCP SDK. The transport lives in the route; this
  * file only turns a tool name and some input into an answer, so it can be
  * tested without standing a server up.
  */
 import { z } from 'zod'
-import { buildTools, MCP_TOOLS } from './tools'
+import { buildTools, allToolNames } from './tools'
 import type { ToolContext } from './tools/context'
-import { ambientContext } from './agent'
-import { roomsOf } from './db/queries'
+import {
+  listMemories, openQuestions, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals, goalsIn,
+  listHelpers, listRoutines, reportsFor,
+} from './db/queries'
+import { goalSummary } from './tools/goals'
+import { spanLabel } from './tools/familycal'
+import { reportView } from './tools/automation'
+import { roleInBrief } from './helpers'
 import { hydrateSecrets } from './settings'
 import { formatLocal } from './cron'
-import { timezone } from './env'
+import { timezone, appUrl } from './env'
 import { describeError } from './errors'
-import { send } from './telegram'
-import { unaccountedIn } from './headcount'
 import { commitCursors } from './tools/cursor'
-import { isGroupChat } from './watchers'
 import type { Member } from './db/schema'
 
-export const SERVER_INFO = { name: 'hearth', version: '1.0.0' }
+export const SERVER_INFO = { name: 'hearth', version: '2.0.0' }
 
-/** The name of the tool that stands in for the context a chat turn gets free. */
+/** The name of the tool that carries what a client needs before its first call. */
 export const CONTEXT_TOOL = 'hearth_context'
 
 /** What the client is told about this server before it calls anything. */
@@ -36,18 +39,20 @@ export const INSTRUCTIONS = [
   "household keeps, each member's own mail and calendar, the money feed, Notion and the family",
   'board. You are calling as one member of that family, and every change is made in their name.',
   '',
-  `Call ${CONTEXT_TOOL} first. It carries what Hearth tells its own model before any conversation:`,
-  'who you are acting as, the room your posts land in, the household clock, the family and their',
-  'linked accounts, the facts on file, and whatever is still open. Dates and ids in the other',
-  'tools mean little without it.',
+  `Call ${CONTEXT_TOOL} first. It says who you are acting as, the household clock, the family and`,
+  'their linked accounts, the facts on file, and whatever is still open, with the ids the other',
+  'tools take. morning_brief and money_snapshot gather the day and the money in one call each.',
   '',
-  'Some tools speak to the family themselves: anything that comes back as `posted` has already',
-  "been said in the household's chat, so say it again only if you are adding to it.",
-  '',
-  "Nothing is sent or added behind the household's back. draft_email writes an email and leaves it",
-  'until send_email is called with its id, and propose_family_event puts an event to the family',
-  'rather than adding it.',
+  'Nothing is posted anywhere: what you are told is for you to pass on. Nothing is sent or added',
+  "behind the household's back either. draft_email writes an email and leaves it until send_email",
+  'is called with its id after a yes, and propose_family_event puts an event to the family rather',
+  'than adding it.',
 ].join('\n')
+
+/** The one line that adds a key to Claude Code. */
+export function connectLine(key: string): string {
+  return `claude mcp add --transport http hearth ${appUrl()}/api/mcp --header "Authorization: Bearer ${key}"`
+}
 
 /** A tool as an MCP client sees it, before anyone has said who is calling. */
 export type Descriptor = { name: string; description: string; inputSchema: z.ZodType }
@@ -56,7 +61,7 @@ export type Descriptor = { name: string; description: string; inputSchema: z.Zod
  * Descriptions and schemas are the same whoever asks, so they can be read off
  * a context-free build; only the call itself needs to know who is calling.
  */
-const BLANK: ToolContext = { chatId: '', member: null, memberName: '', now: new Date(0), notices: [] }
+const BLANK: ToolContext = { member: null, memberName: '', now: new Date(0) }
 
 type Executable = {
   description?: string
@@ -72,13 +77,12 @@ export function descriptors(): Descriptor[] {
     {
       name: CONTEXT_TOOL,
       description:
-        'Who you are acting as, the room anything you post lands in, the household clock, and everything ' +
-        'Hearth tells its own model before a conversation: the family and their linked accounts, the facts ' +
-        'on file, the email drafts and event proposals awaiting a yes, and the questions still open. ' +
-        'Read it before your first call; the ids the other tools take come from here.',
+        'Who you are acting as, the household clock, the family and their linked accounts, the facts on file, ' +
+        'your email drafts and the event proposals awaiting a yes, the questions still open, your goals, the helpers and routines, ' +
+        'and the latest reports from your scheduled jobs. Read it before your first call; the ids the other tools take come from here.',
       inputSchema: z.object({}),
     },
-    ...MCP_TOOLS.map((name) => ({
+    ...allToolNames().map((name) => ({
       name,
       description: built[name].description ?? '',
       inputSchema: built[name].inputSchema,
@@ -86,31 +90,8 @@ export function descriptors(): Descriptor[] {
   ]
 }
 
-/**
- * The room an MCP call acts in, which decides where a posted line goes, which
- * chat a draft, proposal or reminder belongs to, and whose summary the context
- * carries. The group this member talked in last, of those the bot is still in
- * and nobody unrecognised is in, or else the member's own chat with the bot,
- * whose id is theirs. Never merely the oldest group on record: that may be a
- * test room the bot has left, or the parents' room, whose summary a teenager's
- * MCP client has no business reading.
- */
-export async function mcpChat(member: Member): Promise<string> {
-  return (await mcpRoom(member)).chatId
-}
-
-/**
- * That room, and what to call it when telling the client where its posts
- * land. By name, never "the family group": the room the caller used last may
- * be the parents' or the cousins', and a client told its notice reached the
- * family will tell the user the children have heard.
- */
-export async function mcpRoom(member: Member): Promise<{ chatId: string; name: string }> {
-  const rooms = await roomsOf(member.id).catch(() => [])
-  const room = rooms.find((r) => r.strangers.length === 0)
-  if (!room) return { chatId: member.telegramUserId, name: 'your own chat with Hearth' }
-  return { chatId: room.chatId, name: room.title ? `the group "${room.title}"` : 'a group chat' }
-}
+/** The member a call runs as, and which of their keys it came with: each key keeps its own "what's new" markers. */
+export type Caller = { member: Member; keyId: number }
 
 export type McpResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
 
@@ -120,64 +101,120 @@ const answer = (text: string, isError = false): McpResult => ({
 })
 
 /** Run one tool as this member. Every failure comes back as a result, never as a throw. */
-export async function callTool(name: string, input: unknown, member: Member): Promise<McpResult> {
+export async function callTool(name: string, input: unknown, caller: Caller): Promise<McpResult> {
+  const { member } = caller
   try {
     // The keys the tools reach for are stored, not deployed, so they have to be
     // in the environment before the first one runs.
     await hydrateSecrets()
-    const { chatId, name: where } = await mcpRoom(member)
-    if (name === CONTEXT_TOOL) return answer(await context(member, chatId, where))
+    if (name === CONTEXT_TOOL) return answer(await context(member))
 
-    if (!(MCP_TOOLS as string[]).includes(name)) return answer(`Hearth has no tool called ${name}.`, true)
-    // Not shared, whatever the room: the result is read by one member's
-    // client, not by the family, so it never reaches into another's mailbox.
-    const ctx: ToolContext = { chatId, member, memberName: member.name, now: new Date(), notices: [], cursorScope: `mcp:${member.id}`, via: 'mcp' }
+    // What this key has seen is its own, so one client never spends what
+    // another of the member's clients, or their morning brief, has not shown.
+    const ctx: ToolContext = { member, memberName: member.name, now: new Date(), cursorScope: `key:${caller.keyId}`, via: 'mcp' }
     const entry = registry(ctx)[name]
     if (!entry?.execute) return answer(`Hearth has no tool called ${name}.`, true)
-
     const result = await entry.execute(input as never, { toolCallId: `mcp-${name}`, messages: [] } as never)
     // The client has the result in hand, so what it reported as new is seen.
     await commitCursors(ctx.pendingCursors)
-    const trouble = await speak(ctx, where)
-    return answer([render(result), trouble].filter(Boolean).join('\n\n'))
+    return answer(render(result))
   } catch (err) {
     return answer(describeError(err), true)
   }
 }
 
-/**
- * A tool that asked Hearth to say something says it in the call's room, the
- * same as it would on a chat turn. A client that cannot reach Telegram still
- * gets its result, with the promise the tool made withdrawn in as many words.
- */
-async function speak(ctx: ToolContext, where: string): Promise<string> {
-  if (ctx.notices.length === 0) return ''
-  try {
-    // Nobody in the room asked for this line, so it is held to the watchers'
-    // rule: the group only while Telegram's head count is all family, and
-    // otherwise the member's own chat, where it still gets said.
-    const own = ctx.member?.telegramUserId
-    const room = own && isGroupChat(ctx.chatId) && (await unaccountedIn(ctx.chatId)) !== 0 ? own : ctx.chatId
-    await send(room, ctx.notices.join('\n'))
-    return room === ctx.chatId
-      ? ''
-      : `Hearth posted this in your own chat rather than ${where}, which has people in it I cannot account for.`
-  } catch (err) {
-    return `Hearth could not post this in ${where} (${describeError(err)}), so nobody there has been told. Say it yourself.`
-  }
-}
+/** Facts are cheap to keep and costly to read; the context carries the newest few dozen, recall the rest. */
+const FACTS_IN_CONTEXT = 50
+/** How far back the context looks for reports from the member's scheduled jobs. */
+const REPORT_DAYS = 3
+const REPORTS_IN_CONTEXT = 5
 
-async function context(member: Member, chatId: string, where: string): Promise<string> {
-  // What a member's own client reads, so their own goals from anywhere are in it.
-  const ambient = await ambientContext(chatId, member, 'chat', 'mcp')
-  return [
+/**
+ * Everything a client needs before its first call: who it acts as, the
+ * household clock, the family and their linked accounts, what is waiting on
+ * a yes, the open questions, the member's own goals, the helpers and
+ * routines, the latest reports and the facts on file. Another member's
+ * drafts, goals and reports are never in it.
+ */
+export async function context(member: Member, now: Date = new Date()): Promise<string> {
+  const [memories, questions, members, connections, drafts, proposals, goals, crew, routines, reports] = await Promise.all([
+    listMemories(FACTS_IN_CONTEXT).catch(() => []),
+    openQuestions().catch(() => []),
+    allMembersWithLinks().catch(() => []),
+    connectionsFor(member.id).catch(() => []),
+    pendingDrafts(member.id).catch(() => []),
+    pendingProposals(now).catch(() => []),
+    goalsIn({ memberId: member.id })
+      .then((rows) => Promise.all(rows.map((g) => goalSummary(g, now))))
+      .catch(() => []),
+    listHelpers().catch(() => []),
+    listRoutines().catch(() => []),
+    reportsFor(member.id, { since: new Date(now.getTime() - REPORT_DAYS * 86_400_000), limit: REPORTS_IN_CONTEXT }).catch(() => []),
+  ])
+
+  const lines = [
     `You are acting as ${member.name}${member.isAdmin ? ', an admin of this household' : ''}.`,
-    `Anything Hearth posts on your behalf lands in ${where}.`,
-    `NOW: ${formatLocal(new Date())} (${timezone()}).`,
-    ambient.text,
+    `NOW: ${formatLocal(now)} (${timezone()}).`,
   ]
-    .filter(Boolean)
-    .join('\n')
+  const family = members.filter((m) => m.allowed)
+  if (family.length) {
+    // Every member's links, not just the caller's: without this a client
+    // invents claims like "her account isn't linked" about accounts that are.
+    lines.push(
+      'Family members and their linked accounts: ' +
+        family
+          .map((m) => `${m.name}${m.linked.length ? ` (${m.linked.map((l) => `${l.provider}: ${l.email ?? 'linked'}${l.readOnly ? ', read only' : ''}`).join(', ')})` : ' (nothing linked)'}`)
+          .join('; ') +
+        '. Mail and personal calendars are read as the caller alone; nobody else\'s is ever opened.',
+    )
+  }
+  if (connections.length === 0) {
+    lines.push(`${member.name} has no linked email or calendar account yet; they can link one at ${appUrl()}/connect.`)
+  }
+  if (drafts.length) {
+    lines.push('Your email drafts awaiting a yes (send_email with the draft_id once you have it; never draft the same email again):')
+    lines.push(...drafts.map((d) => `- draft_id ${d.id}: to ${d.recipients}, "${d.subject}"`))
+  }
+  if (proposals.length) {
+    lines.push('Event proposals awaiting a yes from anyone in the family (accept_event_proposal or reject_event_proposal with the id):')
+    lines.push(...proposals.map((p) => `- proposal_id ${p.id}: "${p.title}" at ${spanLabel(p.startsAt, p.endsAt, p.allDay)}`))
+  }
+  if (questions.length) {
+    lines.push('Questions put to the family, still open (answer_question with the id: the fact in their words for a yes or a correction, nothing for a no):')
+    lines.push(...questions.map((qn) => `- question_id ${qn.id}: ${qn.question} (would keep: "${qn.candidate}")`))
+  }
+  if (goals.length) {
+    lines.push('Your goals in progress (goal_status for the detail; update_goal to tick steps off or add them, log progress, move the target or close one):')
+    lines.push(
+      ...goals.map(
+        (g) =>
+          `- goal_id ${g.goal_id}: "${g.title}", ${g.steps_done} of ${g.steps_total} steps done` +
+          (g.target_date ? `, target ${g.target_date} (${g.days_left} days)` : '') +
+          (g.next_step ? `, next: ${g.next_step}` : ''),
+      ),
+    )
+  }
+  if (crew.length) {
+    lines.push('Helpers (hand_off gives one a job to do in the background; asked to talk to one, take its role up):')
+    lines.push(...crew.map((h) => `- ${h.name}: ${roleInBrief(h.role)}`))
+  }
+  if (routines.length) {
+    lines.push(`Routines kept (run_routine by name when one is asked for, then carry out its steps): ${routines.map((r) => r.name).join('; ')}.`)
+  }
+  if (reports.length) {
+    lines.push(`Reports from your scheduled jobs in the last ${REPORT_DAYS} days, newest first (list_reports for more):`)
+    lines.push(
+      ...reports.map((r) => {
+        const v = reportView(r)
+        return `- ${v.when}, ${v.from}${v.helper ? ` (${v.helper})` : ''}, ${v.status}: ${v.report.replace(/\s+/g, ' ').slice(0, 300)}${v.detail ? ` [${v.detail}]` : ''}`
+      }),
+    )
+  }
+  if (memories.length) {
+    lines.push('Known household facts:')
+    lines.push(...memories.map((m) => `- [${m.id}] ${m.content}`))
+  }
+  return lines.join('\n')
 }
 
 const render = (value: unknown): string =>

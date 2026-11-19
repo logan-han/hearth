@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic'
 
 export async function POST(req: Request) {
   // Everywhere is for a session left open somewhere it should not be: it ends
-  // every session and voids every /connect link still out, and only an admin
+  // every session and voids every account link still under way, and only an admin
   // may ask. Anyone else asking is signed out alone.
   const form = await req.formData().catch(() => null)
   if (form?.get('everywhere') && (await requireAdmin())) await signOutEverywhere()

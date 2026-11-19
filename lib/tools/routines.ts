@@ -5,13 +5,13 @@ import { formatLocalDate } from '../cron'
 import type { ToolContext } from './context'
 
 /**
- * Routines are how the household teaches the bot something once: "the Sunday
- * reset", "getting ready for a school term". After doing it together in the
- * chat, a member says to keep it, and the steps are written down as
- * instructions; from then on the routine's name is enough, in a message or on
- * a schedule. Running one hands the steps back to the turn, which carries
- * them out with whatever tools it has: a scheduled run reads and proposes,
- * and leaves to a person anything that would need their yes.
+ * Routines are how the household teaches Hearth something once: "the Sunday
+ * reset", "getting ready for a school term". After doing it once, a member
+ * says to keep it, and the steps are written down as instructions; from then
+ * on the routine's name is enough, from an MCP client or on a schedule.
+ * Running one hands the steps back to the caller, which carries them out with
+ * whatever tools it has: a scheduled run reads and proposes, and leaves to a
+ * person anything that would need their yes.
  */
 
 const MAX_STEPS = 20

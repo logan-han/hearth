@@ -16,8 +16,8 @@ export default defineConfig({
       // server-rendered pages, which hold the sign-in and admin gates. The
       // client components render through the pages' tests, but their handlers
       // only run in a browser, and with no DOM here they would read as
-      // untested whatever the tests did. Config files and the one-shot webhook
-      // script are not what coverage is measuring.
+      // untested whatever the tests did. Config files and the CLI scripts are
+      // not what coverage is measuring.
       include: ['lib/**/*.ts', 'app/api/**/*.ts', 'app/**/page.tsx', 'app/{shell,denied,sign-in,ui}.tsx'],
       exclude: ['lib/db/schema.ts', 'lib/load-env.ts'],
       // About a point and a half under what the suite reaches (lines 99.9,

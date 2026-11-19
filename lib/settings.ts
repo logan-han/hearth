@@ -11,9 +11,6 @@ import { timezone } from './env'
  * rewrite TOKEN_ENC_KEY, which is what decrypts everything else here.
  */
 export const MANAGED_KEYS = [
-  'TELEGRAM_BOT_TOKEN',
-  'TELEGRAM_WEBHOOK_SECRET',
-  'ALLOWED_TELEGRAM_IDS',
   'LLM_ORDER',
   'GEMINI_API_KEY',
   'GEMINI_MODEL',
@@ -33,12 +30,10 @@ export const MANAGED_KEYS = [
   'QSTASH_CURRENT_SIGNING_KEY',
   'QSTASH_NEXT_SIGNING_KEY',
   'TICK_SECRET',
-  'AMBIENT_MODE',
   'TIMEZONE',
   'LANGUAGE',
   'UNITS',
   'ASSISTANT_NAME',
-  'ASSISTANT_PERSONA',
 ] as const
 
 export type ManagedKey = (typeof MANAGED_KEYS)[number]
@@ -49,8 +44,6 @@ export type ManagedKey = (typeof MANAGED_KEYS)[number]
  * board code like HTL, and a name-matching rule hid it behind dots.
  */
 const CREDENTIALS = new Set<string>([
-  'TELEGRAM_BOT_TOKEN',
-  'TELEGRAM_WEBHOOK_SECRET',
   'GEMINI_API_KEY',
   'OPENROUTER_API_KEY',
   'LLM_API_KEY',
@@ -148,7 +141,7 @@ async function load(): Promise<Store> {
       if (fromEnv) out.set(key, await seed(key, fromEnv))
     }
   } catch (err) {
-    // A missing table or an unreachable database must not take the bot
+    // A missing table or an unreachable database must not take Hearth
     // down; whatever the deployment's env vars say still applies.
     console.error('[settings] could not read the settings store, using the environment:', err)
   }
@@ -195,11 +188,11 @@ const RECHECK_MS = 60 * 60_000
  *
  * The hour starts only after a read of its own that worked, on an instance
  * that had read the store before. A caller arriving while a read is under
- * way shares it rather than being refused: an album's pages reach a fresh
- * instance together, and all but the first were turned away while the first
- * was still reading. An instance that has never read the store holds nothing
- * yet, so its first delivery has to come this way and must not use up the
- * hour. A read that failed changed nothing, so it does not count either, or a
+ * way shares it rather than being refused: deliveries that reach a fresh
+ * instance together were otherwise turned away, all but the first, while the
+ * first was still reading. An instance that has never read the store holds
+ * nothing yet, so its first delivery has to come this way and must not use
+ * up the hour. A read that failed changed nothing, so it does not count either, or a
  * database that was down left the instance refusing every delivery for an
  * hour after it was back.
  */
@@ -268,19 +261,6 @@ export const SETTING_META: Record<
     options?: readonly string[]
   }
 > = {
-  TELEGRAM_BOT_TOKEN: {
-    group: 'Telegram', label: 'Bot token',
-    help: 'After changing it, reconnect the webhook below so Telegram delivers to the new bot.',
-    link: { href: 'https://t.me/BotFather', text: '@BotFather' },
-  },
-  TELEGRAM_WEBHOOK_SECRET: {
-    group: 'Telegram', label: 'Webhook secret',
-    help: 'Telegram echoes this on every delivery, and the webhook route refuses anything without it. Reconnecting the webhook generates one when empty.',
-  },
-  ALLOWED_TELEGRAM_IDS: {
-    group: 'Telegram', label: 'Founding members',
-    help: 'Comma separated Telegram user ids, made admins on sight. Optional once someone is in the family list; they cannot be revoked while listed here.',
-  },
   LLM_ORDER: { group: 'Google Gemini', label: 'Provider order', help: 'Which provider answers first, then who covers for it.' },
   GEMINI_API_KEY: {
     group: 'Google Gemini', label: 'API key',
@@ -307,7 +287,7 @@ export const SETTING_META: Record<
   },
   OPENWEATHER_API_KEY: {
     group: 'Weather', label: 'OpenWeatherMap key',
-    help: 'Powers weather questions and the morning brief. The free tier is plenty.',
+    help: 'Powers the weather tool and the morning brief. The free tier is plenty.',
     link: { href: 'https://home.openweathermap.org/api_keys', text: 'openweathermap.org' },
   },
   POCKETSMITH_DEVELOPER_KEY: {
@@ -341,17 +321,13 @@ export const SETTING_META: Record<
     group: 'Scheduler', label: 'Manual tick secret',
     help: 'Optional: lets you POST /api/tick by hand with an x-tick-secret header.',
   },
-  AMBIENT_MODE: {
-    group: 'Behaviour', label: 'Chime in unprompted', toggle: true,
-    help: 'Lets the bot judge whether an unaddressed group message deserves a reply.',
-  },
   TIMEZONE: {
     group: 'Behaviour', label: 'Household timezone',
     help: 'Where the house is, not where you are reading this. Reminders and calendar entries mean this time wherever anyone happens to be.',
   },
   LANGUAGE: {
     group: 'Behaviour', label: 'Language',
-    help: 'The language and spelling the bot replies and drafts in.',
+    help: 'The language and spelling scheduled reports are written in.',
     options: [
       'Australian English', 'British English', 'American English',
       'German', 'French', 'Spanish', 'Italian', 'Portuguese', 'Dutch',
@@ -365,16 +341,11 @@ export const SETTING_META: Record<
   },
   ASSISTANT_NAME: {
     group: 'Behaviour', label: 'Name',
-    help: 'What the bot calls itself. In a group it also answers a message that opens with its name ("Pip, what\'s on today?") without an @mention. Empty means Hearth.',
-  },
-  ASSISTANT_PERSONA: {
-    group: 'Behaviour', label: 'Manner',
-    help: 'A line or two on how it talks in the chat, e.g. "warm and brief, with a dry sense of humour". Scheduled posts keep their own plain style, and the facts are never bent to suit it.',
+    help: 'What Hearth calls itself in the reports its scheduled jobs write. Empty means Hearth.',
   },
 }
 
 export const SETTING_GROUPS = [
-  'Telegram',
   'Google Gemini',
   'OpenRouter',
   'Self-hosted LLM',
@@ -390,9 +361,7 @@ export const SETTING_GROUPS = [
 /** A word about the group as a whole, shown once above its settings. */
 export const GROUP_NOTES: Partial<Record<(typeof SETTING_GROUPS)[number], string>> = {
   Scheduler:
-    'QStash calls /api/tick on a schedule to fire reminders; these keys prove a call really came from it. Hourly is plenty: every call wakes the Neon database for five minutes, and a five-minute schedule never lets it sleep. A change applies straight away, no redeploy.',
-  Telegram:
-    'How the family reaches the bot. A change takes effect straight away, but Telegram keeps delivering with the old token and secret until the webhook is reconnected below.',
+    'QStash calls /api/tick on a schedule to run reminders and scheduled jobs; these keys prove a call really came from it. Hourly is plenty: every call wakes the Neon database for five minutes, and a five-minute schedule never lets it sleep. A change applies straight away, no redeploy.',
   OpenRouter:
     'Whether a provider may train on your prompts is an account setting at openrouter.ai/settings/privacy, not a property of the model. With training off, OpenRouter only routes to providers that do not train, so a free model that answers has not trained on you, and one that cannot be reached is being refused rather than quietly used. Test below to see which is which.',
   'Self-hosted LLM':

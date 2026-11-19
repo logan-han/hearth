@@ -26,7 +26,7 @@ describe('model events', () => {
       if (s.name === 'openrouter:minimax/minimax-m3:free') throw new Error('429 Too Many Requests')
       return `from ${s.name}`
     })
-    await expect(withModelFallback(fn, [slot('openrouter:minimax/minimax-m3:free'), slot('openrouter:minimax/minimax-m3')], 'hearth.chat'))
+    await expect(withModelFallback(fn, [slot('openrouter:minimax/minimax-m3:free'), slot('openrouter:minimax/minimax-m3')], 'hearth.watcher'))
       .resolves.toBe('from openrouter:minimax/minimax-m3')
 
     const health = await chainHealth(7)
@@ -38,12 +38,11 @@ describe('model events', () => {
     expect(paid.medianMs).toBeGreaterThanOrEqual(0)
   })
 
-  it('counts replies sent back for an unmade change separately from calls', async () => {
-    await recordModelEvent({ slot: 'gemini:x', purpose: 'hearth.chat', outcome: 'answered', ms: 1200 })
-    await recordModelEvent({ slot: 'gemini:x', purpose: 'hearth.chat', outcome: 'claim_retry' })
-    await recordModelEvent({ slot: 'gemini:x', purpose: 'hearth.chat', outcome: 'answered', ms: 800 })
+  it('counts every call a slot answered, with the middle time as typical', async () => {
+    await recordModelEvent({ slot: 'gemini:x', purpose: 'hearth.watcher', outcome: 'answered', ms: 1200 })
+    await recordModelEvent({ slot: 'gemini:x', purpose: 'hearth.verify', outcome: 'answered', ms: 800 })
     const health = await chainHealth(7)
-    expect(health.claimRetries).toBe(1)
+    expect(health).not.toHaveProperty('claimRetries')
     expect(health.calls).toBe(2)
     expect(health.slots[0]).toMatchObject({ slot: 'gemini:x', answered: 2, medianMs: 1200 })
   })
@@ -59,23 +58,23 @@ describe('model events', () => {
     expect(failureKind(null)).toBe('other')
 
     for (const e of ['429', '429 again', 'timed out']) {
-      await recordModelEvent({ slot: 's', purpose: 'hearth.gate', outcome: 'failed', error: e })
+      await recordModelEvent({ slot: 's', purpose: 'hearth.decision', outcome: 'failed', error: e })
     }
     const [s] = (await chainHealth(7)).slots
     expect(s.reasons).toEqual([{ kind: 'rate limited', count: 2 }, { kind: 'timed out', count: 1 }])
   })
 
   it('looks back the asked number of days and prunes what is older than a month', async () => {
-    await recordModelEvent({ slot: 'old', purpose: 'hearth.chat', outcome: 'answered', ms: 5 })
+    await recordModelEvent({ slot: 'old', purpose: 'hearth.watcher', outcome: 'answered', ms: 5 })
     await db().execute(sql`update model_events set created_at = now() - interval '40 days' where slot = 'old'`)
-    await recordModelEvent({ slot: 'new', purpose: 'hearth.chat', outcome: 'answered', ms: 5 })
+    await recordModelEvent({ slot: 'new', purpose: 'hearth.watcher', outcome: 'answered', ms: 5 })
     expect((await chainHealth(7)).slots.map((s) => s.slot)).toEqual(['new'])
     expect((await chainHealth(60)).slots.map((s) => s.slot).sort()).toEqual(['new', 'old'])
     await pruneModelEvents(30)
     expect((await chainHealth(60)).slots.map((s) => s.slot)).toEqual(['new'])
   })
 
-  it('never lets a failed record cost the reply', async () => {
+  it('never lets a failed record cost the run', async () => {
     __setDb(null)
     delete process.env.DATABASE_URL
     await expect(recordModelEvent({ slot: 's', purpose: 'p', outcome: 'answered' })).resolves.toBeUndefined()
@@ -93,11 +92,14 @@ describe('structured record', () => {
     await recordModelEvent({ slot: 'a', purpose: 'hearth.verify', outcome: 'answered', ms: 10 })
     await recordModelEvent({ slot: 'a', purpose: 'hearth.verify', outcome: 'failed', error: 'No object generated: could not parse the response.' })
     await recordModelEvent({ slot: 'a', purpose: 'hearth.decision', outcome: 'failed', error: '429 Too Many Requests' })
-    await recordModelEvent({ slot: 'a', purpose: 'hearth.chat', outcome: 'failed', error: 'No object generated' })
-    await recordModelEvent({ slot: 'b', purpose: 'hearth.gate', outcome: 'answered', ms: 5 })
+    await recordModelEvent({ slot: 'a', purpose: 'hearth.watcher', outcome: 'failed', error: 'No object generated' })
+    await recordModelEvent({ slot: 'b', purpose: 'hearth.decision', outcome: 'answered', ms: 5 })
+    // A run's own prose is no structured call, whatever it failed with.
+    await recordModelEvent({ slot: 'c', purpose: 'hearth.watcher', outcome: 'answered', ms: 5 })
     const record = await structuredRecord(1)
     expect(record.get('a')).toEqual({ attempts: 2, noObject: 1 })
     expect(record.get('b')).toEqual({ attempts: 1, noObject: 0 })
+    expect(record.get('c')).toBeUndefined()
   })
 
   it('does not count a failed structured call with no error message as a no-object failure', async () => {

@@ -15,17 +15,18 @@ const post = (body: unknown) =>
   POST(new Request('https://hearth.example/api/admin/members', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   }))
-const del = (id: string) =>
-  DELETE(new Request(`https://hearth.example/api/admin/members?telegramUserId=${id}`, { method: 'DELETE' }))
+const del = (id: number | string) =>
+  DELETE(new Request(`https://hearth.example/api/admin/members?id=${id}`, { method: 'DELETE' }))
 
 const asAdmin = () => createSession({ email: 'rowan@hearth.example', name: 'Rowan', provider: 'google', role: 'admin' })
 const asMember = () => createSession({ email: 'ada@hearth.example', name: 'Ada', provider: 'google', role: 'member' })
+
+const byEmail = async (email: string) => (await q.allMembers()).find((m) => m.email === email)
 
 beforeEach(async () => {
   vi.clearAllMocks()
   jar.store.clear()
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
-  process.env.ALLOWED_TELEGRAM_IDS = '8734670748'
   process.env.ADMIN_EMAILS = 'rowan@hearth.example'
   const { resetKeyCache } = await import('@/lib/crypto')
   resetKeyCache()
@@ -36,15 +37,16 @@ afterEach(async () => closeDb(client))
 describe('only an admin may manage the family', () => {
   it('refuses everything without a session', async () => {
     expect((await GET()).status).toBe(401)
-    expect((await post({ telegramUserId: '1', name: 'X' })).status).toBe(401)
-    expect((await del('1')).status).toBe(401)
+    expect((await post({ name: 'X', email: 'x@hearth.example' })).status).toBe(401)
+    expect((await del(1)).status).toBe(401)
   })
 
   it('refuses a member session, which can sign in but not administer', async () => {
+    await q.saveMember({ name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
     await asMember()
     expect((await GET()).status).toBe(401)
-    expect((await post({ telegramUserId: '1', name: 'X' })).status).toBe(401)
-    expect(await q.memberByTelegramId('1')).toBeUndefined()
+    expect((await post({ name: 'X', email: 'x@hearth.example' })).status).toBe(401)
+    expect(await byEmail('x@hearth.example')).toBeUndefined()
   })
 })
 
@@ -52,239 +54,231 @@ describe('adding and editing a member', () => {
   beforeEach(asAdmin)
 
   it('lists members for a signed-in admin', async () => {
-    await post({ telegramUserId: '999', name: 'Ada' })
+    await post({ name: 'Ada', email: 'ada@hearth.example' })
     const res = await GET()
     expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body.members.some((m: { telegramUserId: string }) => m.telegramUserId === '999')).toBe(true)
+    expect(body.members.map((m: { name: string }) => m.name)).toEqual(['Ada'])
   })
 
-  it('adds someone with an id, a name and an email', async () => {
-    const res = await post({ telegramUserId: '999', name: 'Ada', email: 'Ada@Hearth.Example' })
+  it('adds someone by name and the address they sign in with, let in', async () => {
+    const res = await post({ name: 'Ada', email: 'Ada@Hearth.Example' })
     expect(res.status).toBe(200)
-    const saved = await q.memberByTelegramId('999')
-    expect(saved).toMatchObject({ name: 'Ada', allowed: true, isAdmin: false })
     // Normalised, so sign-in matching does not depend on how it was typed.
-    expect(saved!.email).toBe('ada@hearth.example')
+    const saved = await byEmail('ada@hearth.example')
+    expect(saved).toMatchObject({ name: 'Ada', allowed: true, isAdmin: false })
   })
 
-  it('lets a member exist without an email', async () => {
-    await post({ telegramUserId: '999', name: 'Kid' })
-    expect((await q.memberByTelegramId('999'))!.email).toBeNull()
+  it('adds an admin when asked', async () => {
+    await post({ name: 'Sam', email: 'sam@hearth.example', isAdmin: true })
+    expect((await byEmail('sam@hearth.example'))!.isAdmin).toBe(true)
   })
 
-  it('rejects a missing id or name', async () => {
-    expect((await post({ name: 'Ada' })).status).toBe(400)
-    expect((await post({ telegramUserId: '999' })).status).toBe(400)
+  it('needs an address for someone new, since it is how they sign in', async () => {
+    const res = await post({ name: 'Kid' })
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toContain('how they sign in')
+    expect(await q.allMembers()).toEqual([])
   })
 
-  it('rejects a non-numeric id rather than storing rubbish', async () => {
-    expect((await post({ telegramUserId: 'abc', name: 'Ada' })).status).toBe(400)
+  it('needs a name', async () => {
+    expect((await post({ email: 'ada@hearth.example' })).status).toBe(400)
+    expect((await post({ name: '   ', email: 'ada@hearth.example' })).status).toBe(400)
   })
 
   it('rejects something that is not an email address', async () => {
-    const res = await post({ telegramUserId: '999', name: 'Ada', email: 'not-an-email' })
+    const res = await post({ name: 'Ada', email: 'not-an-email' })
     expect(res.status).toBe(400)
-    expect(String((await res.json()).error)).toContain('not-an-email')
+    expect((await res.json()).error).toContain('does not look like an email')
   })
 
   it('rejects the near misses too', async () => {
-    for (const email of ['@hearth.example', 'ada@', 'ada@han', 'ada@@hearth.example', 'ada@hearth.example.', 'ada@.life']) {
-      expect((await post({ telegramUserId: '999', name: 'Ada', email })).status).toBe(400)
+    for (const email of ['@x.com', 'a@b', 'a@@b.com', 'a@b..com', 'a b@c.com', 'a@.com']) {
+      expect((await post({ name: 'Ada', email })).status, email).toBe(400)
     }
   })
 
-  it('rejects a malformed body', async () => {
-    const res = await POST(new Request('https://hearth.example/api/admin/members', { method: 'POST', body: 'oops' }))
+  it('rejects a malformed body, and a member id that could not be one', async () => {
+    const res = await POST(new Request('https://hearth.example/api/admin/members', { method: 'POST', body: '{nope' }))
     expect(res.status).toBe(400)
+    for (const id of [0, -1, 2.5, 'x']) {
+      expect((await post({ id, name: 'Ada' })).status, String(id)).toBe(400)
+    }
   })
 
-  it('updates rather than duplicating on a second save', async () => {
-    await post({ telegramUserId: '999', name: 'Ada' })
-    await post({ telegramUserId: '999', name: 'Ada Han', email: 'ada@hearth.example' })
-    const all = await q.allMembersWithLinks()
-    expect(all.filter((m) => m.telegramUserId === '999')).toHaveLength(1)
-    expect(all.find((m) => m.telegramUserId === '999')!.name).toBe('Ada Han')
+  it('changes the person already here when an address is added again, rather than making a second', async () => {
+    await post({ name: 'Ada', email: 'ada@hearth.example' })
+    await post({ name: 'Ada Lovelace', email: 'ADA@hearth.example' })
+    const all = await q.allMembers()
+    expect(all).toHaveLength(1)
+    expect(all[0].name).toBe('Ada Lovelace')
+  })
+
+  it('adding an address already here keeps the admin the add left out', async () => {
+    await post({ name: 'Ada', email: 'ada@hearth.example', isAdmin: true })
+    await post({ name: 'Ada L', email: 'ada@hearth.example' })
+    expect(await byEmail('ada@hearth.example')).toMatchObject({ name: 'Ada L', isAdmin: true, allowed: true })
+  })
+
+  it('adding an address already here does not let back in someone who was revoked', async () => {
+    await post({ name: 'Ada', email: 'ada@hearth.example' })
+    const ada = (await byEmail('ada@hearth.example'))!
+    await post({ id: ada.id, name: 'Ada', allowed: false })
+    await post({ name: 'Ada', email: 'ada@hearth.example' })
+    expect((await byEmail('ada@hearth.example'))!.allowed).toBe(false)
+  })
+
+  it('changes a member by id, keeping whatever the body leaves out', async () => {
+    await post({ name: 'Ada', email: 'ada@hearth.example', isAdmin: true })
+    const ada = (await byEmail('ada@hearth.example'))!
+    await post({ id: ada.id, name: 'Ada Lovelace' })
+    expect(await q.memberById(ada.id)).toMatchObject({ name: 'Ada Lovelace', email: 'ada@hearth.example', isAdmin: true, allowed: true })
+  })
+
+  it('finds an address among members, some of whom have none', async () => {
+    await q.saveMember({ name: 'Kid', email: null, allowed: true, isAdmin: false })
+    expect((await post({ name: 'Ada', email: 'ada@hearth.example' })).status).toBe(200)
+    expect((await q.allMembers()).map((m) => m.name).sort()).toEqual(['Ada', 'Kid'])
+  })
+
+  it('keeps no address when a change by id leaves it out of someone who has none', async () => {
+    const kid = await q.saveMember({ name: 'Kid', email: null, allowed: true, isAdmin: false })
+    expect((await post({ id: kid.id, name: 'Kiddo' })).status).toBe(200)
+    expect(await q.memberById(kid.id)).toMatchObject({ name: 'Kiddo', email: null })
+  })
+
+  it('changes an address by id, and clears it on empty', async () => {
+    await post({ name: 'Ada', email: 'ada@hearth.example' })
+    const ada = (await byEmail('ada@hearth.example'))!
+    await post({ id: ada.id, name: 'Ada', email: 'ada.l@hearth.example' })
+    expect((await q.memberById(ada.id))!.email).toBe('ada.l@hearth.example')
+    await post({ id: ada.id, name: 'Ada', email: '' })
+    expect((await q.memberById(ada.id))!.email).toBeNull()
+  })
+
+  it("will not give a member another member's address", async () => {
+    await post({ name: 'Ada', email: 'ada@hearth.example' })
+    await post({ name: 'Sam', email: 'sam@hearth.example' })
+    const sam = (await byEmail('sam@hearth.example'))!
+    const res = await post({ id: sam.id, name: 'Sam', email: 'ada@hearth.example' })
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toContain("already Ada's address")
+  })
+
+  it('404s on a member id it has never seen', async () => {
+    expect((await post({ id: 999, name: 'Ghost' })).status).toBe(404)
   })
 
   it('can promote and demote, while another admin remains', async () => {
-    await post({ telegramUserId: '111', name: 'Boss', isAdmin: true })
-    await post({ telegramUserId: '999', name: 'Ada', isAdmin: true })
-    expect((await q.memberByTelegramId('999'))!.isAdmin).toBe(true)
-    await post({ telegramUserId: '999', name: 'Ada', isAdmin: false })
-    expect((await q.memberByTelegramId('999'))!.isAdmin).toBe(false)
+    await post({ name: 'Ada', email: 'ada@hearth.example', isAdmin: true })
+    await post({ name: 'Sam', email: 'sam@hearth.example', isAdmin: true })
+    const ada = (await byEmail('ada@hearth.example'))!
+    expect((await post({ id: ada.id, name: 'Ada', isAdmin: false })).status).toBe(200)
+    expect((await q.memberById(ada.id))!.isAdmin).toBe(false)
   })
 
   it('revoking access takes admin with it, so they cannot sign in', async () => {
-    await post({ telegramUserId: '111', name: 'Boss', isAdmin: true })
-    await post({ telegramUserId: '999', name: 'Ada', isAdmin: true })
-    await post({ telegramUserId: '999', name: 'Ada', isAdmin: true, allowed: false })
-    const saved = await q.memberByTelegramId('999')
-    expect(saved).toMatchObject({ allowed: false, isAdmin: false })
+    await post({ name: 'Ada', email: 'ada@hearth.example', isAdmin: true })
+    await post({ name: 'Sam', email: 'sam@hearth.example', isAdmin: true })
+    const ada = (await byEmail('ada@hearth.example'))!
+    await post({ id: ada.id, name: 'Ada', allowed: false, isAdmin: true })
+    expect(await q.memberById(ada.id)).toMatchObject({ allowed: false, isAdmin: false })
   })
 
-  it('quiets the rooms a revoked member has talked in, and unmutes every one when they are allowed again', async () => {
-    // No bot token here, so Telegram cannot say who is where, and having talked in a room stands in for it.
-    delete process.env.TELEGRAM_BOT_TOKEN
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
-    await post({ telegramUserId: '999', name: 'Ada' })
-    const ada = await q.memberByTelegramId('999')
-    await q.rememberChat('-100', 'group', 'Family')
-    await q.rememberChat('-200', 'group', 'Cousins')
-    await q.recordMessage({ chatId: '-100', memberId: ada!.id, role: 'user', content: 'hi' })
-
-    await post({ telegramUserId: '999', name: 'Ada', allowed: false })
-    expect(await q.strangersIn('-100')).toEqual([{ id: '999', name: 'Ada' }])
-    expect(await q.strangersIn('-200')).toEqual([])
-
-    await q.noteStranger('-200', { id: '999', name: 'Ada' })
-    // What the row's Allow button sends; a bare re-add keeps them revoked.
-    await post({ telegramUserId: '999', name: 'Ada', allowed: true })
-    expect(await q.strangersIn('-100')).toEqual([])
-    expect(await q.strangersIn('-200')).toEqual([])
-  })
-
-  it('refuses to revoke a founding member, whose next message would let them back into one room only', async () => {
-    delete process.env.TELEGRAM_BOT_TOKEN
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
-    await post({ telegramUserId: '111', name: 'Boss', isAdmin: true })
-    await post({ telegramUserId: '8734670748', name: 'Rowan', isAdmin: true })
-    const rowan = await q.memberByTelegramId('8734670748')
-    await q.rememberChat('-100', 'group', 'Family')
-    await q.recordMessage({ chatId: '-100', memberId: rowan!.id, role: 'user', content: 'hi' })
-
-    const res = await post({ telegramUserId: '8734670748', name: 'Rowan', isAdmin: true, allowed: false })
-    expect(res.status).toBe(400)
-    expect(String((await res.json()).error)).toContain('ALLOWED_TELEGRAM_IDS')
-    expect(await q.memberByTelegramId('8734670748')).toMatchObject({ allowed: true, isAdmin: true })
-    expect(await q.strangersIn('-100')).toEqual([])
-  })
-
-  it('updates an email on an existing member, and clears it on empty', async () => {
-    await post({ telegramUserId: '999', name: 'Ada', email: 'old@hearth.example' })
-    await post({ telegramUserId: '999', name: 'Ada', email: 'new@hearth.example' })
-    expect((await q.memberByTelegramId('999'))!.email).toBe('new@hearth.example')
-    await post({ telegramUserId: '999', name: 'Ada', email: '' })
-    expect((await q.memberByTelegramId('999'))!.email).toBeNull()
-  })
-
-  it('adding an id already here renames them and keeps the email and admin the add left out', async () => {
-    await post({ telegramUserId: '111', name: 'Boss', isAdmin: true })
-    await post({ telegramUserId: '999', name: 'Mun', email: 'mum@hearth.example', isAdmin: true })
-    // What the Add row sends when only the id and the corrected name are filled in.
-    expect((await post({ telegramUserId: '999', name: 'Mum' })).status).toBe(200)
-    expect(await q.memberByTelegramId('999')).toMatchObject({
-      name: 'Mum', email: 'mum@hearth.example', allowed: true, isAdmin: true,
-    })
-    // What was filled in still lands.
-    await post({ telegramUserId: '999', name: 'Mum', email: 'mum@else.example' })
-    expect((await q.memberByTelegramId('999'))!.email).toBe('mum@else.example')
-  })
-
-  it('adding an id already here does not let back in someone who was revoked', async () => {
-    await post({ telegramUserId: '999', name: 'Tom', email: 'tom@hearth.example' })
-    await post({ telegramUserId: '999', name: 'Tom', email: 'tom@hearth.example', allowed: false })
-    // The Add row fixing a spelling, with the email blank and admin unticked.
-    expect((await post({ telegramUserId: '999', name: 'Thomas' })).status).toBe(200)
-    expect(await q.memberByTelegramId('999')).toMatchObject({
-      name: 'Thomas', email: 'tom@hearth.example', allowed: false, isAdmin: false,
-    })
-    // Saying so outright, as Allow and /setup do, still lets them in.
-    await post({ telegramUserId: '999', name: 'Thomas', allowed: true })
-    expect((await q.memberByTelegramId('999'))!.allowed).toBe(true)
-  })
-
-  it('lets in someone new who is added without saying either way', async () => {
-    await post({ telegramUserId: '999', name: 'Kid' })
-    expect((await q.memberByTelegramId('999'))!.allowed).toBe(true)
+  it('a revoked member holds no key any more, though it stays on record', async () => {
+    await post({ name: 'Ada', email: 'ada@hearth.example' })
+    const ada = (await byEmail('ada@hearth.example'))!
+    const { key } = await q.issueMcpKey(ada.id, 'Laptop')
+    await post({ id: ada.id, name: 'Ada', allowed: false })
+    expect(await q.memberByMcpKey(key)).toBeNull()
+    await post({ id: ada.id, name: 'Ada', allowed: true })
+    expect((await q.memberByMcpKey(key))?.member.id).toBe(ada.id)
   })
 
   it('returns the refreshed list with linked mailboxes shown', async () => {
-    const m = await q.upsertMember('777', 'Linked', { allowed: true })
-    await q.saveConnection({ memberId: m.id, provider: 'google', email: 'l@hearth.example', refreshToken: 'r', scopes: null })
-    const body = await (await post({ telegramUserId: '999', name: 'Ada' })).json()
-    const linked = body.members.find((x: { telegramUserId: string }) => x.telegramUserId === '777')
-    expect(linked.linked).toEqual([{ provider: 'google', email: 'l@hearth.example', readOnly: false }])
+    await post({ name: 'Ada', email: 'ada@hearth.example' })
+    const ada = (await byEmail('ada@hearth.example'))!
+    await q.saveConnection({ memberId: ada.id, provider: 'google', email: 'ada@gmail.com', refreshToken: 'r', scopes: null })
+    const body = await (await post({ id: ada.id, name: 'Ada' })).json()
+    expect(body.members[0].linked).toEqual([{ provider: 'google', email: 'ada@gmail.com', readOnly: false }])
   })
 })
 
 describe('removing a member', () => {
   beforeEach(asAdmin)
 
-  it('removes an ordinary member', async () => {
-    await post({ telegramUserId: '999', name: 'Ada' })
-    expect((await del('999')).status).toBe(200)
-    expect(await q.memberByTelegramId('999')).toBeUndefined()
+  it('removes an ordinary member, their keys, links and drafts with them', async () => {
+    await post({ name: 'Ada', email: 'ada@hearth.example' })
+    const ada = (await byEmail('ada@hearth.example'))!
+    const { key } = await q.issueMcpKey(ada.id, 'Laptop')
+    expect((await del(ada.id)).status).toBe(200)
+    expect(await q.memberById(ada.id)).toBeUndefined()
+    expect(await q.memberByMcpKey(key)).toBeNull()
   })
 
-  it('quiets the rooms they talked in, before the history forgets it was them', async () => {
-    delete process.env.TELEGRAM_BOT_TOKEN
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
-    await post({ telegramUserId: '999', name: 'Ada' })
-    await q.rememberChat('-100', 'group', 'Family')
-    await q.recordMessage({ chatId: '-100', memberId: (await q.memberByTelegramId('999'))!.id, role: 'user', content: 'hi' })
-    expect((await del('999')).status).toBe(200)
-    expect(await q.strangersIn('-100')).toEqual([{ id: '999', name: 'Ada' }])
-  })
-
-  it('refuses to pretend it removed a founding member', async () => {
-    await post({ telegramUserId: '8734670748', name: 'Rowan' })
-    const res = await del('8734670748')
-    expect(res.status).toBe(400)
-    expect(String((await res.json()).error)).toContain('ALLOWED_TELEGRAM_IDS')
-    expect(await q.memberByTelegramId('8734670748')).toBeDefined()
+  it('pauses their scheduled jobs before the row that says whose they are goes', async () => {
+    await post({ name: 'Ada', email: 'ada@hearth.example' })
+    const ada = (await byEmail('ada@hearth.example'))!
+    const job = await q.addAutomation({ memberId: ada.id, label: 'Bins', cronExpr: '0 19 * * 1', instruction: 'Remind', nextRunAt: new Date() })
+    await del(ada.id)
+    expect(await q.getAutomation(job.id)).toMatchObject({ enabled: false, memberId: null })
   })
 
   it('404s on someone it has never seen', async () => {
-    expect((await del('123')).status).toBe(404)
+    expect((await del(999)).status).toBe(404)
   })
 
   it('needs to be told who', async () => {
     expect((await DELETE(new Request('https://hearth.example/api/admin/members', { method: 'DELETE' }))).status).toBe(400)
+    expect((await del('abc')).status).toBe(400)
   })
 })
 
 describe('the last admin cannot lock the house out', () => {
+  let only: Awaited<ReturnType<typeof q.saveMember>>
   beforeEach(async () => {
     await asAdmin()
-    await post({ telegramUserId: '999', name: 'Ada', isAdmin: true })
+    only = await q.saveMember({ name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: true })
   })
 
   it('refuses to demote the only admin', async () => {
-    const res = await post({ telegramUserId: '999', name: 'Ada', isAdmin: false })
+    const res = await post({ id: only.id, name: 'Rowan', isAdmin: false })
     expect(res.status).toBe(400)
-    expect(String((await res.json()).error)).toContain('only admin')
-    expect(await q.memberByTelegramId('999')).toMatchObject({ allowed: true, isAdmin: true })
+    expect((await res.json()).error).toContain('only admin')
+    expect((await q.memberById(only.id))!.isAdmin).toBe(true)
   })
 
   it('refuses to revoke the only admin', async () => {
-    const res = await post({ telegramUserId: '999', name: 'Ada', isAdmin: true, allowed: false })
-    expect(res.status).toBe(400)
-    expect((await q.memberByTelegramId('999'))!.allowed).toBe(true)
+    expect((await post({ id: only.id, name: 'Rowan', allowed: false })).status).toBe(400)
+    expect((await q.memberById(only.id))!.allowed).toBe(true)
   })
 
   it('refuses to remove the only admin', async () => {
-    const res = await del('999')
+    const res = await del(only.id)
     expect(res.status).toBe(400)
-    expect(String((await res.json()).error)).toContain('only admin')
-    expect(await q.memberByTelegramId('999')).toBeDefined()
+    expect(await q.memberById(only.id)).toBeDefined()
   })
 
   it('renames the only admin from the Add row, which leaves admin out rather than saying no', async () => {
-    const res = await post({ telegramUserId: '999', name: 'Ada Han' })
-    expect(res.status).toBe(200)
-    expect(await q.memberByTelegramId('999')).toMatchObject({ name: 'Ada Han', allowed: true, isAdmin: true })
+    expect((await post({ name: 'Rowan H', email: 'rowan@hearth.example' })).status).toBe(200)
+    expect(await q.memberById(only.id)).toMatchObject({ name: 'Rowan H', isAdmin: true })
   })
 
-  it('still edits the only admin in place — a new email is not a demotion', async () => {
-    const res = await post({ telegramUserId: '999', name: 'Ada', email: 'ada@hearth.example', isAdmin: true })
-    expect(res.status).toBe(200)
-    expect((await q.memberByTelegramId('999'))!.email).toBe('ada@hearth.example')
+  it('still edits the only admin in place: a new address is not a demotion', async () => {
+    expect((await post({ id: only.id, name: 'Rowan', email: 'rowan.h@hearth.example' })).status).toBe(200)
+    expect(await q.memberById(only.id)).toMatchObject({ email: 'rowan.h@hearth.example', isAdmin: true })
   })
 
   it('lets them go once a successor is appointed', async () => {
-    await post({ telegramUserId: '111', name: 'Boss', isAdmin: true })
-    expect((await post({ telegramUserId: '999', name: 'Ada', isAdmin: false })).status).toBe(200)
-    expect((await del('999')).status).toBe(200)
+    await post({ name: 'Ada', email: 'ada@hearth.example', isAdmin: true })
+    expect((await post({ id: only.id, name: 'Rowan', isAdmin: false })).status).toBe(200)
+    expect((await del(only.id)).status).toBe(200)
+  })
+
+  it('counts a revoked admin as no admin at all', async () => {
+    const ada = await q.saveMember({ name: 'Ada', email: 'ada@hearth.example', allowed: false, isAdmin: false })
+    // Ada was never an admin who could step in, so Rowan is still the only one.
+    expect((await post({ id: only.id, name: 'Rowan', isAdmin: false })).status).toBe(400)
+    expect((await post({ id: ada.id, name: 'Ada', allowed: false })).status).toBe(200)
   })
 })

@@ -5,11 +5,10 @@ const lookup = vi.hoisted(() => vi.fn())
 vi.mock('node:dns/promises', () => ({ lookup }))
 
 const { browseTools, recipeIn, duration } = await import('@/lib/tools/browse')
-const { buildTools } = await import('@/lib/tools')
-const { routeGroups } = await import('@/lib/tools/router')
+const { buildTools, CUSTOM_AUTOMATION_TOOLS, allToolNames } = await import('@/lib/tools')
 
 const fetchMock = vi.fn()
-const ctx: ToolContext = { chatId: '-1', member: null, memberName: 'Rowan', now: new Date(), notices: [] }
+const ctx: ToolContext = { member: null, memberName: 'Rowan', now: new Date() }
 const read = (url: string) =>
   (browseTools(ctx).read_recipe.execute as unknown as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)({ url }, {})
 const page = (html: string, status = 200) => new Response(html, { status, headers: { 'content-type': 'text/html' } })
@@ -104,7 +103,7 @@ describe('read_recipe', () => {
     expect(await read('https://recipes.test/huge')).toEqual({ error: 'That page is too large to read here.' })
   })
 
-  it('opens only a link the turn was given, once it has read outside text, as read_url does', async () => {
+  it('opens only a link the run was given, once it has read outside text, as read_url does', async () => {
     fetchMock.mockResolvedValue(page(ld(soup)))
     const turn: ToolContext = { ...ctx, readUntrusted: true, seen: [{ text: 'try https://recipes.test/soup', typed: 0 }] }
     const tools = buildTools(turn) as unknown as Record<string, { execute: (a: unknown, o: unknown) => Promise<Record<string, unknown>> }>
@@ -112,9 +111,8 @@ describe('read_recipe', () => {
     expect((await tools.read_recipe.execute({ url: 'https://recipes.test/soup' }, {})).name).toBe('Leek & potato soup')
   })
 
-  it('is reached when the talk is of cooking', () => {
-    for (const said of ['can you add this recipe to the shopping list', 'what should we have for dinner?', 'plan meals for the week']) {
-      expect(routeGroups(said), said).toContain('kitchen')
-    }
+  it('is offered to every MCP client, and to a scheduled run such as a helper planning dinners', () => {
+    expect(allToolNames()).toContain('read_recipe')
+    expect(CUSTOM_AUTOMATION_TOOLS).toContain('read_recipe')
   })
 })

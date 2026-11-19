@@ -14,7 +14,6 @@ export default async function SystemPage() {
   await hydrateSecrets()
   const stats = await gatherStats()
   const t = stats.totals
-  const muted = stats.chats.filter((c) => c.strangers > 0)
   const pulse = stats.scheduler
   const health = stats.chainHealth
   // Every configured slot, in chain order, whether or not it has been used this week.
@@ -31,7 +30,7 @@ export default async function SystemPage() {
       <div className="strip">
         <Stat value={t.members} label="Family" note={`${t.admins} admin`} />
         <Stat value={t.connections} label="Mailboxes linked" />
-        <Stat value={t.messages} label="Messages" />
+        <Stat value={t.keys} label="MCP keys" />
         <Stat value={t.events} label="On the calendar" />
         <Stat value={t.memories} label="Remembered" note="listed on Home" />
         <Stat value={t.sent} label="Emails sent" note={t.drafts ? `${t.drafts} awaiting yes` : undefined} />
@@ -72,11 +71,8 @@ export default async function SystemPage() {
                 ))}
               </ul>
               <p className="empty" style={{ marginTop: '0.8rem' }}>
-                {health.calls} model calls in all, counting the gate, the checks behind each watcher post and the
-                reply judgement, not just chat replies. A skip is what sends a call to the next slot down.
-                {health.claimRetries > 0
-                  ? ` ${health.claimRetries} ${health.claimRetries === 1 ? 'reply was' : 'replies were'} sent back for reporting a change no tool had made.`
-                  : ' No reply has had to be sent back for reporting a change no tool had made.'}
+                {health.calls} model calls in all, counting the checks behind each scheduled report, not just the
+                runs themselves. A skip is what sends a call to the next slot down.
               </p>
             </>
           )}
@@ -84,14 +80,14 @@ export default async function SystemPage() {
       </section>
 
       <section>
-        <h2>Traffic, last fortnight</h2>
+        <h2>Changes, last fortnight</h2>
         <div className="panel">
-          {stats.activity.every((d) => d.asked === 0 && d.answered === 0) ? (
-            <Empty>No messages in the last fortnight.</Empty>
+          {stats.activity.every((d) => d.mcp + d.web + d.scheduled === 0) ? (
+            <Empty>Nothing changed in the last fortnight.</Empty>
           ) : (
             <>
               <Spark data={stats.activity} />
-              <p className="empty">Grey is what the family asked, ember is what the bot answered.</p>
+              <p className="empty">Grey is what members changed, through their MCP clients or on Home; ember is what their scheduled jobs changed.</p>
             </>
           )}
         </div>
@@ -99,10 +95,10 @@ export default async function SystemPage() {
 
       <div className="cols">
         <section>
-          <h2>Answered by, last 30 days</h2>
+          <h2>Scheduled runs by, last 30 days</h2>
           <div className="panel">
             {stats.models.length === 0 ? (
-              <Empty>Nothing answered yet.</Empty>
+              <Empty>No scheduled run yet.</Empty>
             ) : (
               <>
                 <ul className="listing">
@@ -132,28 +128,28 @@ export default async function SystemPage() {
         </section>
 
         <section>
-          <h2>Where it talks</h2>
+          <h2>MCP keys</h2>
           <div className="panel">
-            <ul className="listing">
-              {stats.chats.map((c) => (
-                <li key={c.id}>
-                  <span className="title">
-                    {c.type === 'private' ? (c.person ?? `Someone (${c.id})`) : (c.title ?? 'Unnamed group')}{' '}
-                    <span className="tag none">{c.type === 'private' ? 'direct message' : c.type === 'channel' ? 'channel' : 'group chat'}</span>
-                  </span>
-                  <span className="meta">{c.messages} messages</span>
-                  {c.strangers > 0 ? (
-                    <span className="meta warn">
-                      Quiet here: {c.strangers} {c.strangers === 1 ? 'person' : 'people'} unrecognised
-                    </span>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-            {muted.length === 0 ? null : (
-              <p className="empty" style={{ marginTop: '0.8rem' }}>
-                Add them under Settings, or remove them from the chat, and the bot starts answering again.
-              </p>
+            {stats.keys.length === 0 ? (
+              <Empty>No keys yet. Each member makes their own on Home.</Empty>
+            ) : (
+              <>
+                <ul className="listing">
+                  {stats.keys.map((k) => (
+                    <li key={k.id}>
+                      <span className="title">
+                        {k.label} <span className="tag none">{k.member}</span>
+                      </span>
+                      <span className="meta">
+                        made {k.created} · {k.lastUsed ? `last used ${k.lastUsed}` : 'not used yet'}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="empty" style={{ marginTop: '0.8rem' }}>
+                  A key is revoked by its member on Home; removing or revoking the member revokes every key of theirs.
+                </p>
+              </>
             )}
           </div>
         </section>
@@ -170,7 +166,8 @@ export default async function SystemPage() {
                 {stats.automations.map((a) => (
                   <li key={a.id}>
                     <span className="title">
-                      {a.label} {a.enabled ? null : <span className="tag none">paused</span>}
+                      {a.label} {a.owner ? <span className="tag none">{a.owner}</span> : null}
+                      {a.enabled ? null : <span className="tag none">paused</span>}
                       {a.offGrid ? <span className="tag none">off the tick</span> : null}
                     </span>
                     <span className="meta mono">{a.cron}</span>
@@ -182,7 +179,7 @@ export default async function SystemPage() {
                 ))}
               </ul>
               <p className="empty" style={{ marginTop: '0.8rem' }}>
-                Pause, resume or delete them on Home, where any member can.
+                Each member pauses, resumes or deletes their own on Home.
               </p>
             </>
           )}
@@ -192,21 +189,24 @@ export default async function SystemPage() {
   )
 }
 
-function Spark({ data }: { data: { day: string; asked: number; answered: number }[] }) {
-  const peak = Math.max(...data.map((d) => Math.max(d.asked, d.answered)), 1)
+function Spark({ data }: { data: { day: string; mcp: number; web: number; scheduled: number }[] }) {
+  const peak = Math.max(...data.map((d) => Math.max(d.mcp + d.web, d.scheduled)), 1)
   // A quiet day draws nothing. Giving zero a minimum height turned every empty
   // day into a stub that read as activity.
   const bar = (n: number) => (n === 0 ? undefined : { height: `${Math.max((n / peak) * 100, 3)}%` })
 
   return (
-    <div className="spark" role="img" aria-label="Messages per day over the last fortnight">
-      {data.map((d) => (
-        <div key={d.day} className="spark-day" title={`${d.day}: ${d.asked} asked, ${d.answered} answered`}>
-          {d.asked > 0 ? <i className="asked" style={bar(d.asked)} /> : <i className="blank" />}
-          {d.answered > 0 ? <i className="answered" style={bar(d.answered)} /> : <i className="blank" />}
-          <em>{d.day.slice(8)}</em>
-        </div>
-      ))}
+    <div className="spark" role="img" aria-label="Changes per day over the last fortnight">
+      {data.map((d) => {
+        const asked = d.mcp + d.web
+        return (
+          <div key={d.day} className="spark-day" title={`${d.day}: ${d.mcp} through MCP, ${d.web} on Home, ${d.scheduled} scheduled`}>
+            {asked > 0 ? <i className="asked" style={bar(asked)} /> : <i className="blank" />}
+            {d.scheduled > 0 ? <i className="answered" style={bar(d.scheduled)} /> : <i className="blank" />}
+            <em>{d.day.slice(8)}</em>
+          </div>
+        )
+      })}
     </div>
   )
 }

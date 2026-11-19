@@ -75,9 +75,9 @@ describe('telemetry', () => {
 
   it('records content unless told not to', () => {
     expect(recordContent()).toBe(true)
-    expect(callTelemetry('hearth.chat')).toEqual({ functionId: 'hearth.chat', recordInputs: true, recordOutputs: true })
+    expect(callTelemetry('hearth.watcher')).toEqual({ functionId: 'hearth.watcher', recordInputs: true, recordOutputs: true })
     process.env.LANGFUSE_RECORD_CONTENT = 'off'
-    expect(callTelemetry('hearth.chat')).toEqual({ functionId: 'hearth.chat', recordInputs: false, recordOutputs: false })
+    expect(callTelemetry('hearth.watcher')).toEqual({ functionId: 'hearth.watcher', recordInputs: false, recordOutputs: false })
   })
 
   it('treats an existing processor as already set up, whatever the keys say', async () => {
@@ -163,11 +163,11 @@ describe('runs', () => {
   }
 
   it('does the work plainly when tracing is off, and a note then goes nowhere', async () => {
-    const out = await traceRun('hearth.chat', { sessionId: 's1' }, async () => {
+    const out = await traceRun('hearth.watcher', { sessionId: 's1' }, async () => {
       noteRun({ input: 'hello', output: 'hi' })
-      return 'answered'
+      return 'kept'
     })
-    expect(out).toBe('answered')
+    expect(out).toBe('kept')
     expect(tracing.startActiveObservation).not.toHaveBeenCalled()
     expect(tracing.propagateAttributes).not.toHaveBeenCalled()
   })
@@ -175,7 +175,7 @@ describe('runs', () => {
   it('opens a trace of its own, named once, and notes what came of it on its root', async () => {
     live()
     const withContext = vi.spyOn(context, 'with')
-    const out = await traceRun('hearth.watcher', { sessionId: '-100', tags: ['watcher'] }, async () => {
+    const out = await traceRun('hearth.watcher', { sessionId: 'automation-100', tags: ['watcher'] }, async () => {
       noteRun({ input: 'DATA', metadata: { writer: 'gemini:flash-lite' } })
       noteRun({ output: 'Bins out tonight.', metadata: { outcome: 'held back' }, detail: { reason: 'a time' }, level: 'WARNING' })
       return 7
@@ -183,7 +183,7 @@ describe('runs', () => {
     expect(out).toBe(7)
     // A root context: the run is not one more part of the request that ran it.
     expect(withContext.mock.calls[0][0]).toBe(ROOT_CONTEXT)
-    expect(tracing.propagateAttributes).toHaveBeenCalledWith({ sessionId: '-100', tags: ['watcher'], traceName: 'hearth.watcher' }, expect.any(Function))
+    expect(tracing.propagateAttributes).toHaveBeenCalledWith({ sessionId: 'automation-100', tags: ['watcher'], traceName: 'hearth.watcher' }, expect.any(Function))
     expect(tracing.startActiveObservation).toHaveBeenCalledWith('hearth.watcher', expect.any(Function))
     expect(tracing.observation.update).toHaveBeenNthCalledWith(1, { metadata: { writer: 'gemini:flash-lite' }, input: 'DATA' })
     expect(tracing.observation.update).toHaveBeenNthCalledWith(2, {
@@ -194,21 +194,21 @@ describe('runs', () => {
   it('keeps the family\'s words out of a run when content is off, and its shape in', async () => {
     live()
     process.env.LANGFUSE_RECORD_CONTENT = 'off'
-    await traceRun('hearth.chat', {}, async () => {
-      noteRun({ input: 'my payslip', output: 'filed', metadata: { outcome: 'posted' }, detail: { reason: 'quotes the draft' } })
+    await traceRun('hearth.watcher', {}, async () => {
+      noteRun({ input: 'my payslip', output: 'filed', metadata: { outcome: 'kept' }, detail: { reason: 'quotes the draft' } })
       noteRun({ input: 'only content' })
     })
-    expect(tracing.observation.update).toHaveBeenNthCalledWith(1, { metadata: { outcome: 'posted' } })
+    expect(tracing.observation.update).toHaveBeenNthCalledWith(1, { metadata: { outcome: 'kept' } })
     expect(tracing.observation.update).toHaveBeenNthCalledWith(2, {})
   })
 
   it('names the trace for the run, whatever a call inside it calls itself', async () => {
     live()
-    await traceRun('hearth.chat', { sessionId: 's1' }, () => traced({ traceName: 'hearth.claim', sessionId: 's1', tags: ['claim'] }, async () => 'checked'))
-    expect(tracing.propagateAttributes).toHaveBeenLastCalledWith({ traceName: 'hearth.chat', sessionId: 's1', tags: ['claim'] }, expect.any(Function))
+    await traceRun('hearth.watcher', { sessionId: 's1' }, () => traced({ traceName: 'hearth.verify', sessionId: 's1', tags: ['verify'] }, async () => 'checked'))
+    expect(tracing.propagateAttributes).toHaveBeenLastCalledWith({ traceName: 'hearth.watcher', sessionId: 's1', tags: ['verify'] }, expect.any(Function))
     // Outside a run a call names its own trace, as before.
-    await traced({ traceName: 'hearth.gate' }, async () => 'quiet')
-    expect(tracing.propagateAttributes).toHaveBeenLastCalledWith({ traceName: 'hearth.gate' }, expect.any(Function))
+    await traced({ traceName: 'hearth.decision' }, async () => 'kept')
+    expect(tracing.propagateAttributes).toHaveBeenLastCalledWith({ traceName: 'hearth.decision' }, expect.any(Function))
   })
 
   it('cuts a metadata value Langfuse would drop for its length, rather than lose it', async () => {
@@ -226,7 +226,7 @@ describe('runs', () => {
     tracing.observation.update.mockImplementationOnce(() => {
       throw new Error('span already ended')
     })
-    await expect(traceRun('hearth.sweep', {}, async () => {
+    await expect(traceRun('hearth.watcher', {}, async () => {
       noteRun({ output: 'SKIP' })
       return 'done'
     })).resolves.toBe('done')
@@ -243,7 +243,7 @@ describe('runs', () => {
       live()
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const work = vi.fn(async () => 'done')
-      await expect(fresh.traceRun('hearth.chat', {}, work)).resolves.toBe('done')
+      await expect(fresh.traceRun('hearth.watcher', {}, work)).resolves.toBe('done')
       expect(work).toHaveBeenCalledTimes(1)
       expect(warn).toHaveBeenCalledWith('[telemetry] run not traced:', expect.any(String))
     } finally {

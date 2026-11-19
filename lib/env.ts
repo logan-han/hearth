@@ -19,7 +19,7 @@ export function appUrl(): string {
   return 'http://localhost:3000'
 }
 
-/** Parse a comma/space separated list of ids into a Set of strings. */
+/** Parse a comma or space separated list (of addresses, say) into a Set of strings. */
 export function idSet(name: string): Set<string> {
   return new Set(
     (process.env[name] ?? '')
@@ -70,12 +70,7 @@ export function isTimeZone(value: string): boolean {
   return canonicalTimeZone(value) !== null
 }
 
-/** Read at call time, like timezone(), so a dashboard change applies without a redeploy. */
-export function ambientMode(): boolean {
-  return (process.env.AMBIENT_MODE ?? 'off').toLowerCase() === 'on'
-}
-
-/** The language and spelling the bot replies in. The household's, not a constant. */
+/** The language and spelling reports are written in. The household's, not a constant; read at call time. */
 export function language(): string {
   return process.env.LANGUAGE || 'Australian English'
 }
@@ -103,37 +98,15 @@ export function reasoningLevel(): ReasoningLevel | undefined {
 const DEFAULT_NAME = 'Hearth'
 
 /**
- * A name the bot can be called by and answer to: one or two words of letters,
- * so it can open a message ("Pip, ...") and be found there again without
- * catching ordinary words or punctuation.
+ * A name Hearth can go by: one or two words of letters, so a helper can never
+ * be given it and a report reads naturally with it.
  */
 export function isAssistantName(value: string): boolean {
   return /^\p{L}[\p{L}'-]*(?: \p{L}[\p{L}'-]*)?$/u.test(value.trim()) && value.trim().length <= 24
 }
 
-/** What the bot calls itself; Hearth unless the household has named it. A name that would not pass is not used. */
+/** What Hearth calls itself; Hearth unless the household has named it. A name that would not pass is not used. */
 export function assistantName(): string {
   const value = process.env.ASSISTANT_NAME?.trim()
   return value && isAssistantName(value) ? value : DEFAULT_NAME
-}
-
-/** How the bot talks in the chat, in the household's own words; empty for the plain default. */
-export function assistantPersona(): string {
-  return (process.env.ASSISTANT_PERSONA ?? '').trim().slice(0, 300)
-}
-
-/**
- * Whether a message opens by calling a name, the way a member speaks to
- * someone across the room: "Pip, ...", "Pip: ...", "Pip?", or a greeting
- * first, "hey Pip what's on". A bare "Pip is great" is talk about it, not to
- * it, and so is the name anywhere later in the message.
- */
-export function opensWithName(text: string, name: string): boolean {
-  const escaped = name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+')
-  if (!escaped) return false
-  const called = `@?${escaped}`
-  return new RegExp(
-    `^\\s*(?:(?:hey|hi|hello|ok|okay|oi|yo)[\\s,]+${called}(?=$|[\\s,:;!?.])|${called}\\s*(?=$|[,:;!?]))`,
-    'iu',
-  ).test(text)
 }

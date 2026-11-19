@@ -4,7 +4,10 @@ import { hydrateSecrets } from '@/lib/settings'
 import { gatherFamilyStats } from '@/lib/stats'
 import { Shell } from './shell'
 import { Calendar } from './calendar'
-import { NextUp, Reminders, FamilyLists, Proposals, Remembered, Lately, Goals, Drafts, Helpers } from './family-panels'
+import { NextUp, Reminders, FamilyLists, Proposals, Remembered, Lately, Goals, Drafts, Helpers, Reports } from './family-panels'
+import { McpKeys } from './mcp-keys'
+import { allowedMembers } from '@/lib/db/queries'
+import { appUrl } from '@/lib/env'
 import { SignIn } from './sign-in'
 
 export const dynamic = 'force-dynamic'
@@ -18,9 +21,9 @@ export default async function HomePage({
   if (!session) return <SignIn />
 
   await hydrateSecrets()
-  // A deployment with no bot token has not been set up yet; walk the admin
+  // A household with nobody in it has not been set up yet; walk the admin
   // through it rather than presenting an empty house.
-  if (session.role === 'admin' && !process.env.TELEGRAM_BOT_TOKEN) redirect('/setup')
+  if (session.role === 'admin' && (await allowedMembers()).length === 0) redirect('/setup')
 
   const { month } = await searchParams
   const stats = await gatherFamilyStats(month, session.memberId)
@@ -36,6 +39,13 @@ export default async function HomePage({
           <h2>Waiting on a yes</h2>
           {stats.drafts.length > 0 ? <Drafts drafts={stats.drafts} /> : null}
           {stats.proposals.length > 0 ? <Proposals proposals={stats.proposals} /> : null}
+        </section>
+      ) : null}
+
+      {stats.reports.length > 0 ? (
+        <section>
+          <h2>Reports</h2>
+          <Reports reports={stats.reports} />
         </section>
       ) : null}
 
@@ -80,6 +90,11 @@ export default async function HomePage({
       <section>
         <h2>Lately</h2>
         <Lately activity={stats.activity} />
+      </section>
+
+      <section>
+        <h2>Claude and other MCP clients</h2>
+        <McpKeys initial={stats.keys} endpoint={`${appUrl()}/api/mcp`} member={session.memberId !== null} />
       </section>
     </Shell>
   )

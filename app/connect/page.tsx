@@ -1,81 +1,58 @@
-import { verifyState } from '@/lib/oauth/state'
-import { calendarToken, memberByTelegramId, connectionsFor } from '@/lib/db/queries'
+import { requireMember } from '@/lib/auth/session'
+import { calendarToken, connectionsFor, memberById } from '@/lib/db/queries'
 import { appUrl } from '@/lib/env'
+import { SignIn } from '../sign-in'
+import { Denied } from '../denied'
+import { AccountActions } from './account-actions'
 
 export const dynamic = 'force-dynamic'
 
-type Search = { t?: string; linked?: string }
+type Search = { linked?: string }
 
+/**
+ * Where a signed-in member links the accounts Hearth may read for them, makes
+ * one read-only or unlinks it, and finds the family calendar's address. A
+ * link acts for whoever is signed in, never for whoever a link was sent to.
+ */
 export default async function Connect({ searchParams }: { searchParams: Promise<Search> }) {
-  const { t, linked } = await searchParams
+  const { linked } = await searchParams
+  const session = await requireMember()
+  if (!session) return <SignIn />
+  // An address in ADMIN_EMAILS with no member behind it has nobody to link an account to.
+  const member = session.memberId ? await memberById(session.memberId) : undefined
+  if (!member) return <Denied message="Accounts are linked by family members, and this address is not one yet. An admin can add you in Settings." />
 
-  if (!t) {
-    return (
-      <main>
-        <div className="mark">🔥</div>
-        <h1>Connect an account</h1>
-        <p className="lede">
-          This page needs a personal link. Send <strong>/connect</strong> to Hearth on Telegram and
-          it will DM you one.
-        </p>
-        {linked ? <span className="badge">{linked} linked ✓</span> : null}
-      </main>
-    )
-  }
-
-  let payload
-  try {
-    // Only a link minted for a member: the sign-in state is handed to anyone.
-    payload = await verifyState(t, 'link')
-  } catch {
-    return (
-      <main>
-        <div className="mark">🔥</div>
-        <h1>That link has expired</h1>
-        <p className="lede">Links last 30 minutes. Send /connect to the bot again for a fresh one.</p>
-      </main>
-    )
-  }
-
-  const member = await memberByTelegramId(payload.tg)
-  // The feed URL below is the household's calendar; a link outlives a revoke by
-  // up to half an hour, and nobody else holds one.
-  if (!member?.allowed) {
-    return (
-      <main>
-        <div className="mark">🔥</div>
-        <h1>That link is no longer valid</h1>
-        <p className="lede">Send /connect to the bot again for a fresh one.</p>
-      </main>
-    )
-  }
   const existing = await connectionsFor(member.id)
-  const linkedSet = new Set(existing.map((c) => c.provider))
   const icsUrl = `${appUrl()}/api/calendar/${await calendarToken()}/family.ics`
 
   return (
     <main>
       <div className="mark">🔥</div>
       {linked ? <span className="badge">{linked} linked ✓</span> : null}
-      <h1>Hello, {payload.name}</h1>
+      <h1>Hello, {member.name}</h1>
       <p className="lede">
-        Link the accounts Hearth may read on your behalf. You can unlink at any time by sending
-        <strong> /unlink google</strong> or <strong>/unlink microsoft</strong> to the bot.
+        Link the accounts Hearth may read on your behalf. Your MCP clients read your mail and calendar through
+        them, and nobody else&rsquo;s client ever does.
       </p>
 
       <div className="card">
         <h2>Your accounts</h2>
-        <a className="btn" href={`/api/oauth/google?t=${encodeURIComponent(t)}`}>
-          <span>Google</span>
-          <span className="arrow">{linkedSet.has('google') ? 'relink →' : 'link →'}</span>
-        </a>
-        <a className="btn" href={`/api/oauth/microsoft?t=${encodeURIComponent(t)}`}>
-          <span>Microsoft</span>
-          <span className="arrow">{linkedSet.has('microsoft') ? 'relink →' : 'link →'}</span>
-        </a>
+        {(['google', 'microsoft'] as const).map((provider) => {
+          const link = existing.find((c) => c.provider === provider)
+          return (
+            <div key={provider}>
+              <a className="btn" href={`/api/oauth/${provider}`}>
+                <span>{provider === 'google' ? 'Google' : 'Microsoft'}{link?.email ? ` · ${link.email}` : ''}</span>
+                <span className="arrow">{link ? 'relink →' : 'link →'}</span>
+              </a>
+              {link ? <AccountActions provider={provider} readOnly={link.readOnly} /> : null}
+            </div>
+          )
+        })}
         <p className="note">
-          Google will warn that this app is unverified. It is a private family deployment, so that
-          warning is expected: choose <em>Advanced → continue</em>.
+          Google will warn that this app is unverified. It is a private family deployment, so that warning is
+          expected: choose <em>Advanced → continue</em>. Read only means Hearth reads the account and never drafts,
+          sends or adds events through it.
         </p>
       </div>
 
@@ -83,8 +60,8 @@ export default async function Connect({ searchParams }: { searchParams: Promise<
         <h2>Family calendar</h2>
         <code className="url">{icsUrl}</code>
         <p className="note">
-          Subscribe by URL in Google Calendar (Other calendars → From URL), Apple Calendar, or
-          Outlook. It refreshes on their schedule, which can take a few hours.
+          Subscribe by URL in Google Calendar (Other calendars → From URL), Apple Calendar, or Outlook. It
+          refreshes on their schedule, which can take a few hours.
         </p>
       </div>
 
@@ -92,13 +69,10 @@ export default async function Connect({ searchParams }: { searchParams: Promise<
         <h2>Claude, and anything else that speaks MCP</h2>
         <code className="url">{`${appUrl()}/api/mcp`}</code>
         <p className="note">
-          Hearth&rsquo;s own tools, over the Model Context Protocol: the family calendar and lists,
-          what it remembers, and your mail and calendar. Send <strong>/mcp</strong> to the bot and it
-          will DM you a personal key and the one line that adds it to Claude Code. The key acts as
-          you, so keep it to yourself; <strong>/mcp off</strong> revokes it. Keys issued before keys
-          carried a tag have stopped working. If yours is lost or no longer works, send
-          <strong> /mcp new</strong> for one that does: once you hold a key, plain /mcp only says
-          it is there.
+          Hearth&rsquo;s own tools, over the Model Context Protocol: the family calendar and lists, what it
+          remembers, and your mail and calendar. Make a key for each client on <a href="/">Home</a>, under Claude
+          and other MCP clients, and revoke it there when you are done with it. A client that signs in with OAuth
+          asks you to approve it instead.
         </p>
       </div>
 

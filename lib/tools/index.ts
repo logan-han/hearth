@@ -15,7 +15,7 @@ import { activityTools } from './activity'
 import { goalTools } from './goals'
 import { helperTools } from './helpers'
 import { routineTools } from './routines'
-import { routerTools, CORE_TOOLS, TOOL_GROUPS } from './router'
+import { briefTools } from './brief'
 import type { ToolContext } from './context'
 import { noteActivity } from '../activity'
 
@@ -47,14 +47,14 @@ export function buildTools(ctx: ToolContext) {
     ...goalTools(ctx),
     ...helperTools(ctx),
     ...routineTools(ctx),
-    ...routerTools(),
+    ...briefTools(ctx),
   })
 }
 
 /**
- * Writes that would happen twice if the turn were run again: nothing in them
- * checks for an earlier copy. Every other write tool supersedes, dedupes or
- * claims before it writes (see ToolContext.wrote).
+ * Writes that would happen twice if the run were started again: nothing in
+ * them checks for an earlier copy. Every other write tool supersedes, dedupes
+ * or claims before it writes (see ToolContext.wrote).
  */
 const UNREPEATABLE: ReadonlySet<string> = new Set<ToolName>([
   'add_to_list', 'create_automation', 'create_calendar_event',
@@ -90,7 +90,7 @@ function standsIn(text: string, key: string): boolean {
 }
 
 /**
- * Whether a link was in something the turn was given or read, before the
+ * Whether a link was in something the run was given or read, before the
  * model had written it into a call of its own: a result that only echoes
  * the model's own words back (a search answer, a note it just saved) vouches
  * for nothing. Scheme, host case and a closing slash may differ.
@@ -110,30 +110,44 @@ function linkSeen(ctx: ToolContext, url: string): boolean {
   )
 }
 
-/** The tools that open a link: once the turn has read outside text, only a link that was there to be read. */
+/** The tools that open a link: once the run has read outside text, only a link that was there to be read. */
 const LINK_READERS: ReadonlySet<string> = new Set<ToolName>(['read_url', 'read_recipe'])
 
-/** What a second call to an unrepeatable write gets, once an earlier one this turn may have gone through. */
+/** What a second call to an unrepeatable write gets, once an earlier one this run may have gone through. */
 const unconfirmedAgain = (name: string) =>
-  `Not tried again: ${name} ran out of time earlier this turn and may have gone through, so a second call could do it twice. ` +
+  `Not tried again: ${name} ran out of time earlier this run and may have gone through, so a second call could do it twice. ` +
   'Say it may not have happened and what to check.'
 
 const UNSEEN_LINK =
-  'Not opened: this turn has read mail, a page or a file from outside the household, and this address does not ' +
-  'appear in anything it was given or read. Open a link only exactly as it appears there; if it was in a photo or ' +
-  'a scan, ask for it to be sent as text.'
+  'Not opened: this run has read mail, a page or a file from outside the household, and this address does not ' +
+  'appear in anything it was given or read. Open a link only exactly as it appears there.'
 
 /**
- * Wrap every tool so the turn keeps its record: what the model wrote into
- * each call and what came back (see ToolContext.seen). An outside-content
- * tool also marks the turn as having read something untrusted, and a write
- * records itself once it has succeeded (a result with an `error` changed
- * nothing), in the turn and in the household's activity log, or once it may have: one with `maybe_done` ran out of time and
- * could have gone through all the same, and is kept apart from those that
- * did. Once something untrusted has been read, read_url opens only a link
- * that was there to be read. An unrepeatable write that may have gone
- * through is not called again in the same turn, whatever the prompt says:
- * nothing in it would notice the copy.
+ * A write tool's answer that says it changed nothing after all: a fact or a
+ * question already on file, a proposal already standing or still to be
+ * judged, an event already on the calendar, an accept waiting on a
+ * confirmation. Nothing happened, so nothing goes on the record.
+ */
+function changedNothing(result: unknown): boolean {
+  if (typeof result !== 'object' || result === null) return false
+  const r = result as Record<string, unknown>
+  return (
+    r.skipped === true || r.not_proposed_yet === true || r.already_proposed === true || r.already_on_calendar === true ||
+    r.stored === false || r.asked === false || r.status === 'needs_confirmation'
+  )
+}
+
+/**
+ * Wrap every tool so the run keeps its record: what the model wrote into each
+ * call and what came back (see ToolContext.seen). An outside-content tool
+ * also marks the run as having read something untrusted, and a write records
+ * itself once it has succeeded (a result with an `error` changed nothing) on
+ * its member's record of what was changed. An unrepeatable write that went
+ * through, or may have (one with `maybe_done` ran out of time and could have
+ * gone through all the same), is noted on the run, and is not called again
+ * in the same run whatever the prompt says: nothing in it would notice the
+ * copy. Once something untrusted has been read, read_url opens only a link
+ * that was there to be read.
  */
 function instrument<T extends Record<string, { execute?: (...args: never[]) => unknown }>>(ctx: ToolContext, tools: T): T {
   const out: Record<string, unknown> = { ...tools }
@@ -161,14 +175,10 @@ function instrument<T extends Record<string, { execute?: (...args: never[]) => u
         ;(ctx.seen ??= []).push({ text: JSON.stringify(result) ?? '', typed: typed.length })
         const failed = typeof result === 'object' && result !== null && 'error' in result
         const maybe = failed && (result as { maybe_done?: unknown }).maybe_done === true
-        if (writes && !failed) {
-          ;(ctx.changed ??= []).push(name)
-          // An MCP client is one member's, whichever room it acts in: what it
-          // changed is on their own record, never a group's for all to read.
-          const where = ctx.via === 'mcp' && ctx.member ? ctx.member.telegramUserId : ctx.chatId
-          await noteActivity({ chatId: where, memberId: ctx.member?.id ?? null, via: ctx.via ?? 'chat', tool: name, input, result })
-        }
-        if (writes && maybe) (ctx.maybeChanged ??= []).push(name)
+        // On the record of the member it was done for, never anyone else's,
+        // and only when something changed: a proposal already standing or an
+        // accept still waiting on a confirmation changed nothing.
+        if (writes && !failed && !changedNothing(result)) await noteActivity({ memberId: ctx.member?.id ?? null, via: ctx.via ?? 'mcp', tool: name, input, result })
         if (unrepeatable && (!failed || maybe)) (ctx.wrote ??= []).push(name)
         if (unrepeatable && maybe) (ctx.unconfirmed ??= []).push(name)
         return result
@@ -179,7 +189,6 @@ function instrument<T extends Record<string, { execute?: (...args: never[]) => u
 }
 
 export type { ToolContext }
-export { TOOL_GROUPS, CORE_TOOLS, SITUATIONAL_TOOLS, routeGroups, groupsAfter, activeToolsFor, type ToolGroup } from './router'
 
 export type ToolName = keyof ReturnType<typeof buildTools>
 
@@ -200,29 +209,18 @@ export const CUSTOM_AUTOMATION_TOOLS: ToolName[] = [
   'run_routine', 'list_routines',
 ]
 
-/** The nightly memory pass files and corrects facts, and asks about the ones it cannot stand behind. */
-export const SWEEP_TOOLS: ToolName[] = ['remember', 'forget', 'recall', 'unsure']
-
-/**
- * What an MCP client is handed: everything, less the two that mean nothing
- * down that pipe. `more_tools` exists so a small model can be routed to a
- * short list and widen it; an MCP client is given the whole set at once.
- * `import_calendar_file` reads a file attached to the message being answered,
- * and here there is no message.
- */
-export const MCP_TOOLS: ToolName[] = [
-  ...CORE_TOOLS.filter((t) => t !== 'more_tools'),
-  ...Object.values(TOOL_GROUPS).flat(),
-  'unsure',
-] as ToolName[]
+/** Every tool, by name, in the order an MCP client is handed them. */
+export function allToolNames(): ToolName[] {
+  return Object.keys(buildTools({ member: null, memberName: '', now: new Date(0) })) as ToolName[]
+}
 
 /**
  * Tools that change something: the calendar, a list, memory, mail, the board,
- * a schedule. A reply that says one of these happened has to be backed by a
- * call to one of them, or the reply is describing work that was never done.
+ * a schedule. Each one that goes through is kept on its member's record of
+ * what was changed.
  */
 export const WRITE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
-  'add_family_event', 'update_family_event', 'cancel_family_event', 'import_calendar_file',
+  'add_family_event', 'update_family_event', 'cancel_family_event',
   'propose_family_event', 'accept_event_proposal', 'reject_event_proposal',
   'add_to_list', 'check_off_list', 'remove_from_list', 'clear_list',
   'remember', 'forget', 'unsure', 'answer_question',
@@ -233,11 +231,3 @@ export const WRITE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   'create_helper', 'remove_helper', 'hand_off',
   'save_routine', 'delete_routine',
 ])
-
-/**
- * Writes that only put something to a person: a draft waits on its owner's
- * yes, a proposal on anyone's. Until then the email is unsent and the
- * calendar unchanged, so neither backs a reply that says it was done.
- */
-export const PENDING_WRITES: ReadonlySet<ToolName> = new Set<ToolName>(['draft_email', 'propose_family_event'])
-

@@ -5,7 +5,7 @@ import {
 } from '../db/queries'
 import { localToUtc, localDateKey, formatLocal, formatLocalDate, formatLocalTime, dayAfter, nextLocalMidnight, resolveSpan, rangeEnd, lastDay } from '../cron'
 import { timezone, appUrl } from '../env'
-import { announce, type ToolContext } from './context'
+import type { ToolContext } from './context'
 
 export const LOCAL_DATETIME = z
   .string()
@@ -14,7 +14,7 @@ export const LOCAL_DATETIME = z
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
 
 
-/** When an event is, worded for a chat: a date alone for all-day, else date and time. */
+/** When an event is, in words: a date alone for all-day, else date and time. */
 export function whenLabel(startsAt: Date, allDay: boolean): string {
   return allDay ? formatLocalDate(startsAt) : formatLocal(startsAt)
 }
@@ -25,9 +25,9 @@ export function endLabel(startsAt: Date, endsAt: Date, allDay: boolean): string 
 }
 
 /**
- * When an event is, start to end, for a line the chat reads. The end is said
- * too: a confirmation that gave a school term only its first day had a member
- * ask for end dates the calendar already held, and the model then rewrote all
+ * When an event is, start to end, in words. The end is said too: a
+ * confirmation that gave a school term only its first day had a member ask
+ * for end dates the calendar already held, and the model then rewrote all
  * four terms with dates of its own. A one-day all-day event is its date alone,
  * and a timed one that ends the day it starts gives the end as a time.
  */
@@ -105,9 +105,9 @@ export function familyCalendarTools(ctx: ToolContext) {
           start_local: whenLabel(startsAt, allDay),
           end_local: endLabel(startsAt, endsAt, allDay),
           all_day: allDay,
-          // Subscribed clients can take hours to re-poll an ICS feed, so the bot
-          // announces the event in chat too.
-          ...announce(ctx, `Added to the family calendar: **${title}** — ${spanLabel(startsAt, endsAt, allDay)}`, FEED_LAG),
+          added: `Added to the family calendar: ${title}, ${spanLabel(startsAt, endsAt, allDay)}`,
+          // Subscribed clients can take hours to re-poll an ICS feed.
+          note: FEED_LAG,
         }
       },
     }),
@@ -197,82 +197,8 @@ export function familyCalendarTools(ctx: ToolContext) {
           end_local: endLabel(row.startsAt, row.endsAt, row.allDay),
           all_day: row.allDay,
           changed,
-          ...announce(
-            ctx,
-            `Updated on the family calendar: **${row.title}** — ${spanLabel(row.startsAt, row.endsAt, row.allDay)}` +
-              (existing.title !== row.title ? ` (was "${existing.title}")` : ''),
-            'Subscribed calendars pick the change up on their next refresh, which can take hours.',
-          ),
-        }
-      },
-    }),
-
-    import_calendar_file: tool({
-      description:
-        'Add the events from a calendar file (.ics) attached to THIS message to the shared family calendar, all in one call. ' +
-        'Use it when someone sends a .ics and asks for it to go on the calendar; do not re-add the events one by one with add_family_event. ' +
-        'Events already on the calendar are left alone, and repeating events are reported rather than added.',
-      inputSchema: z.object({
-        only: z
-          .array(z.string())
-          .optional()
-          .describe('Titles (or parts of titles) to include, when the person wants some of the events rather than all of them'),
-      }),
-      execute: async ({ only }) => {
-        const files = ctx.calendarFiles ?? []
-        if (files.length === 0) {
-          return {
-            error:
-              'No calendar file is attached to this message. A file can only be read in the message it arrives with, so ask for the .ics to be sent again with the request written as its caption.',
-          }
-        }
-        const wanted = (only ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean)
-        const matches = (title: string) => wanted.length === 0 || wanted.some((w) => title.toLowerCase().includes(w))
-
-        const added: { id: number; title: string; when: string }[] = []
-        const alreadyThere: string[] = []
-        const repeating: string[] = []
-        let leftOut = 0
-        let overLimit = 0
-        for (const file of files) {
-          leftOut += file.parsed.skipped
-          overLimit += file.parsed.overCap
-          for (const e of file.parsed.events) {
-            if (!matches(e.title)) continue
-            if (e.repeats) {
-              repeating.push(e.title)
-              continue
-            }
-            if (await findClash(e.title, e.startsAt, e.endsAt)) {
-              alreadyThere.push(e.title)
-              continue
-            }
-            const row = await addFamilyEvent({
-              title: e.title,
-              description: e.description,
-              location: e.location,
-              startsAt: e.startsAt,
-              endsAt: e.endsAt,
-              allDay: e.allDay,
-              createdBy: ctx.member?.id ?? null,
-            })
-            added.push({ id: row.id, title: e.title, when: spanLabel(e.startsAt, e.endsAt, e.allDay) })
-          }
-        }
-        const names = files.map((f) => f.filename).join(', ')
-        return {
-          added,
-          already_on_calendar: alreadyThere,
-          repeating_not_added: repeating,
-          unreadable_or_cancelled: leftOut,
-          ...(overLimit ? { left_out_over_the_limit: overLimit } : {}),
-          ...(added.length > 0
-            ? announce(
-                ctx,
-                `Added to the family calendar from ${names}:\n${added.map((a) => `· **${a.title}** — ${a.when}`).join('\n')}`,
-                FEED_LAG,
-              )
-            : { note: 'Nothing was added. Say so, and say why: already on the calendar, repeating, or nothing matched.' }),
+          ...(existing.title !== row.title ? { was: existing.title } : {}),
+          note: 'Subscribed calendars pick the change up on their next refresh, which can take hours.',
         }
       },
     }),
@@ -317,11 +243,7 @@ export function familyCalendarTools(ctx: ToolContext) {
         return {
           cancelled: true,
           title: row.title,
-          ...announce(
-            ctx,
-            `Cancelled on the family calendar: **${row.title}**`,
-            'Subscribed calendars can keep showing it until their next refresh, which can take hours.',
-          ),
+          note: 'Subscribed calendars can keep showing it until their next refresh, which can take hours.',
         }
       },
     }),

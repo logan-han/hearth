@@ -1,37 +1,20 @@
 import { NextResponse } from 'next/server'
-import { GrammyError, HttpError } from 'grammy'
 import { APICallError, RetryError } from 'ai'
 import { Receiver } from '@upstash/qstash'
 import {
-  dueAutomations, claimAutomation, allowedMembers, recordMessage, strangersIn,
-  messagesSince, getSetting, setSetting, retireStaleProposals, recordTick,
-  unaskedQuestions, markQuestionsAsked, memberByTelegramId, setAutomationEnabled, moveChat, listAutomations,
-  deleteAutomation, pruneActivity, getHelper,
+  dueAutomations, claimAutomation, getSetting, retireStaleProposals, recordTick, setAutomationEnabled,
+  deleteAutomation, pruneActivity, pruneReports, getHelper, memberById, addReport, setSetting, type ReportStatus,
 } from '@/lib/db/queries'
-import { localDateKey, tzOffsetMs, nextRun, formatLocal, formatLocalTime, dayAfter, daysAfter, clockLine } from '@/lib/cron'
-import { assembleBrief, errorOf, isUnconfigured, isUnlinked, accountsByMember, type Fetched, type Reminder } from '@/lib/brief'
+import { nextRun, formatLocal, clockLine } from '@/lib/cron'
 import { retryTickAt } from '@/lib/scheduler'
-import { timezone, idSet } from '@/lib/env'
-import { db, schema } from '@/lib/db'
-import { eq } from 'drizzle-orm'
-import { runAgent, decideWatcherPost, reviewDraft, cutFromDraft, looksBefore, TURN_BUDGET_MS, type AgentResult } from '@/lib/agent'
-import { buildTools, type ToolName } from '@/lib/tools'
-import type { ToolContext } from '@/lib/tools/context'
-import { WATCHERS, isWatcherKind, isGroupChat, watcherInstruction, type WatcherKind } from '@/lib/watchers'
-import { installBuiltins } from '@/lib/builtins'
-import { unaccountedIn } from '@/lib/headcount'
+import { runAgent, decideWatcherPost, reviewDraft, cutFromDraft, looksBefore, scheduledInstruction, TURN_BUDGET_MS, type AgentResult } from '@/lib/agent'
 import { commitCursors, type StagedCursor } from '@/lib/tools/cursor'
-import { send, PartlySent } from '@/lib/telegram'
 import { hydrateSecrets, recheckSecrets } from '@/lib/settings'
 import { flushTelemetry, traced, traceRun, noteRun } from '@/lib/telemetry'
 import { pruneModelEvents } from '@/lib/model-events'
-import { parseLog, prune, underCap, recordPost, shouldWarn, markWarned, PROACTIVE_POSTS_PER_HOUR } from '@/lib/rate-cap'
+import { pruneUsedCodes } from '@/lib/oauth/server'
 import type { Automation, Helper, Member } from '@/lib/db/schema'
-import { signed } from '@/lib/helpers'
 import { describeError } from '@/lib/errors'
-import { unsaid } from '@/lib/notices'
-import { plainData } from '@/lib/plain-data'
-import { changedLately } from '@/lib/recurring'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
@@ -62,209 +45,28 @@ async function authorised(req: Request, body: string): Promise<'scheduler' | 'ma
 }
 
 /**
- * Failures and diagnostics belong in an admin's DM, not the family group: the
- * chat is for the household, not for stack traces. Preference order is the
- * automation's creator, then any admin; if nobody is reachable it stays in
- * the logs rather than the group.
+ * Keep something for the member who set an automation up: what it found, a
+ * draft the checks held back, or what went wrong. Nothing is posted
+ * anywhere, so it waits in their reports until their MCP client or Home reads
+ * it. A report that cannot be written is logged, and never fails the run.
  */
-async function tellAdminQuietly(creator: { telegramUserId: string } | undefined, text: string): Promise<void> {
-  const admins = await allowedMembers()
-    .then((all) => all.filter((m) => m.isAdmin).map((m) => m.telegramUserId))
-    .catch(() => [] as string[])
-  const targets = [...new Set([creator?.telegramUserId, ...admins].filter(Boolean))] as string[]
-  for (const to of targets) {
-    try {
-      await send(to, text)
-      try {
-        // Into that DM's history too, or the admin's next reply lands on a
-        // conversation the model cannot see.
-        await recordMessage({ chatId: to, role: 'assistant', content: text })
-      } catch {
-        // Delivered is what matters; history here is best-effort.
-      }
-      return
-    } catch {
-      // They may never have opened a DM with the bot; try the next admin.
-    }
+async function report(
+  a: Automation,
+  member: Member,
+  status: ReportStatus,
+  body: string,
+  extra: { detail?: string | null; helper?: Helper } = {},
+): Promise<void> {
+  try {
+    await addReport({ memberId: member.id, automationId: a.id, label: a.label, helper: extra.helper?.name ?? null, status, body, detail: extra.detail ?? null })
+  } catch (err) {
+    console.error(`[tick] could not keep a report for ${a.label}:`, describeError(err), body)
   }
-  console.error('[tick] no admin reachable by DM:', text)
 }
 
 const isSkipLine = (line: string) => /^skip[.!]*$/i.test(line.trim())
-/** A marked failure, and nothing else, is what earns an admin a DM. */
+/** A marked failure, and nothing else, is what earns a problem report. */
 const isProblemLine = (line: string) => /^\**\s*problem\s*\**\s*:/i.test(line.trim())
-
-/** The whole held-back draft, so an admin judges the call on all of what was held, not a cut-off part of it. */
-const heldBack = (a: Automation, why: string, draft: string) => `Watcher **${a.label}** was held back: ${why}\n\nDraft:\n${draft}`
-
-/**
- * The nightly memory pass: relying on the chat-turn model to file memories
- * while it is busy answering leaves most facts on the floor, so once a day the
- * previous day's talk is re-read purely for what deserves keeping. One model
- * call, silent, with only the memory tools in reach.
- */
-async function maybeConsolidateMemory(now: Date, deadline: number): Promise<void> {
-  const localHour = new Date(now.getTime() + tzOffsetMs(now, timezone())).getUTCHours()
-  if (localHour < 3) return
-  const today = localDateKey(now)
-  if ((await getSetting('memory_sweep_day')) === today) return
-  // The day is claimed below, so a pass the platform cut off would be lost
-  // until tomorrow. With less than a whole turn left, the next tick has it.
-  if (deadline - Date.now() < TURN_BUDGET_MS) return
-  // Claim before working; a racing tick at worst repeats an idempotent pass.
-  await setSetting('memory_sweep_day', today)
-
-  const talk = await messagesSince(26)
-  if (talk.length === 0) return
-
-  const transcript = talk
-    .map((m) => `[${m.chatId}] ${m.role === 'user' ? (m.authorName ?? 'someone') : 'you'}: ${m.content.slice(0, 400)}`)
-    .join('\n')
-
-  await traceRun('hearth.sweep', { sessionId: 'memory-sweep', tags: ['sweep'] }, async () => {
-    noteRun({ input: transcript, metadata: { messages: talk.length } })
-    try {
-      const result = await runAgent({
-        chatId: 'memory-sweep',
-        chatType: 'private',
-        member: null,
-        memberName: 'the household',
-        mode: 'sweep',
-        history: false,
-        text:
-          "Nightly memory pass. Yesterday's household talk follows; the Known household facts are in your context.\n\n" +
-          transcript,
-        deadline,
-      })
-      noteRun({ output: result.text, metadata: { outcome: 'done', model: result.model } })
-    } catch (err) {
-      // A failed pass costs nothing; tomorrow re-reads a fresh day.
-      console.error('[tick] memory pass failed:', err)
-      noteRun({ output: describeError(err), metadata: { outcome: 'failed' }, level: 'ERROR' })
-    }
-  })
-}
-
-type Tools = ReturnType<typeof buildTools>
-
-/** Run one of the agent's own tools directly, the way a model turn would. */
-async function runTool(tools: Tools, name: ToolName, args: unknown): Promise<Record<string, unknown>> {
-  const t = tools[name] as unknown as { execute?: (input: unknown, options: unknown) => Promise<unknown> }
-  if (!t.execute) throw new Error(`${name} cannot run outside a model turn`)
-  const out = await t.execute(args, { toolCallId: `tick-${name}`, messages: [] })
-  return (out ?? {}) as Record<string, unknown>
-}
-
-/**
- * How far past today the brief looks, in days: to the end of the fortnight,
- * today included, so next Monday and this Friday are in view on any day of
- * the week.
- */
-const LOOK_AHEAD_DAYS = 13
-
-/**
- * The reminders a member set in this chat that go off from now to `last`, for
- * the brief to mention: today's by time, the rest of the fortnight's by day
- * and time as well. The ready-made watchers have a kind and speak for
- * themselves; a member's own instruction has none. A watch that runs until it
- * finds something is a check, not a reminder: hourly, it would be in every
- * brief at its next hour, saying nothing.
- */
-async function remindersBetween(chatId: string, now: Date, last: string): Promise<Reminder[]> {
-  const day = localDateKey(now)
-  return (await listAutomations(chatId))
-    .filter((r) => r.enabled && r.kind === null && r.repeat !== 'until' && r.nextRunAt > now && localDateKey(r.nextRunAt) <= last)
-    .map((r) => {
-      const date = localDateKey(r.nextRunAt)
-      return { label: r.label, at: date === day ? formatLocalTime(r.nextRunAt) : formatLocal(r.nextRunAt), date }
-    })
-}
-
-/**
- * The deterministic half of a ready-made watcher: fetch what it watches and
- * decide in code whether there is anything at all. A quiet hour then costs no
- * model call and cannot produce a speculative post, and when there is
- * something, the model only has to phrase what is already in hand.
- */
-async function fetchFor(kind: WatcherKind, a: Automation, ctx: ToolContext, tools: Tools): Promise<Fetched> {
-  const problems: string[] = []
-  switch (kind) {
-    case 'morning': {
-      const day = localDateKey(ctx.now)
-      const next = dayAfter(day)
-      const after = dayAfter(next)
-      const horizon = daysAfter(day, LOOK_AHEAD_DAYS)
-      const everyone = isGroupChat(a.chatId)
-      // In a group the brief sweeps the mailbox and the calendar of every
-      // member Telegram says is in the room, each mailbox on its own cursor;
-      // in a DM only the owner's. The cursor is the chat's, so the brief
-      // picks up where the retired inbox sweep left off.
-      // The nightly pass asks rather than guesses; the brief is where its
-      // questions reach the family, once each. Home carries them after that.
-      const [events, tomorrowEvents, comingEvents, calendars, mail, board, weather, questions, proposals, reminders] = await Promise.all([
-        // The whole day, and anything on during it: day three of a camp is news too.
-        runTool(tools, 'list_family_events', { from: day, to: day, include_cancelled: false }),
-        runTool(tools, 'list_family_events', { from: next, to: next, include_cancelled: false }),
-        // The rest of the fortnight, so next Monday and this Friday are in view from any day of the week.
-        runTool(tools, 'list_family_events', { from: after, to: horizon, include_cancelled: false }),
-        // Today to the end of the fortnight in one look, split below, so Telegram is asked who is in the room once.
-        runTool(tools, 'list_calendar', { from: day, to: horizon, everyone }),
-        // A day's mail, not an hour's: the brief runs once a morning. What
-        // does not fit is counted in the brief rather than dropped.
-        runTool(tools, 'new_mail', { limit: 20, everyone }),
-        runTool(tools, 'jira_board_summary', {}),
-        runTool(tools, 'weather', {}),
-        everyone ? unaskedQuestions().catch(() => []) : Promise.resolve([]),
-        // Context for the brief, never the reason for one: a lookup that fails leaves it out.
-        runTool(tools, 'list_event_proposals', {}).catch((): Record<string, unknown> => ({})),
-        remindersBetween(a.chatId, ctx.now, horizon).catch((): Reminder[] => []),
-      ])
-      return assembleBrief({ day, next, horizon, events, tomorrowEvents, comingEvents, calendars, mail, board, weather, questions, proposals, reminders })
-    }
-    case 'urgent': {
-      // What arrived since this watcher last looked, on markers of its own:
-      // the morning brief still reads the same mail on its own markers.
-      const mail = await runTool(tools, 'new_mail', { limit: 10, everyone: isGroupChat(a.chatId) })
-      const accounts = Array.isArray(mail.accounts) ? (mail.accounts as Record<string, unknown>[]) : []
-      // A mailbox that will not answer is the brief's to report, once a day:
-      // said every hour it runs, the same fault would fill an admin's chat.
-      const failed = [errorOf(mail), ...accounts.map(errorOf)].filter((e): e is string => Boolean(e) && !isUnlinked(e))
-      if (failed.length) console.warn(`[tick] ${a.label}: ${failed.join(' | ')}`)
-      const arrived = accounts.reduce((n, acct) => n + (Array.isArray(acct.messages) ? acct.messages.length : 0), 0)
-      return { data: { mail: accountsByMember(mail) }, empty: arrived === 0, problems }
-    }
-    case 'subscriptions': {
-      // A month's changes, found in code: a new price, a new payee, a payment that has not come.
-      const found = await runTool(tools, 'recurring_payments', { months: 12 })
-      const err = errorOf(found)
-      if (err && !isUnconfigured(err)) problems.push(`recurring_payments: ${err}`)
-      const all = Array.isArray(found.recurring) ? (found.recurring as Record<string, unknown>[]) : []
-      const changes = changedLately(all, localDateKey(ctx.now))
-      return { data: changes.length ? { changes, monthly_total: found.monthly_total } : {}, empty: changes.length === 0, problems }
-    }
-    case 'snapshot': {
-      const today = localDateKey(ctx.now)
-      const weekStart = localDateKey(new Date(ctx.now.getTime() - 6 * 86_400_000))
-      const [week, month, budget] = await Promise.all([
-        runTool(tools, 'spending_summary', { from: weekStart, to: today }),
-        runTool(tools, 'spending_summary', {}),
-        runTool(tools, 'budget_summary', {}),
-      ])
-      for (const [name, r] of [['spending_summary (week)', week], ['spending_summary (month)', month], ['budget_summary', budget]] as const) {
-        const e = errorOf(r)
-        if (e && !isUnconfigured(e)) problems.push(`${name}: ${e}`)
-      }
-      const data: Record<string, unknown> = { week: `${weekStart} to ${today}` }
-      if (!errorOf(week)) data.this_week = week
-      if (!errorOf(month)) data.month_so_far = month
-      if (!errorOf(budget)) data.budget = budget
-      // No bank connected is a setting, not a fault, and a week in which no
-      // money moved is nothing to post about either.
-      const moved = Number(week.transactions ?? 0) + Number(month.transactions ?? 0)
-      return { data, empty: moved === 0, problems }
-    }
-  }
-}
 
 /** The Known facts the writer had in view, so the checks judge the draft against the same sources. */
 const factsGiven = (r: AgentResult) => (r.facts ? `${r.facts}\n\n` : '')
@@ -273,103 +75,36 @@ const factsGiven = (r: AgentResult) => (r.facts ? `${r.facts}\n\n` : '')
  * Vercel ends the tick at maxDuration, and a run cut off there is lost: it
  * was claimed, so it is not due again until its next time. So the tick keeps
  * one clock from its start, and every run and check it makes is over this far
- * in, which leaves the last post, its records and the traces the rest.
+ * in, which leaves the last report, its records and the traces the rest.
  */
 const TICK_BUDGET_MS = 280_000
 /**
  * How much of the end of the tick a run leaves for its draft's checks. The
- * claim check has the first half and the post decision the second, so the
- * last gate a draft passes is still asked when the claim check ran long.
+ * claim check has the first half and the decision the second, so the last
+ * gate a draft passes is still asked when the claim check ran long.
  */
 const REVIEW_RESERVE_MS = 60_000
 const DECISION_RESERVE_MS = 30_000
 
-async function runReadyMade(kind: WatcherKind, a: Automation, member: Member | undefined, deadline: number): Promise<Delivered | undefined> {
-  const now = new Date()
-  const memberName = member?.name ?? 'the family'
-  const ctx: ToolContext = {
-    chatId: a.chatId,
-    member: member ?? null,
-    memberName,
-    now,
-    notices: [],
-    shared: isGroupChat(a.chatId),
-    // The hourly look at mail keeps markers of its own, so it never spends what the brief is to report.
-    ...(kind === 'urgent' ? { cursorScope: `urgent:${a.chatId}` } : {}),
-  }
-  const tools = buildTools(ctx)
-
-  const fetched = await fetchFor(kind, a, ctx, tools)
-  if (fetched.problems.length) {
-    await tellAdminQuietly(member, `Watcher **${a.label}** hit a problem:\n\n${fetched.problems.join('\n')}`)
-    noteRun({ metadata: { fetch_problems: fetched.problems.length }, detail: { fetch_problems: fetched.problems }, level: 'WARNING' })
-  }
-  if (fetched.empty) {
-    console.info(`[tick] ${a.label}: nothing new, no model call`)
-    noteRun({ output: 'nothing new', metadata: { outcome: 'nothing new' } })
-    // Nothing new is still a look taken, and a first one sets the marker.
-    await spentClean(a, ctx.pendingCursors ?? [])
-    return
-  }
-
-  const watcher = WATCHERS[kind]
-  const instruction = watcherInstruction(kind, a.chatId)
-  const data = plainData(fetched.data)
-  noteRun({ input: `INSTRUCTION:\n${instruction}\n\nDATA:\n${data}` })
-  const result = await counted(a, member, (err) => [...(ctx.pendingCursors ?? []), ...looksBefore(err)], () => runAgent({
-    chatId: a.chatId,
-    chatType: isGroupChat(a.chatId) ? 'group' : 'private',
-    member: member ?? null,
-    memberName,
-    mode: 'watcher',
-    tools: watcher.tools,
-    ...(watcher.maxOutputTokens ? { maxOutputTokens: watcher.maxOutputTokens } : {}),
-    history: false,
-    text: `Scheduled check "${a.label}".\n\n${instruction}\n\nDATA (fetched just now):\n${data}`,
-    deadline: deadline - REVIEW_RESERVE_MS,
-  }))
-  const staged = () => [...(ctx.pendingCursors ?? []), ...(result.cursors ?? [])]
-  // The checks judge the draft against this, so it says what day it is: a
-  // claim that something is on today is checkable only with the date beside it.
-  const evidence = `${clockLine(now)}\n\nINSTRUCTION:\n${instruction}\n\n${factsGiven(result)}DATA:\n${data}\n\nTOOL RESULTS:\n${result.evidence || '(none)'}`
-  // What the checks judge the draft against is what the run was given.
-  noteRun({ input: evidence, metadata: { writer: result.model } })
-  const delivered = await counted(a, member, staged, () => deliver(a, member, result, evidence, () => spentClean(a, staged()), deadline))
-  // Asked once: whatever became of the post, Home keeps the question until it is answered.
-  if (fetched.asked?.length) await markQuestionsAsked(fetched.asked)
-  return delivered
-}
-
 /**
  * A member's own scheduled instruction: the model decides what to fetch, with
- * read-only tools. One handed to a helper runs in that helper's role and
- * posts under its name; a helper removed since leaves the job to the bot.
+ * read-only tools. One handed to a helper runs in that helper's role and its
+ * report carries the helper's name; a helper removed since leaves the job to
+ * Hearth itself.
  */
-async function runCustom(a: Automation, member: Member | undefined, deadline: number): Promise<Delivered> {
+async function runCustom(a: Automation, member: Member, deadline: number): Promise<Delivered> {
   const helper = a.helperId ? await getHelper(a.helperId).catch((): Helper | undefined => undefined) : undefined
   noteRun({ input: `INSTRUCTION:\n${a.instruction}`, ...(helper ? { metadata: { helper: helper.name } } : {}) })
   const result = await counted(a, member, looksBefore, () => runAgent({
-    chatId: a.chatId,
-    chatType: isGroupChat(a.chatId) ? 'group' : 'private',
-    // One member's words, which nobody else saw asked for (over MCP, nobody
-    // did at all), and whose PROBLEM lines and held-back drafts go to that
-    // member's DM first. So it reads its author's mailbox only, even in the
-    // group; the ready-made brief's sweep is written in code.
-    shared: false,
-    member: member ?? null,
-    memberName: member?.name ?? 'the family',
-    mode: 'watcher',
-    history: false,
+    // Its author's words, run as its author: their mailbox alone.
+    member,
+    memberName: member.name,
     helper,
     // Its own markers for what is new: a watch that looks at mail hourly
-    // would otherwise spend what the morning brief is there to report.
+    // would otherwise spend what the morning brief and the member's own
+    // clients are there to show.
     cursorScope: `auto:${a.id}`,
-    text:
-      `Scheduled automation "${a.label}" is due now. Carry out this instruction; whatever you write will be posted to the family chat, briefly:\n\n${a.instruction}\n\n` +
-      (a.repeat === 'until' ? UNTIL_PROMPT : '') +
-      'If the instruction only wants a post under some condition and that condition is not met (nothing new, nothing to report), reply with exactly SKIP and nothing will be posted. Write nothing beside it: a quiet run needs no explanation of why it was quiet. ' +
-      'If a tool fails or errors, never post the failure to the chat: write PROBLEM: followed by a one-line diagnosis, then SKIP on its own line. That, and only that, reaches the admins privately. ' +
-      'Reply with the post alone: no preamble, no planning notes, no handover line such as "now the post:", no commentary about what the tools returned.',
+    text: scheduledInstruction(a, member.name),
     deadline: deadline - REVIEW_RESERVE_MS,
   }))
   const staged = () => result.cursors ?? []
@@ -380,18 +115,17 @@ async function runCustom(a: Automation, member: Member | undefined, deadline: nu
 
 /**
  * A check that runs until it finds what it is waiting for stops for good once
- * it posts, so its writer is told as much, and the post ends with a line in
- * code saying it has stopped: the family then knows to ask again if it was
- * not the thing they meant.
+ * it reports (its writer is told so; see scheduledInstruction), and the report
+ * says in code that it has stopped: the member then knows to ask again if it
+ * was not the thing they meant.
  */
-const UNTIL_PROMPT =
-  'This check stops for good once it posts anything, so post only when what the instruction is waiting for has happened. '
-const UNTIL_FOUND ="That's what I was waiting for, so I've stopped checking. Ask me to keep watching if you still want it."
+const UNTIL_FOUND = "That's what it was waiting for, so it has stopped checking. Ask again if it should keep watching."
 
 /**
- * A one-off once it has had its run, and a watch-until once it has posted,
- * has done its job and leaves the list, so Home shows only what is still to
- * come. A failure here leaves a row that will not run again, and is logged.
+ * A one-off once it has had its run, and a watch-until once it has found
+ * something, has done its job and leaves the list, so Home shows only what is
+ * still to come. Its reports stay. A failure here leaves a row that will not
+ * run again, and is logged.
  */
 async function retire(a: Automation, why: string): Promise<void> {
   try {
@@ -403,14 +137,14 @@ async function retire(a: Automation, why: string): Promise<void> {
 }
 
 /**
- * Run one step of a watcher, counting it against the stuck guard when it
+ * Run one step of an automation, counting it against the stuck guard when it
  * leaves what the run read unspent: a throw, or deliver() reporting a PROBLEM.
  * A failure of the model chain or the network passes, and says nothing about
  * the items, so it is not counted. The guard's own failure never hides the run's.
  */
 async function counted<T>(
   a: Automation,
-  member: Member | undefined,
+  member: Member,
   staged: (err?: unknown) => StagedCursor[],
   step: () => Promise<T>,
 ): Promise<T> {
@@ -438,9 +172,8 @@ const PASSING_WORDS =
 /**
  * A failure of the model chain, a service or the network, which passes or
  * needs fixing, not skipping. What is left (a request the provider rejects as
- * it stands, a message Telegram cannot parse) is about what was sent, and
- * counts. Judged on the error itself where it says, and on its words only
- * where it does not.
+ * it stands) is about what was sent, and counts. Judged on the error itself
+ * where it says, and on its words only where it does not.
  */
 function passing(err: unknown): boolean {
   if (RetryError.isInstance(err)) return passing(err.lastError)
@@ -449,8 +182,6 @@ function passing(err: unknown): boolean {
     // A 400 can still be the key (Gemini answers a bad one that way).
     return PASSING_WORDS.test(err.message)
   }
-  if (err instanceof GrammyError) return err.error_code === 429 || err.error_code >= 500 || err.error_code === 401 || err.error_code === 403
-  if (err instanceof HttpError) return true
   if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) return true
   return PASSING_WORDS.test(describeError(err))
 }
@@ -462,7 +193,7 @@ function passing(err: unknown): boolean {
  * down, unset or with its link lapsed let one pass.
  */
 const SERVICE_PROBLEM =
-  /rate.?limit|quota|too many requests|service unavailable|temporarily unavailable|overloaded|ECONNREFUSED|ECONNRESET|EAI_AGAIN|cannot connect|not configured|not connected|api key|insufficient credits|expired or been revoked|reconnect/i
+  /rate.?limit|quota|too many requests|service unavailable|temporarily unavailable|overloaded|ECONNREFUSED|ECONNRESET|EAI_AGAIN|cannot connect|not configured|not connected|api key|insufficient credits|expired or been revoked|reconnect|link (?:it|one) again/i
 
 /**
  * approve()'s answer for a draft it held back that no judge ruled on. The
@@ -471,26 +202,28 @@ const SERVICE_PROBLEM =
  */
 const UNJUDGED = Symbol('unjudged')
 
+/** What the checks made of a draft: kept, perhaps changed and with a note on how, held back with why, or never judged. */
+type Approval = { kept: string; note?: string } | { held: string; draft: string } | typeof UNJUDGED
+
 /**
- * The second round for a checked draft the post decision faulted on one
+ * The second round for a checked draft the decision faulted on one
  * statement: that statement cut, and what is left put to the decision again.
  * The cut draft is a rewrite nobody has checked since, so it is judged on the
- * full line. Hands back the draft to post, or what to add to the admin's note
- * when it is still held. Nothing here throws, and nothing here is UNJUDGED:
- * the judge ruled once, and a second round that cannot be run (no model, no
- * time) leaves that ruling standing.
+ * full line. Hands back the draft to keep, or what to add to the reason when
+ * it is still held. Nothing here throws, and nothing here is UNJUDGED: the
+ * judge ruled once, and a second round that cannot be run (no model, no time)
+ * leaves that ruling standing.
  */
 async function cutAndRejudge(
   a: Automation,
-  member: Member | undefined,
   draft: string,
   statement: string,
   evidence: string,
   deadline: number,
-): Promise<{ posted?: string; why: string }> {
+): Promise<{ kept?: string; why: string }> {
   try {
     const rest = await cutFromDraft({ label: a.label, draft, unsupported: [statement], deadline })
-    if (!rest) return { why: '; cutting it left nothing to post' }
+    if (!rest) return { why: '; cutting it left nothing to report' }
     const d = await decideWatcherPost({ label: a.label, draft: rest, evidence, verified: false, deadline })
     console.info(
       '[tick] decision',
@@ -501,42 +234,35 @@ async function cutAndRejudge(
       detail: { judge_cut: statement, ...(d.reason ? { second_reason: d.reason } : {}) },
     })
     if (d.decision !== 'post') {
-      return { why: `; with it cut, the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}` }
+      return { why: `; with it cut, the check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}` }
     }
-    console.warn(`[tick] ${a.label}: cut the statement the post check faulted, and the rest passed: ${statement}`)
-    await tellAdminQuietly(
-      member,
-      `Watcher **${a.label}** posts without one statement: the post check said the evidence does not contain it, and the rest passed a second check. Cut: ${statement}`,
-    )
-    return { posted: rest, why: '' }
+    console.warn(`[tick] ${a.label}: cut the statement the check faulted, and the rest passed: ${statement}`)
+    return { kept: rest, why: '' }
   } catch (err) {
     return { why: `; it could not be cut and judged again (${describeError(err)})` }
   }
 }
 
 /**
- * Post-or-skip is decided in a fresh context against the evidence, by a
+ * Keep or hold back is decided in a fresh context against the evidence, by a
  * judge that answers two questions and never sees the writer's draft as its
  * own. The judge draws its own line (in lib/agent.ts) and what comes back is
- * honoured as decided: a second line here once stacked on the judge's and
- * held back a grounded brief at 0.63. If the
- * decision itself cannot be made (a provider that will not return the
- * structured object) the draft goes out as it always did, and an admin hears
- * that the safety net was down; a decision the tick ran out of time for is
- * held back instead, as the judges were not all asked, and answered UNJUDGED
+ * honoured as decided. If the decision itself cannot be made (a provider
+ * that will not return the structured object) the draft is kept as it always
+ * was, marked as unchecked; a decision the tick ran out of time for holds the
+ * draft back instead, as the judges were not all asked, and answers UNJUDGED
  * so that what the run read stays new. A draft held back at either step is
- * reported to an admin with the reason: a run that wrote something and
- * posted nothing is not the quiet kind of quiet.
+ * still kept for its member, marked held, with the reason.
  *
- * What posts is the reviewed draft itself, never a retype from the decision:
- * the decision once offered its own wording, and that is what turned a
- * formatted snapshot into plain lines and brought back entries the check had
- * never seen.
+ * What is kept is the reviewed draft itself, never a retype from the
+ * decision: the decision once offered its own wording, and that is what
+ * turned a formatted snapshot into plain lines and brought back entries the
+ * check had never seen.
  */
-async function approve(a: Automation, member: Member | undefined, draft: string, evidence: string, deadline: number): Promise<string | null | typeof UNJUDGED> {
+async function approve(a: Automation, draft: string, evidence: string, deadline: number): Promise<Approval> {
   // First the factored check: each claim against the evidence, in a context
   // that never sees the draft. What fails is cut; if nothing survives, or
-  // what failed could not be cut, silence.
+  // what failed could not be cut, the draft is held.
   let reviewed = draft
   // Whether that check went through this draft and passed it whole: it pulled
   // statements out, every one was put to the checker against this evidence,
@@ -547,9 +273,8 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
   // check that could not run, or one whose rewrite put back a draft nobody has
   // checked since, leaves this false and the full line stands.
   let verified = false
-  // What the check took out, for the admin's note if the decision then holds
-  // the rest back: a draft cut and re-judged is on the full line, and without
-  // this the note gives a number and no way to see why.
+  // What the check took out, for the reason if the decision then holds the
+  // rest back, or for the note on what was kept.
   let cut: string[] = []
   try {
     const review = await reviewDraft({ label: a.label, draft, evidence, deadline: deadline - DECISION_RESERVE_MS })
@@ -565,8 +290,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
           : `no claim survived the check: ${review.unsupported.join(' | ')}`
       console.warn(`[tick] ${a.label}: held back, ${why}`)
       noteRun({ metadata: { claims: review.claims.length, unsupported: review.unsupported.length }, detail: { held_because: why } })
-      await tellAdminQuietly(member, heldBack(a, why, draft))
-      return outOfTime ? UNJUDGED : null
+      return outOfTime ? UNJUDGED : { held: why, draft }
     }
     if (review.unsupported.length) {
       console.warn(`[tick] ${a.label}: cut ${review.unsupported.length} unsupported claim(s): ${review.unsupported.join(' | ')}`)
@@ -582,6 +306,7 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
     console.error(`[tick] ${a.label}: claim check unavailable, deciding on the raw draft:`, describeError(err))
     noteRun({ metadata: { claim_check: 'unavailable' } })
   }
+  const cutNote = cut.length ? `The claim check cut: ${cut.join(' | ')}` : undefined
   try {
     const d = await decideWatcherPost({ label: a.label, draft: reviewed, evidence, verified, deadline })
     console.info(
@@ -589,8 +314,8 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
       JSON.stringify({ label: a.label, decision: d.decision, confidence: d.confidence, verified, model: d.model, reason: d.reason ?? null }),
     )
     noteRun({ metadata: { decision: d.decision, confidence: d.confidence, judge: d.model }, ...(d.reason ? { detail: { reason: d.reason } } : {}) })
-    if (d.decision === 'post') return reviewed
-    let why = `the post check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}`
+    if (d.decision === 'post') return { kept: reviewed, ...(cutNote ? { note: cutNote } : {}) }
+    let why = `the check said ${d.decision} at ${d.confidence.toFixed(2)}${d.reason ? `: ${d.reason}` : ''}`
     // A draft the claim check passed whole, which the judge faults on one
     // statement it quotes: that statement is cut, as a claim that fails the
     // check is, and the rest is judged once more rather than going down with
@@ -598,210 +323,130 @@ async function approve(a: Automation, member: Member | undefined, draft: string,
     // answered: the check passed it (the request says it) and the judge read
     // it with the later mail beside it.
     if (verified && d.notInEvidence) {
-      const again = await cutAndRejudge(a, member, reviewed, d.notInEvidence, evidence, deadline)
-      if (again.posted !== undefined) return again.posted
+      const again = await cutAndRejudge(a, reviewed, d.notInEvidence, evidence, deadline)
+      if (again.kept !== undefined) return { kept: again.kept, note: `One statement the check found no evidence for was cut: ${d.notInEvidence}` }
       why += again.why
     }
-    if (cut.length) why += `. The claim check had already cut: ${cut.join(' | ')}`
+    if (cutNote) why += `. ${cutNote}`
     console.warn(`[tick] ${a.label}: held back, ${why}`)
-    await tellAdminQuietly(member, heldBack(a, why, reviewed))
-    return null
+    return { held: why, draft: reviewed }
   } catch (err) {
     const reason = describeError(err)
     // The tick's own clock stopping the judges is not every judge down: the
-    // rest of the chain was never asked, and a draft goes out unchecked only
+    // rest of the chain was never asked, and a draft is kept unchecked only
     // when none could answer it. So it is held back like any other the checks
     // did not pass. A second's slack, as a timer can fire a little early by
     // the wall clock.
     if (Date.now() >= deadline - 1_000) {
-      console.warn(`[tick] ${a.label}: held back, the tick ran out of time for the post decision:`, reason)
+      console.warn(`[tick] ${a.label}: held back, the tick ran out of time for the decision:`, reason)
       noteRun({ metadata: { decision: 'out of time' } })
-      await tellAdminQuietly(member, heldBack(a, 'the tick ran out of time before the post check could answer', reviewed))
       return UNJUDGED
     }
-    console.error(`[tick] ${a.label}: post decision unavailable, posting the draft:`, reason)
-    noteRun({ metadata: { decision: 'unavailable, posted unchecked' }, detail: { decision_error: reason } })
-    await tellAdminQuietly(member, `Watcher **${a.label}**: the post decision failed (${reason}), so its draft went out unchecked.`)
-    return reviewed
+    console.error(`[tick] ${a.label}: decision unavailable, keeping the draft:`, reason)
+    noteRun({ metadata: { decision: 'unavailable, kept unchecked' }, detail: { decision_error: reason } })
+    return { kept: reviewed, note: [`Not checked against its evidence: the check failed (${reason}).`, cutNote].filter(Boolean).join(' ') }
   }
 }
 
 /**
- * What became of a run's output: posted to the chat and what it read spent;
- * a draft the checks held back, an admin told and what it read spent; spent
- * without a post (quiet by choice); a PROBLEM;
- * a service that was down or a draft nobody had time to judge; or held by
- * the hourly cap.
+ * What became of a run's output: kept as a report and what it read spent; a
+ * draft the checks held back, kept marked as held and what it read spent;
+ * spent with nothing kept (quiet by choice); a PROBLEM; or a service that was
+ * down or a draft nobody had time to judge.
  */
-type Delivered = 'posted' | 'held' | 'spent' | 'problem' | 'unavailable' | 'capped'
+type Delivered = 'kept' | 'held' | 'spent' | 'problem' | 'unavailable'
 
 /**
- * Turn a run's output into at most one chat message. A lone SKIP line keeps
- * that part out of the chat whatever else it says; a marked PROBLEM goes to
- * the admins; the draft itself posts only once approved; tool notices report
- * actions already taken, so they always post.
- *
- * Post a watcher's result, checked, capped and with its problems routed to an
- * admin. `spent` marks what the run read as seen, and is called only once that
- * has reached the chat, or was deliberately kept from it: a plain SKIP, or a
- * draft the checks held back (an admin has it). A PROBLEM, a post the hourly
- * cap held back, a draft the tick ran out of time to judge, or a send that
- * fails before any of it is in the chat leaves it new for the next run, with
- * one exception: a run that wrote something unrepeatable on the strength of it
- * (a list item, a reminder) spends it whatever else happened, or the next run
- * would write it again. Says which it was.
+ * Turn a run's output into at most one report. A lone SKIP line keeps the
+ * draft from being a report whatever else it says; a marked PROBLEM is kept
+ * as a problem report; the draft itself is kept once approved, or marked as
+ * held with why. `spent` marks what the run read as seen, and is called once
+ * a report is kept, or the run deliberately kept nothing: a plain SKIP, or a
+ * draft the checks held back (the member has it, marked). A PROBLEM, or a
+ * draft the tick ran out of time to judge, leaves it new for the next run,
+ * with one exception: a run that wrote something unrepeatable on the strength
+ * of it (a list item, a reminder) spends it whatever else happened, or the
+ * next run would write it again. Says which it was.
  */
 async function deliver(
   a: Automation,
-  member: Member | undefined,
+  member: Member,
   result: AgentResult,
   evidence: string,
   spent: () => Promise<void>,
   deadline: number,
-  /** The helper whose job this was, whose name the post goes out under once the checks have passed it. */
+  /** The helper whose job this was, whose name the report carries. */
   helper?: Helper,
 ): Promise<Delivered> {
-  const split = (part: string) => {
-    const lines = part.split('\n')
-    const skip = lines.some(isSkipLine)
-    return { skip, rest: skip ? lines.filter((l) => !isSkipLine(l)).join('\n').trim() : part.trim() }
-  }
+  const lines = result.text.split('\n')
+  const skip = lines.some(isSkipLine)
+  const rest = skip ? lines.filter((l) => !isSkipLine(l)).join('\n').trim() : result.text.trim()
 
-  const quiet: string[] = []
-  const notices: string[] = []
-  const draft = split(result.text)
-  if (draft.skip && draft.rest) quiet.push(draft.rest)
-  for (const n of result.notices) {
-    const s = split(n)
-    if (!s.skip) notices.push(n)
-    else if (s.rest) quiet.push(s.rest)
-  }
-
-  // Staying quiet is the normal outcome for a watcher, not news: only a marked
-  // PROBLEM reaches an admin. Anything else written beside SKIP is the model
+  // Staying quiet is the normal outcome, not news: only a marked PROBLEM
+  // becomes a report. Anything else written beside SKIP is the model
   // narrating why it said nothing, and that belongs in the logs.
-  const problems = quiet.flatMap((q) => q.split('\n').filter(isProblemLine))
+  const problems = skip ? rest.split('\n').filter(isProblemLine) : []
   if (problems.length) {
-    await tellAdminQuietly(member, `Watcher **${a.label}** hit a problem:\n\n${problems.join('\n')}`)
-  } else if (quiet.length) {
-    console.warn(`[tick] ${a.label} stayed quiet:`, quiet.join(' | '))
+    await report(a, member, 'problem', problems.join('\n'), { helper })
+  } else if (skip && rest) {
+    console.warn(`[tick] ${a.label} stayed quiet:`, rest)
   }
 
-  const parts: string[] = []
-  let withheld = false
-  // Held back with nobody's ruling on it: what it read has reached nobody.
-  let unjudged = false
-  if (!draft.skip && draft.rest) {
-    // What a groundedness evaluator filters on: this run wrote a draft and put it to the checks.
-    noteRun({ metadata: { draft: 'yes' } })
-    const approved = await approve(a, member, draft.rest, evidence, deadline)
-    if (approved === UNJUDGED) unjudged = true
-    else if (approved) parts.push(approved)
-    else withheld = true
-  }
-  parts.push(...unsaid(parts.join('\n\n'), notices))
-  const keepNew = unjudged && !result.wrote?.length
-
-  const message = parts.join('\n\n').trim()
-  if (!message) {
-    const outcome = withheld ? 'held back' : unjudged ? 'held back unjudged' : problems.length ? 'problem' : 'skipped'
-    noteRun({ output: draft.rest || result.text, metadata: { outcome }, ...(outcome === 'skipped' ? {} : { level: 'WARNING' as const }) })
-    // Quiet by choice, or held back on purpose, is the run done with what it
-    // read. A run that could not do its job (a PROBLEM), or whose draft the
-    // tick ran out of time to judge, leaves it for the next.
-    if (!keepNew && (withheld || problems.length === 0 || result.wrote?.length)) {
+  if (skip || !rest) {
+    const outcome = problems.length ? 'problem' : 'skipped'
+    noteRun({ output: rest || result.text, metadata: { outcome }, ...(outcome === 'skipped' ? {} : { level: 'WARNING' as const }) })
+    // Quiet by choice is the run done with what it read. A run that could not
+    // do its job (a PROBLEM) leaves it for the next, unless it wrote on it.
+    if (problems.length === 0 || result.wrote?.length) {
       await spent()
-      return withheld ? 'held' : 'spent'
+      return 'spent'
     }
     // Counted against the stuck guard only when a problem is about what was
     // read, not a tool whose service is down or whose link has lapsed.
     return problems.every((line) => SERVICE_PROBLEM.test(line)) ? 'unavailable' : 'problem'
   }
 
-  // The last guard: however the run got here, a chat hears from its watchers
-  // only so often. An admin hears about the first held-back post each hour.
-  const now = new Date()
-  const capKey = `proactive_posts:${a.chatId}`
-  const log = prune(parseLog(await getSetting(capKey)), now)
-  if (!underCap(log)) {
-    console.warn(`[tick] ${a.label}: held back, ${log.posts.length} scheduled posts in the last hour for chat ${a.chatId}`)
-    noteRun({ output: message, metadata: { outcome: 'held back by the hourly cap' }, level: 'WARNING' })
-    if (shouldWarn(log, now)) {
-      await setSetting(capKey, JSON.stringify(markWarned(log, now)))
-      await tellAdminQuietly(
-        member,
-        `Watcher **${a.label}** was held back: this chat has had ${PROACTIVE_POSTS_PER_HOUR} scheduled posts in the last hour. A schedule may be too eager.`,
-      )
-    }
-    if (result.wrote?.length) {
-      // Spent, or the next run would write it all again; so the draft is all
-      // there is of what it read, and an admin gets it.
-      await spent()
-      await tellAdminQuietly(member, heldBack(a, 'the hourly cap was reached after the run had already acted on what it read.', message))
-      return 'spent'
-    }
-    return 'capped'
+  // What a groundedness evaluator filters on: this run wrote a draft and put it to the checks.
+  noteRun({ metadata: { draft: 'yes' } })
+  const approved = await approve(a, rest, evidence, deadline)
+  if (approved === UNJUDGED) {
+    noteRun({ output: rest, metadata: { outcome: 'held back unjudged' }, level: 'WARNING' })
+    // Nobody ruled on it, so what it read has reached nobody and stays new;
+    // unless the run wrote on it, when the draft is all there is of what it read.
+    if (!result.wrote?.length) return 'unavailable'
+    await spent()
+    await report(a, member, 'held', rest, { helper, detail: 'The tick ran out of time before the checks could finish, after the run had already acted on what it read.' })
+    return 'held'
+  }
+  if ('held' in approved) {
+    noteRun({ output: approved.draft, metadata: { outcome: 'held back' }, level: 'WARNING' })
+    await spent()
+    const stopped = a.repeat === 'until' ? ' It found something, so it has stopped watching; ask again if it should keep watching.' : ''
+    await report(a, member, 'held', approved.draft, { helper, detail: `Held back: ${approved.held}.${stopped}` })
+    return 'held'
   }
 
-  // A watch-until that posts has found what it waited for, and is retired once
-  // this is out; the family hears so in code, not in the writer's words. Not
-  // when what goes is only the notices beside a draft nobody judged.
-  const said = signed(helper, message)
-  const outgoing = a.repeat === 'until' && !keepNew ? `${said}\n\n${UNTIL_FOUND}` : said
-  let posted = outgoing
-  let broken: PartlySent | null = null
-  try {
-    await send(a.chatId, outgoing)
-  } catch (err) {
-    // The start is in the chat, and the next run would post it all again:
-    // spent like a whole post, with what went on record and an admin told.
-    if (!(err instanceof PartlySent)) {
-      // Nothing reached the chat, but a run that wrote on what it read spends
-      // it all the same, or the next would write it again; the draft is then
-      // all there is of it, so an admin gets that.
-      if (result.wrote?.length) {
-        await spent().catch((e) => console.error('[tick] could not spend what the run read:', describeError(e)))
-        await tellAdminQuietly(member, heldBack(a, `the post could not be sent (${describeError(err)}) after the run had already acted on what it read.`, message))
-      }
-      throw err
-    }
-    posted = err.sent
-    broken = err
-  }
+  // A watch-until that reports has found what it waited for, and is retired
+  // once this is kept; the member hears so in code, not in the writer's words.
+  const notes = [
+    approved.note,
+    result.cutShort ? 'The output allowance cut it short, so it lost its unfinished end.' : undefined,
+    a.repeat === 'until' ? UNTIL_FOUND : undefined,
+  ].filter(Boolean)
+  // Spent the moment it is kept, so the bookkeeping below cannot bring it round again.
+  await spent()
+  await report(a, member, 'ready', approved.kept, { helper, detail: notes.length ? notes.join(' ') : null })
   noteRun({
-    output: posted,
-    metadata: { outcome: broken ? 'partly posted' : 'posted', ...(result.cutShort ? { cut_short: true } : {}) },
-    ...(broken || result.cutShort ? { level: 'WARNING' as const } : {}),
+    output: approved.kept,
+    metadata: { outcome: 'kept', ...(result.cutShort ? { cut_short: true } : {}) },
+    ...(result.cutShort ? { level: 'WARNING' as const } : {}),
   })
-  // Spent the moment it is posted, before the bookkeeping below can fail and
-  // bring it round again; unless all that went was the notices beside a draft
-  // nobody judged.
-  if (!keepNew) await spent()
-  await setSetting(capKey, JSON.stringify(recordPost(log, now)))
-  await db().insert(schema.messages).values({
-    chatId: a.chatId,
-    role: 'assistant',
-    content: posted,
-    model: result.model,
-  })
-  if (broken) {
-    await tellAdminQuietly(
-      member,
-      `Watcher **${a.label}** was cut off: its post was long enough to go in parts, and a later part failed (${describeError(broken.failure)}), so only the start of it reached the chat.`,
-    )
-  }
-  if (result.cutShort) {
-    await tellAdminQuietly(
-      member,
-      `Watcher **${a.label}** ran out of room: the model's output allowance cut its post short, so it went out without its unfinished end, and whatever that held was not posted. A shorter instruction, or a larger allowance for this watcher, stops it.`,
-    )
-  }
-  return keepNew ? 'unavailable' : 'posted'
+  return 'kept'
 }
 
 /**
  * How many runs in a row, and over how long, may leave the same new items
- * unspent before they are moved past. The span keeps an hourly watcher from
+ * unspent before they are moved past. The span keeps an hourly watch from
  * skipping anything over a bad morning.
  */
 const STUCK_RUNS = 3
@@ -837,12 +482,12 @@ async function readStuck(a: Automation): Promise<Record<string, Stuck>> {
 const writeStuck = (a: Automation, stuck: Record<string, Stuck>) =>
   setSetting(`unspent:${a.id}`, Object.keys(stuck).length ? JSON.stringify(stuck) : '')
 
-/** The source and the span skipped, which is what an admin can go and look at. */
+/** The source and the span skipped, which is what the member can go and look at. */
 const describeMove = (m: Stuck) => {
-  const [kind, , ...rest] = m.move.key.split(':')
+  const [kind, ...rest] = m.move.key.split(':')
   const provider = rest.at(-1)
   const what =
-    kind === 'mail_cursor' ? `mail in a linked ${provider === 'google' ? 'Gmail' : provider === 'microsoft' ? 'Outlook' : String(provider)} mailbox`
+    kind === 'mail_cursor' ? `mail in your linked ${provider === 'google' ? 'Gmail' : provider === 'microsoft' ? 'Outlook' : String(provider)} mailbox`
     : 'new items'
   const from = m.from === '-' ? 'up' : `from ${formatLocal(new Date(m.from))}`
   return `${what} ${from} to ${formatLocal(new Date(m.move.at))}`
@@ -851,13 +496,13 @@ const describeMove = (m: Stuck) => {
 /**
  * Leaving what a run read unspent is right when the run failed for a reason
  * that passes. A failure that is the same every time (an attachment no model
- * will take, a reply Telegram will not parse) would otherwise keep every later
- * run on the same items for good, posting nothing and telling an admin each
- * time. So each cursor held at the same place for STUCK_RUNS runs and
- * STUCK_FOR_MS is moved past what the first of those runs saw, and no
- * further: anything that arrived since gets its own chance. One message says so.
+ * will take) would otherwise keep every later run on the same items for good,
+ * reporting nothing but the problem each time. So each cursor held at the
+ * same place for STUCK_RUNS runs and STUCK_FOR_MS is moved past what the
+ * first of those runs saw, and no further: anything that arrived since gets
+ * its own chance. One report says so.
  */
-async function unspent(a: Automation, member: Member | undefined, staged: StagedCursor[], why: string): Promise<void> {
+async function unspent(a: Automation, member: Member, staged: StagedCursor[], why: string): Promise<void> {
   const last = new Map<string, StagedCursor>()
   for (const s of staged) last.set(s.key, s)
   if (last.size === 0) return
@@ -882,14 +527,16 @@ async function unspent(a: Automation, member: Member | undefined, staged: Staged
   await writeStuck(a, stuck)
   if (!moved.length) return
   const runs = Math.max(...moved.map((m) => m.runs))
-  await tellAdminQuietly(
+  await report(
+    a,
     member,
-    `**${a.label}** failed on the same new items ${runs} runs running (${why}), so I have moved past them without posting them: ` +
-      `${moved.map(describeMove).join('; ')}. The failures above say why; anything since then is still new.`,
+    'problem',
+    `Failed on the same new items ${runs} runs running (${why}), so it has moved past them without reporting them: ` +
+      `${moved.map(describeMove).join('; ')}. The problems before this say why; anything since then is still new.`,
   )
 }
 
-/** A run that spent what it read clears those cursors from the stuck guard. Best effort: the post is what matters. */
+/** A run that spent what it read clears those cursors from the stuck guard. Best effort: the report is what matters. */
 async function spentClean(a: Automation, staged: StagedCursor[]): Promise<void> {
   await commitCursors(staged)
   try {
@@ -901,58 +548,6 @@ async function spentClean(a: Automation, staged: StagedCursor[]): Promise<void> 
   } catch (err) {
     console.error('[tick] stuck guard failed:', describeError(err))
   }
-}
-
-/** The id Telegram says a group now has, having become a supergroup since the run began. */
-const migratedTo = (err: unknown) =>
-  err instanceof GrammyError && err.parameters?.migrate_to_chat_id ? String(err.parameters.migrate_to_chat_id) : null
-
-/** Telegram turning the chat itself away, rather than failing this once. */
-const refusedChat = (err: unknown) =>
-  err instanceof GrammyError &&
-  (err.error_code === 403 ||
-    (err.error_code === 400 &&
-      /chat not found|upgraded to a supergroup|rights to send|CHAT_WRITE_FORBIDDEN|CHAT_RESTRICTED|TOPIC_CLOSED/i.test(err.description)))
-
-/** Allowed by the env seed or by an admin's grant, as the webhook judges it. */
-async function allowedPerson(telegramUserId: string): Promise<boolean> {
-  if (idSet('ALLOWED_TELEGRAM_IDS').has(telegramUserId)) return true
-  return (await memberByTelegramId(telegramUserId))?.allowed === true
-}
-
-/**
- * Tell an admin why a room is being left alone, once per change in what
- * Telegram says about it rather than every hour it stays that way. `what` is
- * the thing held back: a post, or the watchers a new room would have had.
- */
-async function sayUnaccounted(chatId: string, room: string, unaccounted: number | null, what: string): Promise<void> {
-  const key = `unaccounted:${chatId}`
-  const said = await getSetting(key)
-  if (unaccounted === 0) {
-    if (said && said !== '0') await setSetting(key, '0')
-    return
-  }
-  const count = unaccounted === null ? 'unknown' : String(unaccounted)
-  if (said === count) return
-  await setSetting(key, count)
-  await tellAdminQuietly(
-    undefined,
-    unaccounted === null
-      ? `${what} in ${room}: Telegram would not say who is there. ` +
-          'I may have been removed, or the group hides its members; making me an admin there lets me see them.'
-      : `${what} in ${room}: Telegram counts ${unaccounted} ${unaccounted === 1 ? 'person' : 'people'} there ` +
-          'I cannot match to an allowed member. If they are family, have them send a message there or `/allow` them; ' +
-          'otherwise remove them. Making me an admin in the group also lets me see everyone who is in it.',
-  )
-}
-
-/** True when a group holds people the household cannot account for, so nothing goes in unasked. */
-async function heldForHeadcount(a: Automation): Promise<boolean> {
-  const unaccounted = await unaccountedIn(a.chatId)
-  await sayUnaccounted(a.chatId, `chat ${a.chatId}`, unaccounted, `**${a.label}** was not posted`)
-  if (unaccounted === 0) return false
-  console.info(`[tick] ${a.label}: ${unaccounted ?? 'unknown'} unrecognised people in chat ${a.chatId}, not posting`)
-  return true
 }
 
 async function runDue(deadline: number): Promise<{ ran: number; skipped: number }> {
@@ -980,11 +575,10 @@ async function runDue(deadline: number): Promise<{ ran: number; skipped: number 
 
     const outcome = await traceRun(
       'hearth.watcher',
-      { sessionId: a.chatId, tags: ['watcher'], metadata: { label: a.label, kind: a.kind ?? 'custom', automation: String(a.id) } },
+      { sessionId: `automation-${a.id}`, tags: ['watcher'], metadata: { label: a.label, automation: String(a.id) } },
       async () => {
         const out = await runClaimed(a, deadline)
-        // Its one run, whatever came of it: a reminder held back from a room
-        // with a stranger in it is not sent hours later, as a brief is not.
+        // Its one run, whatever came of it.
         if (a.repeat === 'once') await retire(a, 'its one run')
         return out
       },
@@ -998,8 +592,8 @@ async function runDue(deadline: number): Promise<{ ran: number; skipped: number 
 
 /**
  * One claimed automation as a trace of its own: why it did not run when it
- * did not, and otherwise what it posted or held back. A failure is reported
- * here, and counts as neither run nor skipped.
+ * did not, and otherwise what it kept or held back. A failure is reported to
+ * its member, and counts as neither run nor skipped.
  */
 async function runClaimed(a: Automation, deadline: number): Promise<'ran' | 'skipped' | 'failed'> {
   const notRun = (why: string) => {
@@ -1007,94 +601,32 @@ async function runClaimed(a: Automation, deadline: number): Promise<'ran' | 'ski
     return 'skipped' as const
   }
 
-  // The house rule for a room holds for what is posted into it unasked:
-  // nothing while someone unrecognised is there. The run is claimed all the
-  // same, so a morning brief does not turn up mid-afternoon once they leave.
-  if (isGroupChat(a.chatId) && (await strangersIn(a.chatId)).length > 0) {
-    console.info(`[tick] ${a.label}: someone unrecognised is in chat ${a.chatId}, not posting`)
-    return notRun('someone unrecognised is in the room')
+  // An automation runs its author's own words with their mailbox and the
+  // household's read tools, and its report is theirs. With the author gone
+  // or revoked, those words are nobody's or a stranger's, so it is paused
+  // rather than run (deleting a member pauses theirs up front).
+  const member = a.memberId ? await memberById(a.memberId) : undefined
+  if (!member?.allowed) {
+    await setAutomationEnabled(a.id, false)
+    console.info(`[tick] ${a.label}: whoever set it up is no longer allowed, paused`)
+    return notRun('whoever set it up is no longer allowed, so it was paused')
   }
 
   try {
-    // A private chat is one person's. Revoked or removed, they hear nothing
-    // more from the household, whoever set the automation up.
-    if (!isGroupChat(a.chatId) && !(await allowedPerson(a.chatId))) {
-      console.info(`[tick] ${a.label}: chat ${a.chatId} belongs to someone no longer allowed, not posting`)
-      return notRun('the chat belongs to someone no longer allowed')
-    }
-    // And the same test holds for whoever the room cannot see: a group whose
-    // head count is more than the bot and the allowed members in it.
-    if (isGroupChat(a.chatId) && (await heldForHeadcount(a))) return notRun('the room holds people the household cannot account for')
-
-    const creator = a.memberId
-      ? (await db().select().from(schema.members).where(eq(schema.members.id, a.memberId)).limit(1))[0]
-      : undefined
-    // A custom automation runs its author's own words with the household's
-    // read tools. With the author revoked, those words are a stranger's, so
-    // it is paused rather than run (deleting a member pauses theirs up front,
-    // before the row that says whose it was goes). A ready-made watcher's
-    // instruction comes from code, and the room keeps it.
-    if (!isWatcherKind(a.kind) && a.memberId && !creator?.allowed) {
-      await setAutomationEnabled(a.id, false)
-      console.info(`[tick] ${a.label}: whoever set it up is no longer allowed, paused`)
-      await tellAdminQuietly(
-        undefined,
-        `Paused **${a.label}**: whoever set it up is no longer allowed, so its instruction is not run. ` +
-          'Resume it from Home if the household still wants it.',
-      )
-      return notRun('whoever set it up is no longer allowed, so it was paused')
-    }
-    // Nothing runs as someone who has been revoked: not their mailbox, and
-    // not the first DM when a draft is held back.
-    const member = creator?.allowed ? creator : undefined
-
-    const run = () => (isWatcherKind(a.kind) ? runReadyMade(a.kind, a, member, deadline) : runCustom(a, member, deadline))
     // Whoever set it up is the run's user on every call in it, the checks
     // included, not on the writer's alone.
-    const delivered = await (member ? traced({ userId: member.telegramUserId }, run) : run())
-    if (a.repeat === 'until' && delivered === 'posted') await retire(a, 'it found what it was waiting for')
-    // It found something, and an admin has the draft: what it read is spent,
-    // so watching on would only check for good, hourly, for what has gone by.
-    if (a.repeat === 'until' && delivered === 'held') {
-      await retire(a, 'what it found was held back')
-      await tellAdminQuietly(
-        member,
-        `**${a.label}** has stopped watching: it found something, but the checks held its post back (the draft is above). Ask again if it should keep watching.`,
-      )
-    }
+    const delivered = await traced({ userId: String(member.id) }, () => runCustom(a, member, deadline))
+    // It found something, kept or held, and what it read is spent: watching
+    // on would only check for good, hourly, for what has gone by.
+    if (a.repeat === 'until' && delivered === 'kept') await retire(a, 'it found what it was waiting for')
+    if (a.repeat === 'until' && delivered === 'held') await retire(a, 'what it found was held back')
     return 'ran'
   } catch (err) {
     console.error(`[tick] automation ${a.id} failed:`, err)
     const reason = describeError(err)
     noteRun({ output: reason, metadata: { outcome: 'failed' }, level: 'ERROR' })
-    try {
-      const movedTo = migratedTo(err)
-      if (movedTo) {
-        // The room is still there under a new id, where posting works. Its
-        // rows follow it (the webhook moves them too once it hears, and the
-        // second move finds nothing left), and the automation stays on:
-        // paused, it would sit silent in a room it can post in.
-        await moveChat(a.chatId, movedTo)
-        await tellAdminQuietly(
-          undefined,
-          `**${a.label}** was not posted: chat ${a.chatId} has just become a supergroup. It posts there from its next run.`,
-        )
-      } else if (refusedChat(err)) {
-        // Telegram will refuse this chat every hour from now on (the bot was
-        // removed, or the person blocked it), and what the run read stays
-        // unspent, so each hour would fetch, write and fail again. Paused, once.
-        await setAutomationEnabled(a.id, false)
-        await tellAdminQuietly(
-          undefined,
-          `Paused **${a.label}**: Telegram will not let me post in chat ${a.chatId} (${reason}). Resume it from Home once I can post there again.`,
-        )
-      } else {
-        await tellAdminQuietly(undefined, `Watcher **${a.label}** failed: ${reason}`)
-      }
-    } catch (sendErr) {
-      // One broken automation must not stop the rest of the tick.
-      console.error(`[tick] could not report automation ${a.id} failure:`, sendErr)
-    }
+    // One broken automation must not stop the rest of the tick.
+    await report(a, member, 'problem', `It failed: ${reason}`)
     return 'failed'
   }
 }
@@ -1103,8 +635,8 @@ export async function POST(req: Request) {
   const deadline = Date.now() + TICK_BUDGET_MS
   // Checked first against the keys this instance already holds, so a
   // stranger's call costs no database read (see recheckSecrets). Automations
-  // run the agent and message Telegram, so dashboard-managed settings are then
-  // hydrated the same as on the webhook path, and the call checked again.
+  // run the model chain, so dashboard-managed settings are then hydrated
+  // and the call checked again.
   const body = await req.text()
   if (await authorised(req, body)) await hydrateSecrets()
   else if (!(await recheckSecrets())) return NextResponse.json({ ok: false }, { status: 401 })
@@ -1133,24 +665,13 @@ export async function POST(req: Request) {
       console.error('[tick] could not record the tick:', err)
     }
   }
-  // The built-in watchers are part of the product: every household group has
-  // them, kept in step with their definitions, before anything due is run.
-  try {
-    const builtins = await installBuiltins(new Date(), {
-      counted: (room, unaccounted) =>
-        sayUnaccounted(room.chatId, room.title ?? `chat ${room.chatId}`, unaccounted, 'The built-in watchers were not set up'),
-    })
-    if (builtins.installed.length || builtins.converted || builtins.retired || builtins.synced) {
-      console.info('[tick] built-in watchers:', JSON.stringify(builtins))
-    }
-  } catch (err) {
-    console.error('[tick] could not install the built-in watchers:', err)
-  }
   const result = await runDue(deadline)
-  await maybeConsolidateMemory(new Date(), deadline)
   await pruneModelEvents(30)
-  // The household's record of what was changed keeps ninety days.
+  // Each member's record of what was changed keeps ninety days, and their reports thirty.
   await pruneActivity(90).catch((err) => console.error('[tick] could not prune the activity log:', describeError(err)))
+  await pruneReports(30).catch((err) => console.error('[tick] could not prune the reports:', describeError(err)))
+  // A used OAuth code is remembered only until it would have expired anyway.
+  await pruneUsedCodes().catch((err) => console.error('[tick] could not prune used OAuth codes:', describeError(err)))
   // A proposal whose occasion has passed, or whose event got to the calendar
   // another way, is no longer a question for anyone. The lists already hide
   // these; this writes down why.

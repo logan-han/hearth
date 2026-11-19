@@ -4,31 +4,37 @@
 [![codecov](https://codecov.io/gh/logan-han/hearth/branch/main/graph/badge.svg?token=xtB7uJCjn8)](https://codecov.io/gh/logan-han/hearth)
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Flogan-han%2Fhearth&project-name=hearth&repository-name=hearth&env=TOKEN_ENC_KEY%2CADMIN_EMAILS%2CGOOGLE_CLIENT_ID%2CGOOGLE_CLIENT_SECRET&envDescription=TOKEN_ENC_KEY%3A%20any%2064%20hex%20chars%20%28openssl%20rand%20-hex%2032%29%2C%20encrypts%20stored%20keys%20and%20signs%20sessions.%20ADMIN_EMAILS%3A%20your%20email%2C%20for%20dashboard%20sign-in.%20The%20Google%20OAuth%20client%20powers%20the%20sign-in%20screen.&envLink=https%3A%2F%2Fgithub.com%2Flogan-han%2Fhearth%23setup&stores=%5B%7B%22type%22%3A%22integration%22%2C%22integrationSlug%22%3A%22neon%22%2C%22productSlug%22%3A%22neon%22%2C%22protocol%22%3A%22storage%22%7D%5D)
 
-A self-hosted family assistant that lives in one Telegram chat. It answers questions
-with web search, reads and writes each member's own email and calendar (Google and
-Microsoft), publishes a shared family calendar everyone can subscribe to, and runs
-reminders on a schedule. It also works on its own between messages: it keeps the
-household's goals moving with weekly check-ins, speaks up the hour mail needs
-someone, takes jobs to do in the background through named helpers, and keeps a
-record of everything it changes, so nobody has to take its word for it.
+A self-hosted family assistant you reach through [MCP](https://modelcontextprotocol.io):
+Claude Code, Claude Desktop, claude.ai's connectors or any other MCP client. It keeps a
+shared family calendar everyone can subscribe to, shared lists, the facts the household
+keeps, goals, helpers and routines; it reads and writes each member's own email and
+calendar (Google and Microsoft), the household's money feed (PocketSmith), Notion and the
+family board (Jira); and it runs jobs on a schedule, keeping what each one finds for the
+member who set it up. Every change is kept on a record, so nobody has to take its word for it.
 
-Built to run on free tiers (Vercel Hobby, Neon Postgres, Upstash QStash, Tavily)
-and a local-first OpenAI-compatible LLM, with OpenRouter and then Gemini's free
-quota behind it.
+Your MCP client is the brain. Hearth is the household behind it: the tools, the data, the
+safety rules and a web dashboard.
+
+Built to run on free tiers (Vercel Hobby, Neon Postgres, Upstash QStash, Tavily). A model of
+its own is optional, needed only for the jobs that run while nobody is asking.
+
+> **Telegram was removed on 20 November 2026.** Hearth used to live in a group chat. It is
+> now MCP-only: there is no bot, no chat and nothing posted anywhere. The morning brief and
+> the money snapshot are reads a client asks for, scheduled jobs leave reports, and MCP keys
+> are made on the web.
 
 - [How it fits together](#how-it-fits-together)
 - [Layout](#layout)
-- [Setup](#setup) — [Telegram](#1-telegram) · [Google Cloud](#2-google-cloud) · [Azure Entra](#3-azure-entra) · [Services](#4-services) · [Model chain](#model-chain) · [Deploy](#5-deploy)
-- [Day-to-day](#day-to-day)
-- [Reading photos, scans and voice notes](#reading-photos-scans-and-voice-notes)
-- [Keeping watch](#keeping-watch)
+- [Setup](#setup): [Google Cloud](#1-google-cloud) · [Azure Entra](#2-azure-entra) · [Services](#3-services) · [Model chain](#model-chain) · [Deploy](#4-deploy)
+- [Connecting a client](#connecting-a-client)
+- [The morning brief and the money snapshot](#the-morning-brief-and-the-money-snapshot)
 - [Sweeping email onto the calendar](#sweeping-email-onto-the-calendar)
+- [Jobs on a schedule, and their reports](#jobs-on-a-schedule-and-their-reports)
 - [What it remembers](#what-it-remembers)
-- [Goals](#goals) · [Helpers](#helpers) · [Routines](#routines) · [Jobs for later](#jobs-for-later-once-or-until-something-happens)
+- [Goals](#goals) · [Helpers](#helpers) · [Routines](#routines)
 - [Shared lists](#shared-lists) · [Recipes](#recipes) · [Money](#money) · [Finding a time](#finding-a-time) · [Notion](#notion) · [Jira](#jira)
-- [What it changed](#what-it-changed) · [Its name and manner](#its-name-and-manner)
+- [What it changed](#what-it-changed)
 - [The web dashboard](#the-web-dashboard)
-- [Claude, and anything else that speaks MCP](#claude-and-anything-else-that-speaks-mcp)
 - [Observability](#observability)
 - [Safety properties](#safety-properties)
 - [Development](#development) · [Licence](#licence)
@@ -36,138 +42,89 @@ quota behind it.
 ## How it fits together
 
 ```
-Telegram ──webhook──> /api/telegram ──ack 200──┐
-                        │ waitUntil()          │
-                        v                      │
-                  agent loop (AI SDK) <──── history + member context (Neon)
-                        │ tools
-        ┌───────┬───────┼────────┬──────────┬─────────┐
-      Tavily  Gmail   GCal    MS Graph   family cal  memory/automations
-                                          │
-QStash ──hourly tick──> /api/tick ──due automations──> agent ──> Telegram
-Google/Outlook/Apple ──subscribe──> /api/calendar/{token}/family.ics
+MCP client ──key or OAuth──> /api/mcp ──> tools ──> Gmail, Google Calendar, MS Graph,
+   (Claude)                     │                    PocketSmith, Notion, Jira, Tavily,
+                                │                    OpenWeatherMap
+                                └──> family calendar, lists, facts, goals, proposals (Neon)
+
+Browser ──Google/Microsoft sign-in──> dashboard: Home, Connect, System, Settings, /setup
+QStash ──hourly──> /api/tick ──due jobs──> model chain ──checks──> reports (Neon)
+Google/Outlook/Apple Calendar ──subscribe──> /api/calendar/{token}/family.ics
 ```
 
-Telegram retries any webhook it does not get an ack for within seconds, so
-`/api/telegram` validates, acks, and finishes the work in `waitUntil()` under
-Vercel Fluid compute (300 s ceiling). A turn gives itself 150 s of that, every
-model it tries and every check on its reply included, and starts no further
-model once they are spent. Its clock starts when the message arrives, not when
-the turn does: the gate, the attachments and the wait for the turn ahead come
-out of the same four minutes, and a file still downloading, or a turn ahead
-still running, with a minute of them left is no longer waited for and the
-message is answered without it, so the reply, or the apology, still goes out
-before the function is stopped. The hourly tick keeps one clock the same way:
-it starts an automation only while a whole turn and the checks on its draft
-still fit in its first 280 s, so the rest stay due, first in line at the next
-tick, rather than claimed and then stopped halfway through. A draft whose post
-decision that clock cuts short is held back for an admin, not posted unchecked,
-with what it read left new for the next run; and the nightly memory pass waits
-for a tick with a whole turn left.
+`/api/mcp` is stateless streamable HTTP: every request carries its own key, nothing is
+remembered between calls, and an idle endpoint costs nothing. The key is the member: every
+call runs as whoever holds it, against their mailbox, their calendar, their name on what it
+writes.
 
-A chat turn does not see all 70 tools. The 23 in the core are always in reach
-(search, weather, lists, the shared calendar and its proposals, memory); mail,
-personal calendar, money, Notion, Jira, automations, goals, helpers, routines
-and the kitchen are switched on by cues in the message, a helper's or a
-routine's own name among them, and by what is open in the chat (a draft brings
-the mail tools, a goal in progress the goal tools), and the model can unlock
-any group itself with `more_tools`.
-Fewer tools per call is one of the better-evidenced ways to keep a small model
-picking the right one. Watchers and the nightly memory pass get a fixed short
-list instead.
+The hourly tick runs the jobs members have scheduled (reminders, watches, goal check-ins,
+jobs handed to helpers) through Hearth's own model chain. What a job writes passes two
+checks in fresh contexts before it is kept: each checkable claim is tested against the
+evidence by a call that never sees the draft, and what fails is cut with the rest left as
+written; then a decision says keep or hold back, judging only whether the draft is true to
+its evidence. A draft held back is kept too, marked as held, with why. Reports wait for the
+member's client (`hearth_context`, `list_reports`) and Home.
 
-History is the last 15 messages verbatim plus a rolling summary of everything
-older, refreshed after a reply once six or more messages have fallen out of the
-window. The summary keeps names, dates, amounts and open requests and drops
-chatter, so a fact from last week is still in reach without the transcript.
-
-Before anything a watcher wrote reaches the chat it passes two checks in fresh
-contexts: each checkable claim is tested against the evidence by a call that
-never sees the draft, and what fails is removed from the draft with the rest
-left as written (a draft whose failed claims cannot be removed, the rewrite cut
-off or failing, is held back for an admin); then a decision says post or skip
-with a confidence, judging only whether the draft is true to its evidence: what
-the writer chose to include is not re-judged. These judgements, the ambient
-gate and the check on a reply that reports a change no tool made are
-structured calls to the chain, which tries first the models that have lately
-been returning an object, whatever the chain order for chat. A draft held back
-at either step goes to an admin by DM with
-the reason and the draft, so a snapshot that should have posted is never merely
-quiet. A chat also hears from its watchers at most six times an hour, with an
-admin told the first time the cap holds something back.
+The tick keeps one clock from its start: it starts a job only while a whole run and the
+checks on its draft still fit in its first 280 s, so the rest stay due, first in line at
+the next tick, rather than claimed and then stopped halfway through.
 
 ## Layout
 
 | Path | What it is |
 | --- | --- |
-| `app/api/telegram/route.ts` | Webhook: secret check, ack, background processing |
-| `app/api/tick/route.ts` | QStash-signed scheduler entry point |
-| `app/api/oauth/{google,microsoft}/` | OAuth start + callback |
+| `app/api/mcp/route.ts` | The MCP endpoint, behind a per-member key |
+| `lib/mcp.ts` | What a client is offered, `hearth_context`, and who each call runs as |
+| `app/api/mcp-keys/route.ts` | A signed-in member's own keys: make, list, revoke |
+| `lib/oauth/server.ts` | Hearth as an OAuth 2.1 authorisation server for MCP clients |
+| `app/api/oauth/{register,authorize,token}/` | Dynamic registration, the approval page, the token endpoint |
+| `app/.well-known/` | Protected-resource and authorisation-server metadata |
+| `app/api/oauth/{google,microsoft}/` | Dashboard sign-in and account linking, start and callback |
+| `app/api/tick/route.ts` | QStash-signed scheduler: runs due jobs, keeps their reports, tidies up |
 | `app/api/calendar/[token]/` | Token-protected ICS feed |
-| `app/connect/page.tsx` | Link and unlink accounts, shows the ICS URL |
-| `app/page.tsx` | Sign-in, or Home: what waits on a yes, calendar, goals, next up, reminders, lists, what was changed |
-| `app/setup/` | Admin: first-run guide — bot, webhook, family, model, timezone |
-| `app/system/` | Admin: model chain, traffic, integrations, chats |
-| `app/settings/` | Admin: family, keys, model pickers, Telegram webhook |
+| `app/api/family/route.ts` | Home's and Connect's buttons |
+| `app/page.tsx` | Sign-in, or Home: waiting on a yes, reports, calendar, goals, reminders, lists, facts, helpers, what changed, MCP keys |
+| `app/connect/` | Link, unlink or make read-only your Google or Microsoft account; the ICS URL |
+| `app/setup/` | Admin: first-run guide: family, model, timezone |
+| `app/system/` | Admin: model chain health, changes, keys, every reminder |
+| `app/settings/` | Admin: family, sign-out everywhere, model order, keys and behaviour |
 | `lib/settings.ts` | Encrypted, DB-backed settings for a fixed allowlist of keys, seeded once from the environment |
-| `lib/auth/session.ts` | Admin sign-in, and who counts as an admin |
-| `lib/agent.ts` | Per-mode prompts, agent loop, post decision, ambient gate |
-| `lib/handler.ts` | Update parsing, allowlist, commands, reply routing |
-| `lib/watchers.ts` | The ready-made watchers: schedule, phrasing rules, context tools |
-| `lib/builtins.ts` | Installs the built-in watchers in every household group and keeps them in step with their definitions |
+| `lib/auth/session.ts` | Dashboard sign-in, and who counts as an admin |
+| `lib/agent.ts` | A scheduled run, and the checks on what it writes |
+| `lib/brief.ts` | The morning brief and the money snapshot, gathered in code |
 | `lib/model.ts` | Tiered model chain: local, OpenRouter, Gemini |
-| `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations, goals, helpers, routines, activity |
-| `lib/activity.ts` | The household's record of every change the bot makes, one readable line each |
-| `lib/helpers.ts` | Named helpers: the ready-made ones, who a message calls, signing what they say |
+| `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations and reports, goals, helpers, routines, activity, brief |
+| `lib/activity.ts` | Each member's record of every change made in their name, one readable line each |
+| `lib/helpers.ts` | Named helpers: the ready-made ones and their roles |
 | `lib/free-time.ts` | Free time worked out from busy time, for `find_free_time` |
 | `lib/recurring.ts` | Subscriptions and regular bills found in the bank feed |
-| `lib/tools/router.ts` | Which tool groups a chat turn sees, and the `more_tools` escape hatch |
-| `app/api/mcp/route.ts` | The same tools over MCP, behind a per-member key |
-| `lib/mcp.ts` | What an MCP client is offered, and who each call runs as |
-| `lib/ics-parse.ts` | Reading a calendar file someone sends, for the listing and `import_calendar_file` |
+| `lib/ics-parse.ts` | Reading a calendar file attached to an email |
 | `lib/model-events.ts` | One row per model call, folded into the chain health on System |
 | `scripts/probe-model.ts` | `npm run probe`: a real tool call against a candidate model before it joins the chain |
-| `lib/summary.ts` | The rolling summary each chat keeps of what fell out of the raw history window |
-| `lib/rate-cap.ts` | The ceiling on scheduled posts per chat per hour |
-| `lib/headcount.ts` | How many people in a group the household cannot account for, from Telegram's own count |
-| `lib/providers/` | Gmail and Microsoft Graph behind one interface |
+| `lib/providers/` | Gmail and Microsoft Graph behind one interface, and the other services |
 | `lib/db/` | Drizzle schema and queries |
-| `lib/crypto.ts` | AES-256-GCM for refresh tokens at rest |
-| `scripts/set-webhook.ts` | Registers the Telegram webhook |
+| `lib/crypto.ts` | AES-256-GCM for refresh tokens at rest, signing keys, MCP key tags |
 
 ## Setup
 
 **One click**: the Deploy button above clones this repo into your own GitHub,
 provisions a Neon Postgres through the Vercel Marketplace, asks for the four
-bootstrap values, and deploys — migrations run inside the build, so there is
+bootstrap values, and deploys; migrations run inside the build, so there is
 nothing to run by hand. Sign in and **/setup** walks you through the rest.
-The Google OAuth client is the one real errand: create it (section 2) and add
+The Google OAuth client is the one real errand: create it (section 1) and add
 your deployment's callback URL once you know the domain.
 
 Only that bootstrap has to live in env vars: the database, `TOKEN_ENC_KEY`,
-`ADMIN_EMAILS` and one OAuth client to sign in with. Deploy with those, sign in,
-and Hearth walks you through the rest at **/setup** — bot token, webhook,
-family, a model provider (any one of Gemini, OpenRouter or a self-hosted
-server is enough), timezone — with no redeploys. Everything below can also be
-seeded through the environment: an env var for a dashboard-managed setting is
-read **once**, the first time the deployment sees that setting, and copied into
-the dashboard's encrypted store, which owns it from then on. The env var is
-never read again and can be deleted; change the setting in Settings. Either
-way BotFather is still where the bot itself comes from.
+`ADMIN_EMAILS` and one OAuth client to sign in with. Deploy with those, sign in
+with an address in `ADMIN_EMAILS`, and /setup adds the family (each by the
+address they sign in with), a model provider for scheduled jobs if you want
+them, and the timezone, with no redeploys. Everything below can also be seeded
+through the environment: an env var for a dashboard-managed setting is read
+**once**, the first time the deployment sees that setting, and copied into the
+dashboard's encrypted store, which owns it from then on. The env var is never
+read again and can be deleted; change the setting in Settings.
 
-### 1. Telegram
-
-BotFather: `/newbot`, then `/setprivacy` → **Disable** so the bot can see group
-messages. Add the bot to your family group. The token, webhook secret and
-founding members can be set at `/setup` (or Settings) once the app is running;
-the env vars below seed the same values.
-
-Get your numeric Telegram user id from [@userinfobot](https://t.me/userinfobot),
-or DM the bot `/whoami` (`/start` answers with your id even before you are
-allowed). Put the founding members in `ALLOWED_TELEGRAM_IDS`, or add them on
-the dashboard afterwards.
-
-### 2. Google Cloud
+### 1. Google Cloud
 
 Create an OAuth **Web application** client. Authorised redirect URI:
 
@@ -182,7 +139,7 @@ a one-time "Google hasn't verified this app" warning and click through
 *Advanced → continue*. This avoids Testing mode's 7-day refresh-token expiry;
 verification is not required for private family use.
 
-### 3. Azure Entra
+### 2. Azure Entra
 
 Register an app with **Accounts in any organisational directory and personal
 Microsoft accounts**. Redirect URI (Web):
@@ -197,67 +154,71 @@ Delegated permissions: `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`,
 Microsoft hands back a new refresh token every time one is used, each good for
 90 days from its own issue, and Hearth stores each one as it arrives. A link in
 use stays linked; one Microsoft stops honouring (a password change, a revoked
-consent) tells the member to send /connect again rather than failing with an
-AADSTS code.
+consent) tells the member to link it again on Connect rather than failing with
+an AADSTS code.
 
-### 4. Services
+Both clients serve two purposes through the same callback: signing in to the
+dashboard, and a signed-in member linking their mailbox and calendar. They are
+told apart by a `purpose` claim in the signed state, so **no extra redirect URI
+has to be registered** in either console.
 
-- **Neon** — add Postgres from the Vercel Marketplace; it injects `DATABASE_URL`
+### 3. Services
+
+- **Neon**: add Postgres from the Vercel Marketplace; it injects `DATABASE_URL`
   and friends into the project, and every build migrates that database itself.
   Never `db:push` to it, before the first deploy or after: push records no
-  migrations, so the next build replays them all from the start, stops on the
-  first column that already exists, and every build after it does the same.
-  A database pushed while this README still advised it is safe: migrations
-  0000 to 0006 skip whatever is already there, so its next build only records
-  them. `drizzle.config.ts` prefers `DATABASE_URL_UNPOOLED` for DDL, since
-  pgbouncer in transaction mode is a poor host for migrations.
-- **Upstash QStash** — one recurring schedule, `0 * * * *`, POSTing to
-  `https://<your-deployment>/api/tick`. Copy both signing keys into Settings →
-  Scheduler (or the env). Hourly is deliberate: every tick wakes the Neon
-  compute and the free plan keeps it awake for five minutes afterwards, so a
-  tick every five minutes never lets it sleep. That is 0.25 CU around the
-  clock, 180 CU-hours a month against the 100 the free plan allows, after
-  which Neon suspends the database until the next month. Hourly ticks cost
-  about 16 CU-hours a month, every 15 minutes about 60. A reminder due
-  between ticks runs at the next one, so schedules belong on the hour, as the
-  built-in watchers are. The bot holds itself to this: it learns the tick
-  grid from QStash's own calls (a retry of a failed one lands off the grid,
-  so it counts only for a tick that left no record, and then at the time
-  that tick was due), `create_automation` refuses a cron that would not land
-  on a tick and offers the nearest that does, and Home marks any reminder
-  already off the grid with the tick it will really run at.
-  (Vercel Hobby cron is once-a-day minimum, which cannot drive reminders.)
-- **Tavily** — API key, 1k credits/month free.
-- **OpenWeatherMap** — optional; a free key from
+  migrations, so the next build replays them all from the start and stops on
+  the first column that already exists. A database pushed while this README
+  still advised it is safe: migrations 0000 to 0006 skip whatever is already
+  there, so its next build only records them. `drizzle.config.ts` prefers
+  `DATABASE_URL_UNPOOLED` for DDL, since pgbouncer in transaction mode is a
+  poor host for migrations.
+- **Upstash QStash**: optional, for scheduled jobs. One recurring schedule,
+  `0 * * * *`, POSTing to `https://<your-deployment>/api/tick`. Copy both
+  signing keys into Settings → Scheduler (or the env). Hourly is deliberate:
+  every tick wakes the Neon compute and the free plan keeps it awake for five
+  minutes afterwards, so a tick every five minutes never lets it sleep. That is
+  0.25 CU around the clock, 180 CU-hours a month against the 100 the free plan
+  allows, after which Neon suspends the database until the next month. Hourly
+  ticks cost about 16 CU-hours a month. A reminder due between ticks runs at
+  the next one, so schedules belong on the hour. Hearth holds itself to this:
+  it learns the tick grid from QStash's own calls (a retry of a failed one lands
+  off the grid, so it counts only for a tick that left no record, and then at
+  the time that tick was due), `create_automation` refuses a cron that would
+  not land on a tick and offers the nearest that does, and Home marks any
+  reminder already off the grid with the tick it will really run at. (Vercel
+  Hobby cron is once-a-day minimum, which cannot drive reminders.)
+- **Tavily**: API key, 1k credits a month free, for `web_search`.
+- **OpenWeatherMap**: optional; a free key from
   [home.openweathermap.org/api_keys](https://home.openweathermap.org/api_keys)
-  powers weather questions and the morning brief, cached so the free tier is
-  never dented.
-- **Google AI Studio** — a free Gemini key from
-  [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
-- **OpenRouter** — [openrouter.ai/keys](https://openrouter.ai/keys). Free models
-  are capped at 50 requests/day until you buy any credit, then 1000.
-- **Langfuse** — optional; a project's public and secret key from
-  [langfuse.com](https://langfuse.com) turn on tracing of every model call.
-  See [Observability](#observability).
+  powers `weather` and the morning brief, cached so the free tier is never dented.
+- **Google AI Studio**, **OpenRouter** or a **self-hosted** model: optional; see
+  [Model chain](#model-chain).
+- **Langfuse**: optional; a project's public and secret key turn on tracing of
+  every model call. See [Observability](#observability).
 
 ### Model chain
+
+Hearth needs a model of its own only for scheduled jobs: reminders, watches,
+goal check-ins and jobs handed to helpers, and the checks on what they write.
+Everything a member asks for goes through their own MCP client, so a deployment
+with no model at all still serves every tool; only `create_automation`'s jobs
+have nothing to run them.
 
 Three tiers, tried in order, each dropping out when unconfigured. The order is
 `LLM_ORDER` and is editable from **Settings** by moving tiers up and down, so
 the thing you read is the thing you change. Self-hosted leads by default, being
-the only tier where nothing leaves the house. OpenRouter comes next, for the
-better answers, and Gemini's free quota covers for it. An order saved in
-Settings stays as saved; the default only applies where none was.
+the only tier where nothing leaves the house. OpenRouter comes next, and
+Gemini's free quota covers for it.
 
-1. `LLM_BASE_URL` + `LLM_MODEL` — a self-hosted OpenAI-compatible endpoint
+1. `LLM_BASE_URL` + `LLM_MODEL`: a self-hosted OpenAI-compatible endpoint
 2. `OPENROUTER_API_KEY` + `OPENROUTER_MODEL`
 3. `GEMINI_API_KEY` + `GEMINI_MODEL`
 
 Models are picked from what each provider actually serves rather than typed by
-hand, and only tool-capable ones are offered, because a model that cannot drive
-tools fails at the worst moment instead of at configuration time. Before
-promoting a candidate, probe it with a real tool call and a typed choice, the
-two things every slot has to do:
+hand, and only tool-capable ones are offered. Before promoting a candidate,
+probe it with a real tool call and a typed choice, the two things every slot
+has to do:
 
 ```bash
 npm run probe -- openrouter '~deepseek/deepseek-flash-latest'
@@ -265,1014 +226,514 @@ npm run probe -- openrouter '~deepseek/deepseek-flash-latest'
 
 An id starting with `~` is OpenRouter's alias for a family's newest model, so
 the next DeepSeek Flash takes over without an edit. Quote it, or the shell
-reads the `~` as a home directory.
-
-It takes the provider's key from `.env.local`, or, when that holds the
-database URL and `TOKEN_ENC_KEY`, from the dashboard's store, so a key entered
-at /setup needs no copying out. It only reads the store; nothing in
-`.env.local` is imported into it.
-
-**On training:** whether a provider may train on your prompts is an account
-setting at `openrouter.ai/settings/privacy`, not a property of a model, and the
-OpenRouter API exposes no policy field to read. With training disabled
-OpenRouter simply will not route to providers that train, so **Test** next to
-each model is the practical answer: one that answers has not trained on you,
-one that is refused is being declined on your behalf, and a rate limit is
-reported as telling you nothing rather than being read as a verdict.
+reads the `~` as a home directory. The probe takes the provider's key from
+`.env.local`, or, when that holds the database URL and `TOKEN_ENC_KEY`, from
+the dashboard's store; it only reads the store.
 
 Each `*_MODEL` takes a comma-separated list tried left to right, so a tier can
 offer a fast model first and a stronger one behind it. Put `:free` models ahead
 of paid ones and the paid slot only ever answers when everything free has
-failed.
+failed. A rate limit, timeout, provider outage, or a model that cannot drive
+tools all collapse to the same behaviour: move to the next slot. The one
+exception is a run that has already done something that would double if done
+again (added to a list, set up a reminder): the next slot would start from the
+instruction again and do it twice, so the run ends there with a problem report
+saying what was done so far. `LLM_REASONING` (none, minimal, low, medium, high)
+is passed through as `reasoning_effort` when set.
 
-Order the chain on measured latency, not on price alone. Free OpenRouter
-endpoints are deprioritised under load, so the same model can serve in 5s or
-16s depending on the hour; a paid slot at the tail is what stops a bad hour
-turning into a failed reply. A rate limit, timeout,
-provider outage, or a model that cannot drive tools all collapse to the same
-behaviour: move to the next slot. The one exception is a turn that has already
-done something that would double if done again (added to a list, set up a
-reminder, sent an invitation, opened a ticket): the next slot would start from
-the message again and do it twice, so the turn ends there with a line saying
-what was done so far. One whose request ran out of time counts too, since it
-may have gone through, but is not said to be done. Writes that check for
-themselves first (a draft, a proposal, a calendar entry, a fact) do not stop
-the chain, and an unattended run that stops this way tells an admin instead
-of posting. Every model in the chain must support tool calling.
+**On training:** whether a provider may train on your prompts is an account
+setting at `openrouter.ai/settings/privacy`, not a property of a model. With
+training disabled OpenRouter simply will not route to providers that train, so
+**Test** next to each model in Settings is the practical answer: one that
+answers has not trained on you, one that is refused is being declined on your
+behalf.
 
-`LLM_REASONING` (none, minimal, low, medium, high) is passed through as
-`reasoning_effort` when set. Leave it empty for the provider default. Gemini's
-OpenAI-compatible layer ignores values it does not know and cannot switch
-thinking off on Gemini 3 models, so check token counts after changing it rather
-than assuming it took.
+The checks are structured calls to the chain (each claim supported or not; the
+draft invented anything or only says there is nothing new), asked first of the
+models that have lately been returning an object. Code turns the answers into
+keep or hold, so the judge is never handed a verdict to reach. A draft the claim
+check has passed whole is held only on an invention the judge is sure of
+(`CHAIN_POST_CONFIDENCE` in `lib/agent.ts`), and when the judge quotes the one
+statement it faults, that statement is cut and the rest judged again rather than
+the whole report held.
 
-### Typed decisions
-
-The yes-or-no questions behind the bot (whether an unaddressed group message
-is for it, whether a chat reply reports a change no tool made, whether each
-statement in a watcher draft is in its evidence, and whether the draft as a
-whole is) go to the chain as structured outputs, asked first of the models
-that have lately been returning an object. The post decision is two questions:
-is anything in the draft not in the evidence, and does the draft only say
-there is nothing new. Code turns the answers into post or skip, so the judge
-is never handed a verdict to reach, and never asked whether the writer obeyed
-its instruction: a judge that was once asked for a verdict held a whole brief
-back over a collection whose time had passed, which was the writer's selection
-to make and nothing the evidence lacked.
-
-The two grounding checks are not equals. The claim check asks about one
-statement at a time; the post decision asks about the whole draft at once,
-which makes it a union over everything the draft says and drifts up with the
-draft's length. A morning brief of six bullets, every one traceable to the
-mail it came from, was once held back on that question while the claim check
-had just passed all six of its statements. So a draft the claim check has been
-through and passed whole is held only on an invention the judge is sure of
-(`CHAIN_POST_CONFIDENCE` in `lib/agent.ts`): its doubt alone no longer holds
-a checked draft back, and the same brief with one invented figure is still held.
-And when the judge is sure, and quotes the one statement it faults, a checked
-draft is not held whole on it either: that statement is cut, as a claim that
-fails the check is, and what is left is judged once more on the full line, so
-the brief posts without it and an admin hears what was cut. A brief was once
-lost whole over a To do for a form that a later email in the same mailbox had
-thanked the household for submitting: the claim check passed the statement,
-because the form email says it, and the judge read it beside the later mail.
-The brief's instruction now sets such a request aside before sorting the mail.
-
-### 5. Deploy
+### 4. Deploy
 
 ```bash
 cp .env.example .env.local        # fill in at least the bootstrap
 openssl rand -hex 32              # -> TOKEN_ENC_KEY
 vercel --prod                     # the build applies drizzle/ migrations itself
-npm run set-webhook               # or connect the webhook from /setup instead
 ```
 
 The build runs pending migrations whenever `DATABASE_URL` is present in the
 environment, which is what makes the Deploy button a complete install. On
 Vercel only the production build does: a preview built from an unmerged branch
 shares production's database unless Neon gives each preview a branch of its
-own, and would migrate it before review (and drizzle, which applies only what
-is newer than its last migration, would then skip one stamped earlier that
-merged later). With a Neon branch per preview, set `MIGRATE_PREVIEWS=1` on the
-Preview environment. A plain local `npm run build` finds no database and skips
-that step; point a local database at the schema with `npm run db:migrate`.
-`db:push` is only for a throwaway database that no build and no `db:migrate`
-will ever touch: it records no migrations, so a later migrate against it fails
-on the first column that already exists.
-
-`drizzle-kit` and `set-webhook` both read `.env.local`, so secrets only have to
-live in one place locally. On Vercel they come from the project's environment
-variables.
+own. With a Neon branch per preview, set `MIGRATE_PREVIEWS=1` on the Preview
+environment. A plain local `npm run build` finds no database and skips that
+step; point a local database at the schema with `npm run db:migrate`.
 
 Turn **Deployment Protection → Vercel Authentication** off. It is on by default
-for new projects and would make Telegram, QStash and calendar apps bounce off an
-SSO redirect.
+for new projects and would make MCP clients, QStash and calendar apps bounce
+off an SSO redirect.
 
-## Day-to-day
+A fresh deployment, end to end: sign in with an address in `ADMIN_EMAILS`, add
+yourself and the family at /setup, sign in again as yourself, make a key on Home
+under **Claude and other MCP clients**, connect your client with the line shown
+there, and call `hearth_context`, `list_family_events` and `money_snapshot`.
 
-| Command | Effect |
-| --- | --- |
-| `/help` | What the bot can do |
-| `/connect` | DMs a personal link to link Google or Microsoft |
-| `/accounts` | List linked accounts |
-| `/unlink google` | Remove an account |
-| `/readonly google` | Let the bot read an account but never draft, send or add events through it; `/readonly google off` allows it again |
-| `/calendar` | The family calendar subscription URL; `/calendar new` (admin) replaces it if it has got out, and DMs the new one |
-| `/pending` | Everything in this chat waiting on a yes: your own email drafts here, dates found for the family calendar, and in a group the open questions |
-| `/activity` | What the bot changed in this chat lately, newest first, with who asked and how |
-| `/mcp` | DMs a personal key for the MCP endpoint; `/mcp new` replaces it, `/mcp off` revokes it |
-| `/whoami` | Your Telegram id |
-| `/members` | Who the bot answers to |
-| `/allow <id>` | Admin: let someone in, or reply to their message with `/allow` |
-| `/deny <id>` | Admin: revoke someone |
+## Connecting a client
 
-In a group, @mention the bot, open a message with its name ("Hearth, is it bin
-night?", or whatever the household has named it), or reply to one of its
-messages. A helper is called the same way, by its own name. Every group message
-is stored as context either way. Set `AMBIENT_MODE=on` to let the bot decide for
-itself whether an unaddressed message deserves an answer. The decision is a
-typed choice (reply, stay silent, unsure) from the head of the model chain,
-asked from both sides ("should it reply?", then "should it stay silent?") and
-acted on only when the two agree; unsure counts as silence, and every decision
-is logged.
+Every member connects their own client, and every client acts as that member.
 
-## Reading photos, scans and voice notes
+**With a key** (Claude Code, Cursor, anything driven by `mcp-remote`): sign in
+to the dashboard, open Home, name the key after the client under **Claude and
+other MCP clients**, and **Make a key**. The key is shown once, with the line
+that adds it to Claude Code:
 
-Send the bot a photo of a notice, a letter or an invitation and it reads the
-picture, not just the caption. A message with no text at all is
-still processed, which is the usual case for a snap of something on the fridge.
-PDFs and voice notes go the same way. An album is one message: the pages of a
-notice sent together get one answer that has read them all, in a group too,
-where only the page with the caption names the bot.
+```bash
+claude mcp add --transport http hearth https://<your-deployment>/api/mcp \
+  --header "Authorization: Bearer <key>"
+```
 
-Anything with a date in it becomes a **proposal** rather than a calendar entry:
-the bot shows what it found and waits for someone to say yes. Nothing the bot
-merely *found* reaches the shared calendar on its own, which is the same rule
-that governs outbound email.
+Make one key per client, so each can be revoked on its own without breaking the
+others. The list shows when each was made and last used; **Revoke** stops one at
+once.
 
-Only some models can read images. Gemini, DeepSeek Flash and MiniMax M3 can;
-the older `minimax-m2.7` cannot, and fails with a clear error the fallback
-simply steps past. Attachments that cannot be fetched or are of a type no model
-reads are dropped, and the bot answers on the text alone. Nothing is fetched
-until the bot is answering, so a stranger's file or a group photo nobody asked
-about costs no download, and a file that declares a type no model reads is
-never fetched at all.
+**With OAuth** (claude.ai's custom connectors, Claude Desktop's connectors, or
+`claude mcp add --transport http hearth https://<your-deployment>/api/mcp` with
+no header): the client is turned away with a pointer to the protected-resource
+metadata, registers itself, and sends you to Hearth's approval page. Signed out,
+you sign in first and come straight back. The page names the client as it named
+itself and the address it will send you back to; say yes only to a client you
+just started connecting yourself, since anyone can register under any name. A
+yes hands the client a key of its own, made in your name and listed on Home with
+your other keys as "<client>, via sign-in", where you revoke it like any other.
 
-Text files are read in code and handed to the model as text, because the
-model endpoints accept no file type beyond images, PDFs and audio. A calendar
-file (`.ics`, recognised by its content as well as its name) gets one thing
-more: its events are parsed here, with time zones, all-day dates and repeats
-worked out deterministically, and listed for the model; asked to add them, it
-calls `import_calendar_file` once and the whole file lands on the family
-calendar, duplicates skipped and repeating events reported rather than
-guessed at. A file is readable only in the message it arrives with, so send
-the request as the file's caption.
+A key reads `<member id>.<random>.<tag>`, the tag an HMAC over the rest under a
+key derived from `TOKEN_ENC_KEY`. A key this deployment did not mint is turned
+away on its tag before anything is read, so made-up keys sent every few minutes
+cannot keep the database awake. One whose tag checks must still match a stored
+SHA-256 digest; only the digest is kept, so the store cannot hand a key back
+out, and a revoked key, whose row is gone, stays dead. Replacing `TOKEN_ENC_KEY`
+voids every key. Keys issued before keys were made on the web had the same format
+and were carried over, labelled "Key from before keys were made on the web";
+revoke them on Home once their clients have a new one.
 
-A file attached to an **email** is a different path. `read_email` lists an
-email's attachments by filename, and `read_attachment` reads one: a PDF or a
-text file as its text (the PDF through the same extractor `read_url` uses), a
-calendar file as its parsed events. An image attached to an email cannot be
-read this way yet; the bot says so and asks for it as a photo in the chat.
-Something made from an email, a ticket above all, is made after the email and
-its attachments have been read, not from the inbox snippet: a renewal notice
-once became a board ticket with nothing in it but its subject line. The board
-tools can also change a ticket afterwards (`jira_update_issue`: title,
-description, due date) and copy an email's attachment onto it
-(`jira_attach_email_file`), so the notice sits with the job.
+A client is handed all 71 tools at once, and `hearth_context` beside them.
+`hearth_context` is the first call to make: who it is acting as, the household
+clock, the family and their linked accounts, the facts on file, your drafts, the
+event proposals and open questions with the ids the other tools want, your goals,
+the helpers and routines, and the latest reports from your scheduled jobs.
 
-**Saying a thing is done is not doing it.** A chat reply that reports a change
-(added, replaced, cancelled, sent) while no tool that changes anything ran, or
-only one that ran out of time before it was confirmed, is judged by a typed
-model call, the same shape as the ambient gate, and one that reports a change
-is sent back to the model with the note that nothing happened: act now, or say
-so. Should it insist a second time, the reply goes out with a line saying
-nothing was changed. After a write that ran out of time, which may or may not
-have gone through, the note says so instead and not to try it again, and the
-line says the change could not be confirmed. Events are also changed in place
-with `update_family_event`, so "replace" is one call and every subscribed
-calendar updates the same entry instead of showing a cancellation beside a new
-one.
+What a client has seen is its own: `new_mail` keeps markers per key, so asking
+one client "any new mail?" never spends what another of your clients, your
+scheduled jobs or your morning brief has not shown you. Nothing is posted
+anywhere on a client's behalf: what a tool returns is for the client to pass on.
 
-## Keeping watch
+## The morning brief and the money snapshot
 
-The bot is not only reactive. Two watchers come built in and are switched on
-in every household group without anyone asking — each an ordinary automation
-underneath that checks on a schedule and posts **only when there is something
-worth saying**:
+Both used to be scheduled posts. They are now reads a client asks for, gathered
+in code so they cost no model call of Hearth's own:
 
-- **Morning brief**, daily at 7am: what is on today, on the family calendar
-  and on each member's own (Google or Outlook), and what starts tomorrow, so
-  tonight's preparation is no surprise; what is coming up over the rest of the
-  fortnight, from the family calendar, each member's calendar, the reminders
-  set for those days and the board's due dates, so next Monday and this Friday
-  are in view from any day of the week; the mail that has arrived since the
-  last brief and is worth knowing about (appointments, notices, bills,
-  deliveries), sorted into what still asks for something and what only
-  informs (mail written to someone else, with the household only copied in,
-  asks it nothing and says whom it was to), with calendar-worthy dates
-  proposed for the family calendar;
-  anything overdue or due today on the board; the reminders set to go off
-  later in the day; the events proposed but still waiting on a yes; and the
-  weather. In the group it sweeps the linked mailbox and calendar of every
-  member Telegram says is in it, each mailbox on its own cursor via
-  `new_mail`, and marks each item from someone's own mail or calendar with
-  their name alone, "Dentist (Sam), 9:00 am", never the mailbox, the app or
-  the provider; the family calendar's items carry no name, and an event on
-  more than one calendar is listed once. It reads exactly what arrived since
-  the last brief, up to 20 a mailbox, and says how many more there were
-  rather than dropping them without a word. A mailbox or calendar that will
-  not answer is left out and reported to an admin, and its mail waits for the
-  next brief, so one account timing out never holds back the rest. "Today" means anything on during
-  the day, so the third day of a camp is on it too; tomorrow is only what
-  starts then, and coming up is what starts after it, to the end of the
-  fortnight counting today. A day with nothing on anyone's calendar, nothing
-  coming up, no new mail and nothing due gets no brief: the weather, tomorrow,
-  a reminder that will
-  speak for itself and a proposal Home already lists are context for a
-  brief, never the reason for one.
-- **Money snapshot**, Sunday at 6pm: the week's spending and the month so far
-  from PocketSmith, with the budget's pacing and the categories over it. Spend
-  is reckoned the way PocketSmith reckons it, by the side of the ledger each
-  category keeps: a payment filed under an income category (a tax payment,
-  say) is a deduction from income, reported as one and never as spend, and a
-  rebate filed under the expense it refunds comes off that spend. The post is
-  written for a phone: a line for the week (in, out, net) and one for the
-  month (spent, budget used, days in), then the week's categories, its largest
-  payments by business name with what a note says each was for, and the
-  categories over budget, all as bullets with the headline figures in bold.
-  It has no tables: Telegram has no table element, and the monospace lines
-  that stood in for one wrapped mid-row at phone width. A budget position comes
-  from PocketSmith's own analysis, in which a month's allowance is the budget
-  after rollover, so a category overspent earlier in the year can be allowed
-  nothing this month while still being budgeted: it reads "over by $X", the
-  categories in that state are named together once at the end, and only a
-  category with no budget at all is called "no budget set".
+- **`morning_brief`**: what is on today on the family calendar and your own
+  (Google or Outlook), what starts tomorrow, what is coming over the rest of the
+  fortnight (the family calendar, your calendar, your reminders and the board's
+  due dates), the mail that has arrived since your last brief, anything overdue
+  or due today on the board, your reminders later today, the events waiting on a
+  yes, the weather, and the questions still open for the family. "Today" means
+  anything on during the day, so the third day of a camp is on it too; tomorrow
+  is only what starts then. The brief keeps mail markers of its own, up to 20
+  messages a mailbox, and says how many more there were rather than dropping
+  them. A mailbox or calendar that will not answer is listed under
+  `could_not_read`, and its mail waits for the next brief. A quiet day says
+  `nothing_new`. `how_to_read` says how to give it: in parts, mail sorted into
+  To do and Heads up, requests a later email answered set aside, mail copied in
+  to the household treated as someone else's, and calendar-worthy dates proposed.
+- **`money_snapshot`**: the past seven days in, out and net with their categories
+  and largest payments, the month so far against the budget, and where each
+  budgeted category stands (see [Money](#money)).
 
-Home lists both under Reminders with a pause; neither can be deleted, since
-the next tick would only put it back. The tick also keeps them in step with
-their definitions in `lib/watchers.ts`, and leaves a room alone while someone
-unrecognised is in it — nothing is posted there, by any watcher, until they go.
-That includes someone who has never said a word: a bot cannot list a group, so
-before installing anything, and before every unasked post, the tick asks
-Telegram how many people are in the room and which allowed members are among
-them. A head count the household cannot account for holds the post, and an
-admin is told once, with how to vouch for them. Adding the bot to the school
-parents' group for one question does not start a morning brief there.
-
-**/watch** adds one to a DM, or switches a paused one back on:
-
-- `/watch morning`: the brief, in a DM as well, where it reads your own mailbox and calendar.
-- `/watch snapshot`: the money snapshot.
-- `/watch urgent`: **Needs you now**, hourly from 8am to 8pm. It reads the mail
-  that arrived since its last look, on markers of its own so the morning brief
-  still reports the same mail, and posts only what someone has to act on before
-  tomorrow morning: a deadline today or tomorrow, a change to today's plans, a
-  payment that failed, a reply someone is waiting on. Everything else waits for
-  the brief, and an hour with no new mail costs no model call. A mailbox that
-  will not answer is left for the brief to report once a day, not every hour.
-- `/watch subscriptions`: the 1st of each month at 6pm, the subscriptions and
-  bills that changed over the month (see [Subscriptions and bills](#subscriptions-and-bills)),
-  and nothing at all in a month when none did.
-- `/watch list`: what this chat is already watching.
-
-Watchers are grounded before they are clever. Each ready-made watcher fetches
-its data in code first, so an hour with nothing new never reaches a model at
-all. When there is something, the model only phrases it, with a handful of
-context tools: a payment arrives as payee, amount and category, with what it
-was for only when its note or a household fact says, and nothing about its
-purpose otherwise. Then post or skip is decided against the evidence, on
-grounding alone, with a confidence, by a second, tool-free call to the chain.
-The evidence opens with the household's clock, so a claim that something is
-on today is checked against the date rather than cut for want of one.
-The judge draws its own line (0.7 of its own confidence, in `lib/agent.ts`)
-and the tick posts what comes back as decided. A draft held
-back is logged and sent to an admin with the reason. The commands are registered with
-Telegram, so the `/` menu lists them; nothing to remember. Anything the
-templates don't cover is a sentence away:
-describe a schedule in plain words and it becomes a custom automation with
-read-only tools, the same right to stay silent, and the same post decision.
-It reads its author's own mailbox and nobody else's, even in the group: its
-problems and held-back drafts go to its author first. And it keeps its own
-markers for what is new, so an hourly watch over the mail never spends what the
-morning brief is there to report.
-
-What a watcher read counts as seen only once it has reached someone. A run that
-fails, reports a PROBLEM, has its post refused or runs out of time for the post
-decision leaves the mail new, so the next run tries it again; one that wrote
-something it cannot take back on the strength of it (a list item, a reminder)
-spends it whatever else happened, or the next run would write it twice, and a
-post the hourly cap then holds back goes to an admin as a draft. A failure that
-is the same every time would otherwise hold every later run on the same items
-for good, so a mailbox held at the same place for three runs and at least twelve
-hours is moved past what the first of those runs saw (anything newer keeps its
-chance), and an admin is told once which source and which span were skipped.
-Only a failure about what was sent counts towards that (a request the model
-rejects as it stands, a post Telegram cannot parse, a PROBLEM about the mail
-itself): a model chain, service or network that is down, rate limited, out of
-credit or refusing its key says nothing about the items, and a count left
-untouched for eight days is forgotten. A post longer than the model's output
-allowance goes to the next model in the chain first; the last one's, or the
-first one's when no later model answers at all, loses its cut-off last line
-rather than going out mid-bullet, still faces the checks, and an admin is told
-it went out short. A reply cut off before a whole line of any length is dropped
-as the fragment it is. The last model in the chain gets twice the run's
-allowance, and at least 4,000 tokens: the allowance counts a thinking model's
-reasoning, the tail of the chain is where those sit, and with no model after it
-a cut-off turn is a lost one.
-
-A post long enough to go in parts that fails after the first counts as posted,
-since posting it again would repeat what the chat already has, and an admin is
-told the rest did not go. A chat Telegram refuses outright (the bot removed,
-blocked or muted in the group) pauses its automation rather than failing every
-hour; a group made a supergroup while a run was posting is followed to its new
-id instead, and stays on.
+Neither is pushed on a schedule any more: a member who wants one asks their client
+for it, whenever suits.
 
 ## Sweeping email onto the calendar
 
-The morning brief already does this for the family group: each day's mail
-worth acting on is read, and every calendar-worthy date in it is proposed,
-tagged with the message it came from, so the same notice is never proposed
-twice however many mornings it turns up. Home lists the proposals under
-"Waiting on a yes", each with what it is and where it came from in words, and
-Add or No settles it.
+Dates found in mail become **proposals**, never calendar entries: a person says
+yes first, from a client (`accept_event_proposal`) or on Home. The brief's guide
+tells a client to propose any calendar-worthy date still ahead, tagged with the
+message it came from, and a scheduled job can do the same ("every weekday at 7am,
+check my inbox for anything with a date in it and propose it for the family
+calendar").
 
-A variation is a sentence away, and becomes a custom automation:
+The same notice is never proposed twice, however many mornings it turns up or
+however many clients read it. Before anything is proposed, code looks for the
+proposal already standing for that occasion: the same source; the same message
+on the same day, with or without the date a message holding several events adds
+after a slash; or the same title on the same day (case, spacing and punctuation
+aside) that is still waiting or was turned down. A match comes back as that
+proposal (`already_proposed`), or as `skipped` for one already settled, and
+nothing new is made. Past that, a find on a day that already holds something is
+handed back with that day's events and proposals for the client to judge, since
+the same occasion reaches several mailboxes under different subjects.
 
-> every weekday at 7am, check my inbox for anything with a date in it and
-> propose it for the family calendar
+Accepting says what happened, in `status`:
+
+- `added`: on the family calendar, with its event id.
+- `needs_confirmation`: the same day already has something on the calendar that
+  may be the same occasion, each named in `clashes` with its time, and the reason
+  says so. `to_confirm` is the exact call that adds it anyway
+  (`accept_event_proposal` with `confirmed_distinct: true`), and `if_same` the one
+  that settles it as a duplicate. Home shows the clash and an **Add anyway** button.
+- `failed`: and why: already accepted, turned down, its date passed, already on
+  the calendar, or no such proposal.
+
+An accept never leaves a proposal quietly still waiting, and the proposal is
+claimed before the event is added, so two yeses cannot add it twice. A proposal
+whose occasion has passed, or whose event reached the calendar another way,
+drops out of every list at once, and the next tick records why.
+
+## Jobs on a schedule, and their reports
+
+`create_automation` sets a job up in its member's name, with read-only tools,
+and says how often:
+
+- **always**, the default: on every time its cron gives.
+- **once**: a reminder or a job for later, given as a single local time (`at`)
+  and kept as that very moment: a cron has no year. The claim that starts its
+  run switches it off, and once it has had its run it leaves the list.
+- **until**: on a schedule until it finds what it is waiting for. "Let me know
+  when the school emails the camp dates" checks hourly, says nothing while there
+  is nothing, and once it reports, the report says it has stopped and the job
+  leaves the list.
+
+Nothing is posted anywhere. What a run finds is kept as a **report** for the
+member who set it up: `hearth_context` carries the last three days' newest few,
+`list_reports` reads back thirty days, and Home lists them. A report is one of:
+
+- **found this**: what the job wrote, through both checks, perhaps with a note
+  (a statement cut, the checks unavailable, the output allowance cutting its end);
+- **held back by the checks**: the unchecked draft, marked, with why;
+- **ran into a problem**: what went wrong, from the job's own PROBLEM line or a
+  failure. A mailbox held at the same place for three runs and twelve hours is
+  moved past, and a report says which span was skipped.
+
+What a job read counts as seen only once a report is kept or it deliberately kept
+none. A run that fails leaves the mail new, so the next run tries again; one that
+wrote something it cannot take back on the strength of it (a list item) spends it
+whatever happened. Each job keeps its own markers for what is new, so an hourly
+watch over the mail never spends what your brief or your clients are there to show.
+
+A job runs as its author: their mailbox alone. An author revoked or removed takes
+their jobs with them: they are paused before they run again. Home marks each job
+with **once** or **until it happens**, and every member pauses, resumes or
+deletes their own there.
 
 ## What it remembers
 
-The bot keeps household facts between conversations: routines, allergies, who
-goes where, sizes, standing arrangements. Two things file them: a member asking
-in the chat ("remember that bin night is Monday"), and a nightly pass that
-re-reads the previous day's talk for what deserves keeping. The pass files only
-what a family member said. Its own words, the morning brief and the watcher
-posts included, are context for reading replies and never a source.
+The household keeps facts: routines, allergies, who goes where, sizes, standing
+arrangements. A member's client files one when asked ("remember that bin night is
+Monday") with `remember`, corrects one by passing the old id, and retires one with
+`forget`. A rewording of a fact already on file is turned away at write time.
 
-When a fact would be worth keeping but the talk does not say who it is about,
-or it rests on a notice, bill or email rather than on a person, the pass does
-not guess: it puts a question to the family instead. The next morning brief
-asks it once, Home lists it under Remembered until it is answered, and any
-member can answer in either place. A yes keeps the fact in their words, a
-correction keeps the corrected version, a no keeps nothing. A yes that changes
-only a number or a "not" in a Known fact, such as "Ada is in year 4" against
-"Ada is in year 3", retires the old one, so the two do not both stand. A yes
-that corrects only part of one, such as "Ada is not allergic to eggs" against
-"Ada is allergic to peanuts and eggs", retires nothing, so the rest is not
-lost; both stay on Home for a member to forget by hand. One-off events and
-their venues, contact details from notices, and anything the calendar already
-holds are left out altogether.
+When a fact would be worth keeping but nobody has said who it is about, or it
+rests on a notice, bill or email rather than on a person, a client puts it to the
+family with `unsure` instead of guessing. The next morning brief asks it once,
+Home lists it until it is answered, and any member can answer from a client
+(`answer_question`) or on Home. A yes keeps the fact in their words, a correction
+keeps the corrected version, a no keeps nothing. A yes that changes only a number
+or a "not" in a Known fact retires the old one, so the two do not both stand.
 
-Scheduled posts read the same facts. A standing instruction remembered in the
-chat, such as leaving one sender's mail out of the morning brief, holds for the
-brief and the other watchers as it does for live replies.
-
-Home lists what is remembered with a Forget for each. Forgetting is soft, so a
-fact can be brought back by hand if a correction was wrong.
+Scheduled jobs read the same facts. A standing instruction remembered earlier,
+such as leaving one sender's mail out, holds for every job. Home lists what is
+remembered with a Forget for each; forgetting is soft, so a fact can be brought
+back by hand.
 
 ## Goals
 
-Some things take weeks: a trip to save for, a birthday party, a house to ready
-for sale. A goal holds one of those, and the bot keeps it moving between
-conversations rather than waiting to be asked.
+Some things take weeks: a trip to save for, a birthday party, a house to ready for
+sale. `create_goal` keeps one: what done looks like, the date it is meant for, and
+its plan as steps of its own, ticked off from a client or on Home, never one of the
+household's shared lists. A check-in is set up beside it, Sunday at 7pm unless asked
+otherwise: an ordinary scheduled job that reads the goal with `goal_status` and
+reports the progress, the next open step and the days left, ending with one question
+that would move it forward. Done or dropped closes it and removes its check-in;
+reopening one sets the check-in up again.
 
-> we want to save $6,000 for Bali by March
-> we booked the flights
-> how are we going with the party?
-
-`create_goal` keeps the goal, what done looks like and the date it is meant for,
-and its plan as steps of its own, ticked off in the chat ("we booked the
-venue" ticks "Book the venue") or on Home, never one of the household's shared
-lists. The bot drafts the steps itself when none are given, and shows them. A
-check-in is set up beside
-it, Sunday at 7pm unless asked otherwise: an ordinary custom automation that
-reads the goal with `goal_status` and posts the progress, the next open step and
-the days left, ending with one question that would move it forward. It goes
-through the same checks as any scheduled post, so a check-in can only say what
-the goal's record says.
-
-"We booked the flights" is progress in passing: while a goal is in progress in
-a chat, the goal tools are in reach whatever the wording, and the context names
-each goal with its id, so `update_goal` ticks the step and keeps the note on
-its record in the member's words. Done or dropped closes it and removes its
-check-in; reopening one sets the check-in up again. A group sees its own goals;
-a member's own chat, and their MCP client, sees theirs from anywhere as well. A
-goal set in a DM never turns up in the group, not even through a scheduled run
-the member set up there, which reads their mail but posts to the room; its
-steps are its own; Home shows it to its owner alone; and its check-in, listed
-with every reminder on Home, is called only "Goal check-in".
+A goal is its owner's alone: another member's client never sees it, and Home shows
+it to its owner only.
 
 ## Helpers
 
-A helper is a specialist the family talks to by name: Chef for meals, Treasurer
-for the money, Planner for the calendars, Researcher for finding things out,
-Secretary for turning a meeting (a voice note, a photo of the notes) into a
-recap with who does what by when, Coach for goals. Those six come ready to add
-by name alone ("add the Chef helper"); any other needs a role, written as its
-standing instructions.
-
-> Chef, what can I make with leeks and potatoes?
-> Planner, hand the plumber quotes to Researcher for tonight
-
-A message that opens with a helper's name is that helper's to answer, in a group
-as plainly as an @mention, and so is a reply to something it said. One bot
-speaks for all of them: the turn runs with the helper's role at the head of the
-prompt and its tool groups already in reach, and the reply goes out signed with
-its name, **Chef:** first, so a group can tell who is speaking. What a helper
-schedules in its own turn is its own, and posts under its name.
-
-`hand_off` gives a helper a job to do in the background, to post when it is
-done: research to look into, a week of dinners to plan, a check to make. It is
-a one-off automation, due at the next tick unless a time is given, listed with
-the reminders until it runs. It runs as any scheduled instruction does, with
-read-only tools and its post through the claim check and the post decision,
-signed with the helper's name once the checks have passed it. Handing work from
-one helper to another is the same call, so Planner can pass a question to
-Treasurer without anyone relaying it.
-
-A helper cannot be given a family member's name, or the bot's own: a message to
-Sam across the group chat must never be taken for one to a helper called Sam.
-The family is checked again on every message, so a helper whose name someone
-has come to share since (a new member, a rename) stops answering to it.
-Removing a helper leaves the jobs already handed to it to the bot itself.
+A helper is a specialist role: Chef for meals, Treasurer for the money, Planner for
+the calendars, Researcher for finding things out, Secretary for turning meeting
+notes into a recap, Coach for goals. Those six come ready to add by name alone
+("add the Chef helper"); any other needs a role, written as its standing
+instructions. `hand_off` gives a helper a job to do in the background: research to
+look into, a week of dinners to plan. It runs at the next tick unless a time is
+given, as that helper, with read-only tools and both checks, and its report carries
+the helper's name. Asked to talk to a helper by name, a client takes its role up
+itself; `hearth_context` lists each with its role. A helper cannot be given a family
+member's name, or Hearth's own. Removing one leaves the jobs already handed to it to
+Hearth itself.
 
 ## Routines
 
-Something the household does the same way each time is taught once and run by
-name after that.
-
-> keep that as the Sunday reset
-> do the Sunday reset
-
-`save_routine` writes the steps down as instructions, with the lists, people
-and details that make them repeatable; saving under a name already kept
-replaces its steps. Asked for by name, `run_routine` hands the steps back to the
-turn, which carries them out with its own tools and says what it did and what it
-skipped. A routine can run on a schedule too ("every Sunday at 5pm do the Sunday
-reset"), where it gets a scheduled run's read-only tools: anything that would
+Something the household does the same way each time is taught once and run by name.
+`save_routine` writes the steps down as instructions, with the lists, people and
+details that make them repeatable; saving under a name already kept replaces its
+steps. `run_routine` hands the steps back to the caller, which carries them out with
+its own tools. A routine can run on a schedule too ("every Sunday at 5pm do the
+Sunday reset"), where it gets a scheduled run's read-only tools: anything that would
 need a yes is drafted or proposed, never done.
 
-## Jobs for later, once or until something happens
-
-A reminder used to be a schedule, and "remind me tomorrow at 5pm" became one
-that came round every year. `create_automation` now says how often:
-
-- **always**, the default: on every time its cron gives.
-- **once**: a reminder or a job for later, given as a single local time
-  (`at`) and kept as that very moment: a cron has no year, and read as one,
-  next Christmas would come round this Christmas. The claim that starts its run
-  switches it off, and once it has had its run it leaves the list, whatever came
-  of it: held back from a room with a stranger in it, it is not sent hours late.
-  Resumed after a pause, it keeps its own time, or runs at the next tick if that
-  went by while it was paused.
-- **until**: on a schedule until it finds what it is waiting for. "Let me know
-  when the school emails the camp dates" checks hourly, says nothing while there
-  is nothing, and once it posts it says in code, under the post, that it has
-  stopped, and leaves the list. Its writer is told that posting ends it, so it
-  posts only once the thing has happened; a post the hourly cap held back does
-  not count as found. A find the checks held back stops it too, with an admin
-  told: what it read is spent with the held draft, and watching on would only
-  check, hourly and for good, for what has gone by.
-
-Home marks each with **once** or **until it happens**. A watch is a model call
-each time it runs, and one that searches the web spends a search: hourly, that
-is about 720 of Tavily's 1,000 free searches a month, so a watch for something
-slow (tickets going on sale, a price dropping) is better set to a few times a
-day.
-
 ## Shared lists
-
-> add milk and eggs to the shopping list
-> what's on the shopping list?
-> got the milk
 
 Lists are created on first mention and addressed by name, so "packing list" and
 "hardware list" work without setup. Ticking off matches on substring, so "milk"
 ticks off "2L milk". `clear_list` removes only the ticked items unless told
-otherwise, which is the usual tidy-up after a shop.
+otherwise, which is the usual tidy-up after a shop. Home shows everything still to
+get and the ten most recently added ticked items; the rest are a click away.
 
 ## Recipes
 
-> put the ingredients for this on the shopping list: <a recipe link>
-
 `read_recipe` reads the recipe most recipe sites publish in a standard form
-(schema.org's Recipe, in the page's JSON-LD): its name, what it serves, how long
-it takes, the ingredients exactly as written and the method, without the life
-story above it. The model then adds what the household needs to the shopping
-list. A page without one says so, and `read_url` reads it as a page instead; a
-photographed recipe is read like any photo. It opens links on the same terms as
-`read_url`: once a turn has read outside text, only a link that was there to be
-read. Talk of recipes, meals and dinner brings it into reach, and Chef starts
-with it.
+(schema.org's Recipe, in the page's JSON-LD): its name, what it serves, how long it
+takes, the ingredients exactly as written and the method, without the life story
+above it. A page without one says so, and `read_url` reads it as a page instead.
 
 ## Money
 
-One optional integration, read-only and household-wide rather than per member,
-since one key covers the household's accounts: **PocketSmith**
-(`POCKETSMITH_DEVELOPER_KEY`), the categorised view across every account
-connected there, plus budgets. It is the only bank feed. An Up Bank feed once
-sat beside it, listing the same transactions a second way with none of the
-notes, and the model kept answering from the wrong one; it went, and the hourly
-2Up watcher with it (the tick removes one left over).
+One optional integration, read-only and household-wide: **PocketSmith**
+(`POCKETSMITH_DEVELOPER_KEY`), the categorised view across every account connected
+there, plus budgets. It is the only bank feed.
 
-> how much have we spent this month?
-> what did we buy on the 16th?
-> what do the ones with "Ada" in the note come to this month?
+`list_transactions` lists them one by one, each with what the household wrote on it
+in PocketSmith (its note, memo and labels), and a search finds a word in any of those
+as well as in the payee, category or account. Spending summaries **exclude
+transfers**, and spend is reckoned the way PocketSmith reckons it, by the side of the
+ledger each category keeps: a payment filed under an income category (a tax payment,
+say) is a deduction from income, never spend. Either follows every page of the
+range, up to 5,000 transactions, and says so when a range holds more.
 
-`list_transactions` lists them one by one, each with what the household wrote
-on it in PocketSmith (its note, memo and labels), and a search finds a word in
-any of those as well as in the payee, category or account. Its totals sum every
-match, transfers included, so whether a set of transactions nets to nothing is
-read from the tool rather than added up by the model. Spending summaries
-**exclude transfers**: money moved between your own accounts is not spending,
-and counting it would roughly double every total. Either follows every page of
-the range, up to 5,000 transactions; a range holding more is summed short and
-says so, rather than passing part of it off as the whole.
+**Budgets.** PocketSmith's allowance for a month is the budget *after rollover*, so a
+category overspent earlier in the year can be allowed $0 this month while still being
+budgeted. `budget_summary` names three states exactly, and never confuses them:
 
-Financial answers are subject to the same group rule as everything else: a room
-holding anyone unrecognised gets no reply at all.
+- **no budget set**: the category has no budget at all;
+- **nothing left after rollover**: budgeted, with an allowance of $0 this month. Never
+  called "no budget set", and never listed as overspent on its own, whatever
+  PocketSmith counts as over a zero;
+- **over by $X**: an allowance above $0, spent past.
+
+Each category's position says which, and the result lists `over_budget`,
+`nothing_left_after_rollover` and `no_budget_set` together, worked out in code.
 
 ### Subscriptions and bills
 
-> what subscriptions are we paying for?
-> did Netflix go up?
-> anything we could cut?
-
-`recurring_payments` finds them in the feed in code, never by a model's reading
-of a list: a payee paid again and again a steady distance apart (weekly,
-fortnightly, monthly, quarterly or yearly), three payments at least, two for a
-quarterly or yearly one, with nearly every gap fitting the same rhythm. Two
-charges on one day count as one payment, money moved between the household's
-own accounts is not a bill however steady, and a payee is known however the
-bank spells it on the day. Each comes with how often, what it usually costs and
-comes to a month, when the next is due, a price change at its last payment, new
-in the month it is first seen often enough to count, and overdue once its next
-payment is late by half an interval (cancelled, moved, or late), with the day
-it became so. The monthly total is added up in code, over the ones not overdue.
-`/watch subscriptions` posts the month's changes on the 1st, each once: a new
-price paid that month, a new bill, and one that became overdue that month,
-which for a quarterly or a yearly bill can be weeks after it was due.
+`recurring_payments` finds them in the feed in code, never by a model's reading of a
+list: a payee paid again and again a steady distance apart (weekly, fortnightly,
+monthly, quarterly or yearly), three payments at least, two for a quarterly or yearly
+one. Each comes with how often, what it usually costs and comes to a month, when the
+next is due, a price change at its last payment, new in the month it is first seen,
+and overdue once its next payment is late by half an interval. The monthly total is
+added up in code.
 
 ## Finding a time
 
-> when are we all free for a two-hour lunch next weekend?
-
-`find_free_time` reads the asker's linked calendars, or in the family group
-everyone's there, with the family calendar, and gives the stretches free for
-long enough within the hours and days asked (8am to 8pm, any day, unless told
-otherwise). The gaps are worked out in code from the busy times, so overlaps are
-never missed and no free afternoon is invented. All-day entries (a birthday,
-the holidays) do not block time; they are listed by day so they can be weighed.
-A calendar that holds more than one listing can read stops the search where its
-listing stops, and says so, rather than calling the rest free. Everyone's
-calendars are read only where everyone's mail is: in the family group, with
-nobody unrecognised there.
+`find_free_time` reads your own linked calendars and the family calendar, and gives
+the stretches free for long enough within the hours and days asked (8am to 8pm, any
+day, unless told otherwise). The gaps are worked out in code from the busy times, so
+overlaps are never missed and no free afternoon is invented. All-day entries do not
+block time; they are listed by day so they can be weighed. Another member's calendar
+is never read.
 
 ## Notion
 
 `NOTION_TOKEN` is an internal integration token from
 [notion.so/my-integrations](https://www.notion.so/my-integrations).
 
-**The token grants nothing on its own.** Every page and database has to be
-shared with the integration by hand, in Notion, under the page's `⋯` menu →
-Connections. Anything unshared returns an *empty result* rather than an error,
-so a missing page looks like a broken query. The tools say as much when a search
-comes back empty.
-
-> what's on my travel plans?
-> add "read the tax guide" to my reading list
+**The token grants nothing on its own.** Every page and database has to be shared
+with the integration by hand, in Notion, under the page's `⋯` menu → Connections.
+Anything unshared returns an *empty result* rather than an error, so the tools say
+as much when a search comes back empty.
 
 The API version is pinned to `2025-09-03`. That release split a database into a
 container plus one or more data sources, so queries address a `data_source_id`,
-which is why `notion_query_database` resolves a name to a data source first.
-Bumping the version is a breaking change, not an upgrade.
-
-Writes are **additive only**: the client can append paragraphs to a page and has
-no way to edit or delete anything already there.
+which is why `notion_query_database` resolves a name to a data source first. Bumping
+the version is a breaking change, not an upgrade. Writes are **additive only**: the
+client can append paragraphs to a page and has no way to edit or delete anything.
 
 ## Jira
 
-The household board, for the jobs that need tracking rather than a shopping
-list: rates, renewals, tax, repairs.
-
-> what's on the board?
-> what's overdue?
-> add "fix the gutter" to the board, due end of September
-> mark HTL-344 done
+The household board, for the jobs that need tracking rather than a shopping list:
+rates, renewals, tax, repairs.
 
 **Use a plain API token, not a scoped one.** At
 [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens),
-"Create API token" works against `JIRA_BASE_URL` with basic auth. "Create API
-token **with scopes**" does not: a scoped token has to be routed through
-`api.atlassian.com/ex/jira/{cloudId}` instead and returns 401 against the site
-URL, which looks exactly like a wrong password.
+"Create API token" works against `JIRA_BASE_URL` with basic auth. "Create API token
+**with scopes**" does not: a scoped token returns 401 against the site URL, which
+looks exactly like a wrong password.
 
-The bot can create issues, move them between statuses and comment. It **cannot
-delete**: no tool exposes deletion and the client has no code path for it.
-Moving an issue goes through Jira's transitions rather than setting a status
-directly, so an unreachable target reports what *is* reachable from where the
-issue currently sits.
-
-Free-text search terms are escaped before they reach JQL, so a quote in a
-message cannot rewrite the query or reach another project.
+Issues can be created, changed, moved between statuses and commented on, and an
+email's attachment copied onto one (`jira_attach_email_file`). There is **no
+delete**: no tool exposes it and the client has no code path for it. Moving an
+issue goes through Jira's transitions, so an unreachable target reports what *is*
+reachable from where the issue sits. Free-text search terms are escaped before they
+reach JQL, so a quote cannot rewrite the query or reach another project.
 
 ## What it changed
 
-Every write a tool makes that goes through is kept as one line a person can
-read, with who asked, where, and how: in the chat, on a schedule, in the
-nightly memory pass, through an MCP client, or on Home. A tool that posts a line
-in the chat has already said it in the household's words, and that line is the
-record; the rest are worded from what was asked and what came back ("added
-milk, eggs to the shopping list", "drafted an email to the school office,
-waiting on a yes"). A write that failed changed nothing and is not kept, and a
-record that cannot be written never fails the turn that made the change.
+Every write a tool makes that goes through is kept as one line a person can read, on
+the record of the member it was done for, with how it was asked for: through an MCP
+client, on Home, or by one of their scheduled jobs. A write that failed, or that
+changed nothing after all (a proposal already standing, an accept waiting on a
+confirmation, a fact already known), is not kept, and a record that cannot be written
+never fails the call that made the change.
 
-> what have you done today?
-> did you put the dentist in?
-
-`recent_activity` answers those from the record rather than from the model's
-memory of the conversation, and `/activity` lists the latest ten. Both keep to
-the chat they are asked in. What a member's MCP client changed is on their own
-record, never the group's, though the client acts in the group they talked in
-last. Home lists the latest fifteen from the family's groups, the nightly memory
-pass and the viewer's own chats: someone else's private chat, their drafts and
-their calendar, is theirs to look back over. The record keeps ninety days.
-
-## Its name and manner
-
-Settings → Behaviour gives the bot a name (`ASSISTANT_NAME`, Hearth until it is
-set) and a manner (`ASSISTANT_PERSONA`): "warm and brief, with a dry sense of
-humour". The name is what it calls itself, and in a group a message that opens
-with it ("Pip, what's on?", "hey Pip ...") is answered as an @mention would be;
-the name merely mentioned later ("I told Pip") is not. A name is one or two words
-of letters, so it can be called and found again. The manner shapes how a chat
-reply sounds and nothing else: it sits under the rules, the grounding above all,
-and the scheduled posts keep their own plain style.
+`recent_activity` answers "what have you done today?" or "did you put the dentist
+in?" from the record rather than from anyone's memory of the conversation. Each
+member sees their own record, never another's, on Home and from their clients. The
+record keeps ninety days.
 
 ## The web dashboard
 
-The site root is a sign-in screen, then **Home**: anything the bot has
-proposed and is waiting on a yes for, listed with when it is, which chat it
-was proposed in and what was found, then the month calendar with what's next,
-the reminders that are running and the shared lists beneath it. Home is not
-read-only: any recognised member can add or decline a proposal, cancel an
-event, pause, resume or delete a reminder, and tick off, add or remove list
-items or clear a list's ticked ones — the same things they could ask the bot
-to do, one click closer. A list shows everything still to get but only the
-ten most recently added of its ticked items, so a year of weekly shops does not
-pile up there. The rest are a click away: nothing records when an item was
-ticked, so one that sat on the list for a while can drop behind those ten the
-moment it is ticked. The list of proposals only ever holds live questions: a
-proposal whose occasion has passed, or whose event has since reached the
-calendar another way, drops out at once, and the next tick records it as
-expired or superseded.
+The site root is a sign-in screen (Google or Microsoft), then **Home**: anything
+waiting on a yes (your own email drafts, with Send and Discard, and the event
+proposals any member can settle), your reports, the month calendar, your goals, next
+up, your reminders, the shared lists, what is remembered and the questions still
+open, the helpers, what was changed in your name lately, and your MCP keys. Home is
+not read-only: everything on it is something you could ask a client to do, one click
+closer.
 
-Waiting on a yes also holds the signed-in member's own email drafts, as they
-will be sent, with Send and Discard. The click is the same yes as "send it" in
-the chat: the draft is claimed first so two clicks cannot send it twice, goes
-from its writer's own mailbox, and is handed back to try again if the provider
-refuses it, or kept as sent if the send ran out of time and may have gone.
-Nobody sees another member's drafts there, since only the writer can send one.
-Below the calendar come the **Goals** in progress, each with its steps to tick
-off and its latest progress, and Done or Drop to close it; the **Helpers** the
-household has, each with what it looks after; and at the foot of the page,
-**Lately**, what the bot changed and for whom (see
-[What it changed](#what-it-changed)). Admins also get **System** and
-**Settings**; for everyone else Home is the only destination, so no tabs are
-shown at all. An admin landing on a deployment with no bot token is redirected
-to **/setup**, the first-run guide.
+**Connect** is where a signed-in member links their Google or Microsoft account, makes
+one read-only (read, never draft, send or add events through it) or unlinks it, and
+finds the family calendar's subscription address. Linking acts for whoever is signed
+in, never for whoever a link was sent to, and an account the household already knows
+as another member's is turned away. Signing in also completes the link whenever the
+provider hands back a refresh token, though it only fills a gap or refreshes the same
+address, never repointing a link at a different account.
 
-The calendar leads because it is the thing the household actually wants to
-look at. It is a real month grid, Monday-first, always six weeks tall so
-flicking between months never moves the page, with events placed on their
-Melbourne day rather than their UTC one, and multi-day events repeated across
-each day they cover. A cell has room for the start of a title and little
-more on a phone, so tapping a day lists its events in full beneath the grid.
+An address is recognised if it is in `ADMIN_EMAILS`, or an admin recorded it against a
+member, or that member linked a mailbox with it. Admin members get **System** and
+**Settings** as well; an admin landing on a deployment with nobody in the family yet
+is sent to **/setup**. The check happens on every request, not only at sign-in: the
+session cookie only says who signed in, so a revoke or a demotion takes effect on the
+next click. **Sign everyone out** on Settings ends every session at once and voids
+every account link under way. Sessions, OAuth state, MCP key tags and the MCP OAuth
+flow are each signed with their own key, derived from `TOKEN_ENC_KEY`.
 
-Sign-in reuses the Google and Microsoft clients already configured for member
-linking. Both flows come back through the same provider callback and are told
-apart by a `purpose` claim in the signed state, so **no extra redirect URI has
-to be registered** in either console. Linking forces Google's consent screen,
-because that is the only way to be handed a refresh token; signing in does
-not, so a returning admin picks an account and is through, and only a first
-sign-in still consents (and, as below, links). For a recognised member, signing in also
-completes the mailbox link whenever the provider hands back a refresh token —
-to the family, the web button and /connect are the same ceremony — though it
-only fills a gap or refreshes the same address, never repointing an existing
-link at a different account.
+Admins manage the family on Settings: add someone by name and the address they sign in
+with, change an address, allow, revoke, promote or remove. Adding an address already
+in the family renames that person and changes only what was filled in. The **last
+admin cannot be revoked, demoted or removed**, only succeeded, so the house cannot
+lock itself out. Removing someone takes their keys, links and drafts with them, and
+pauses their scheduled jobs.
 
-An address is recognised if it is in `ADMIN_EMAILS`, or an admin recorded it
-against a member, or that member linked a mailbox with it. Admin members get the
-admin view. Everyone else is signed in by the provider and then turned away,
-because the check happens on the way back rather than the way out. It happens on
-every request after that too: the session cookie only says who signed in, so a
-revoke or a demotion takes effect on the next click, not when the cookie runs
-out twelve hours later. For a session left open somewhere it should not be,
-**Sign everyone out** on Settings ends every session at once, the admin's own
-included, and voids every /connect link not yet used. Sessions and OAuth state
-are each signed with their own key, derived from `TOKEN_ENC_KEY`, and carry a
-digest of a stored epoch that the button replaces, so ending them never means
-replacing the key that decrypts every stored refresh token and setting. The
-epoch is read only once the signature has checked, so a made-up cookie or link
-costs no database read, and the sign-in state anyone can ask for carries none.
+System shows the chain's health over a week (per slot: how many calls it answered and
+how quickly, how many times it was skipped and why), which models ran the scheduled
+jobs, what was changed each day of the fortnight and how, every MCP key with whose it
+is and when it was last used, every reminder with its owner and schedule, and **Last
+tick**: when QStash last called the scheduler, flagged once three of its intervals
+have passed without one.
 
-Admins manage the family from the same page: add someone by Telegram id and
-name, optionally with an email so they can sign in before linking anything,
-then change their email, allow, revoke, promote or remove. Adding an id that
-is already in the family renames that person and changes only what was filled
-in, so it never clears an email, takes admin away or lets back in someone who
-was revoked; Allow is for that, and so is adding them at /setup, whose whole
-point is letting people in. Revoking takes admin with it. A founding member
-from `ALLOWED_TELEGRAM_IDS` cannot be revoked or removed here, because the env
-seed would let them back in on their next message and the change would be a
-lie — and the **last admin cannot be revoked, demoted or removed at all**, only
-succeeded, so the house cannot lock itself out.
-
-System shows message volume over a fortnight, which model in the chain
-actually answered (the head answering nearly everything is the healthy shape),
-every reminder with its schedule, and any chat currently muted by an
-unrecognised person. Two diagnostics sit beside those. **Last tick** is when
-QStash last called the scheduler, with the cadence read off its last two
-calls (retries aside), and flagged once three of those intervals have passed
-without one, because a scheduler that has gone quiet otherwise shows up only
-as reminders not arriving. **Chain health** is every model call of the last
-seven days, per slot: how many it answered and how quickly, how many times it
-was skipped for the next slot and why (rate limited, timed out, no reply,
-provider error), and how many chat replies were sent back for reporting a
-change no tool had made. Integration status lives in Settings instead, as a
-live dot beside the keys that drive each service.
-
-Settings groups fold to a line each, showing the live dots, how many keys are
-set and the values that are safe to show; a group opens on a click, or on its
-own when an integration in it is failing. A value is trimmed and checked
-before it is stored: a time zone has to be one a clock knows, and a setting
-with a fixed set of answers takes only those, because a bad time zone that
-got in would break every page that shows a date, Settings included. One that
-somehow gets in anyway falls back to Melbourne time with a warning in the log.
-Editable settings are a **fixed allowlist**. `DATABASE_URL`, `TOKEN_ENC_KEY`
-and `ADMIN_EMAILS` are deliberately not on it, so a stolen session cannot
-repoint the deployment at another database or lock the owner out. The Telegram
-token, webhook secret and founding members *are* editable — an admin session
-can already manage the family, so hiding the bot's own wiring bought nothing —
-and Settings shows what Telegram thinks of the bot, with one button to point
-the webhook back at this deployment after a change. A new bot token is kept
-only once Telegram vouches for it, whether it is pasted into Settings or
-/setup, so a paste error cannot silently kill the bot. Stored values are
-AES-256-GCM encrypted and are **never sent back to the browser** for
-credential-shaped keys. Every setting has exactly one home: the deployment's
-environment seeds a key the first time it is seen, and the store owns it from
-then on, with the env var never read again. Removing a setting leaves it
-unset, whatever the environment still says. The store is read at the start of
-every request, on every instance, so a change made in Settings applies to the
-next message or tick; nothing is cached per instance, and the page shows what
-the store holds rather than what one instance last loaded. The webhook and the
-tick read it only once the caller has passed a first check against what the
-instance already holds; a caller that fails it gets one fresh look at the
-store an hour, in case the secret changed elsewhere, and callers that reach a
-fresh instance together share its first read. The calendar feed treats its
-token the same way, `/api/mcp` checks a key's tag before it looks the key up
-(see below), and a session cookie or an OAuth state is checked against its
-signature before the epoch it carries is looked up. Someone fetching junk from
-any of them every few minutes cannot keep the database awake and run out the
-free plan's compute hours.
-
-## Claude, and anything else that speaks MCP
-
-Everything the bot can do is also an [MCP](https://modelcontextprotocol.io)
-server at `/api/mcp`, so Claude Code, Claude Desktop or any other MCP client can
-work the family calendar, the shared lists, what the household remembers, each
-member's mail and calendar, the money feed, Notion, the board and the reminders
-directly. Send `/mcp` to the bot and it DMs a key and the line that connects it:
-
-```bash
-claude mcp add --transport http hearth https://<your-deployment>/api/mcp \
-  --header "Authorization: Bearer <the key it sent you>"
-```
-
-The key *is* the member. Every call runs as whoever holds it — their mailbox and
-never another member's, their calendar, their name on what it writes — so it is
-only ever sent in a DM, and `/mcp off` revokes it. Only the SHA-256 of a key is
-kept, which is why `/mcp` on its own reports what is there rather than quietly
-reissuing and breaking whatever is connected; `/mcp new` replaces it and stops
-the old one working. A member who is denied takes their key with them, like
-every other door here.
-
-A key reads `<member id>.<random>.<tag>`, the tag an HMAC over the rest under a
-key derived from `TOKEN_ENC_KEY`. A key this deployment did not mint is turned
-away on its tag before anything is read, so made-up keys sent every few minutes
-cannot keep the database awake. One whose tag checks must still match the
-stored hash, which is what `/mcp new` and `/mcp off` change, so a replaced or
-revoked key stays dead. Keys issued before keys carried a tag no longer work:
-each member sends `/mcp new` once and reconnects with the key it sends.
-Replacing `TOKEN_ENC_KEY` voids every key the same way.
-
-A key travels as a header, which is what Claude Code, Claude Desktop, Cursor and
-anything driven by `mcp-remote` take. Custom connectors on claude.ai want OAuth
-and cannot be given a header, so that one is not a way in.
-
-A client is handed 68 of the 70 tools at once rather than the routed subset a
-chat turn sees: `more_tools` exists so a small model can start from the 23 in
-the core and widen, and a capable client picks well from a long list. The two
-that mean nothing down this pipe are left out — `more_tools` itself, and the
-import tool that reads a calendar file attached to a Telegram message.
-
-What a chat turn gets for free, a client has to ask for. `hearth_context` is the
-first call to make: who it is acting as, the household clock, the family and
-their linked accounts, the facts on file, and the drafts, event proposals and
-open questions with the ids the other tools want.
-
-Nothing changes about how the household hears of it. A tool that announces
-itself still says so in the family chat, so an event added through Claude turns
-up in the group and not only on the calendar, and mail still waits for a yes.
-What an MCP client has seen is its own: `new_mail` keeps a marker per member's
-client, so asking Claude "any new mail?" never spends
-what the morning brief was going to tell the family. Nobody in the group asked
-for a posted line, so it is held to the watchers' rule:
-while Telegram's head count there includes people the household cannot account
-for, it goes to the member's own chat with the bot instead.
-The room is the group the member talked in last, of those the bot is still in
-and nobody unrecognised is in, or else the member's DM with the bot. It is never
-simply the oldest group on record, which may be a test room the bot has left, or
-the parents' room, whose summary a teenager's client has no business reading.
-`hearth_context` names that room, so a client does not tell its user the family
-has heard when the notice went to the parents.
-The transport is stateless streamable HTTP: nothing is remembered between
-calls, and an idle endpoint costs nothing.
+Settings groups fold to a line each, showing live dots, how many keys are set and the
+values that are safe to show. Editable settings are a **fixed allowlist**:
+`DATABASE_URL`, `TOKEN_ENC_KEY` and `ADMIN_EMAILS` are deliberately not on it, so a
+stolen session cannot repoint the deployment at another database or lock the owner
+out. Stored values are AES-256-GCM encrypted and are **never sent back to the
+browser** for credential-shaped keys. The store is read at the start of every request,
+on every instance, so a change applies to the next call or tick. The tick, the
+calendar feed and `/api/mcp` check a caller against what the instance already holds
+before reading the store or the database, so someone fetching junk every few minutes
+cannot keep the database awake and run out the free plan's compute hours.
 
 ## Observability
 
-With `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` set,
-every model call is traced to Langfuse: the prompt and reply, each tool call
-and its result, tokens, timing, and the watcher post decisions with their
-confidence. Each piece of work is a trace of its own, named for what the bot
-was doing: a chat turn is `hearth.chat`, a scheduled run `hearth.watcher`, the
-nightly pass `hearth.sweep`, and the calls inside one (the claim check, the
-post decision) nest under it rather than renaming it. Traces are grouped into a
-session per chat and carry the member's Telegram id, so one bad reply can be
-followed back to the exact tool result it misread. The root of a run says what
-it was given and what came of it: a turn's input is the message and its output
-the reply; a watcher run's input is the instruction, facts, data and tool
-results its checks judged the draft against, its output what was posted or the
-draft held back, and its metadata the outcome (`posted`, `held back`,
-`skipped`, `nothing new`, `not run`, `failed`), the decision and its
-confidence, and how many claims were checked. A held-back or failed run is
-marked as a warning or an error, so it can be found after the platform's logs
-have gone. The ambient gate and the chat summary are runs of their own too
-(`hearth.gate`, `hearth.summary`), so every trace has one root observation
-holding its overall input and output, which is where Langfuse v4 reads them.
-Tracing is registered once at server start from `instrumentation.ts` and is
-inert without the keys; the OpenTelemetry modules are not even loaded.
+With `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` set, every
+model call is traced to Langfuse: the prompt and reply, each tool call and its result,
+tokens, timing, and the checks on each scheduled report with their confidence. Each
+scheduled run is a trace of its own, `hearth.watcher`, and the calls inside it (the
+claim check, the keep-or-hold decision) nest under it rather than renaming it. The
+root of a run says what it was given and what came of it: its input is the
+instruction, facts and tool results its checks judged the draft against, its output
+what was kept or the draft held back, and its metadata the outcome (`kept`, `held
+back`, `skipped`, `not run`, `failed`), the decision and its confidence, and how many
+claims were checked. Tracing is registered once at server start from
+`instrumentation.ts` and is inert without the keys.
 
-Two things worth knowing. Traces carry the family's messages and mail; set
-`LANGFUSE_RECORD_CONTENT=off` to keep only the shape of each call, which also
-keeps a run's input, output and any reason that quotes a draft off its root.
-And the keys are environment variables, not dashboard settings, because the
-tracer starts before the database is read. The integration is built for
-Langfuse v4: ingestion goes over OpenTelemetry through `@langfuse/otel` 5.4 or
-later (5.13 installed), a run's session, tags and name are propagated before
-its root observation opens, and its user as soon as it is known, so every
-observation under it carries them, the generations whose cost a session adds
-up included, and a metadata value over Langfuse's 200-character limit is cut
-to fit rather than dropped. Nothing uses the legacy `langfuse` SDK, the old
-ingestion endpoint, trace-level input/output setters or the v1 read endpoints.
-`tests/langfuse-v4.test.ts` guards that contract, down to every model call in
-the code sitting inside `traced()`, and `tests/telemetry.test.ts` checks what
-`traced()` and `traceRun()` propagate and what reaches Langfuse with content
-recording on and off.
+Traces carry the family's mail; set `LANGFUSE_RECORD_CONTENT=off` to keep only the
+shape of each call. The keys are environment variables, not dashboard settings,
+because the tracer starts before the database is read. The integration is built for
+Langfuse v4 (`@langfuse/otel` 5.4 or later, 5.13 installed); `tests/langfuse-v4.test.ts`
+guards that contract, down to every model call in the code sitting inside `traced()`.
 
-Inside Langfuse, an LLM-as-a-judge rule ("Groundedness of watcher posts")
-scores watcher runs against their evidence. The root observation of a
-`hearth.watcher` trace is the pair it needs, the evidence as input and the post
-or held draft as output, so the rule targets that root (trace name
-`hearth.watcher`, root observation) and filters on its metadata `draft` being
-`yes`, which marks a run that wrote a draft and put it to the checks; a run
-that found nothing new, or said SKIP, has nothing to judge. The judge should
-be a model outside the Gemini family that writes the posts, and one that
-returns structured output reliably: an evaluator that cannot shape its answer
-records no score at all. A trace scored *Not grounded*
-or *Somewhat grounded* is the next case for `evals/`.
+An LLM-as-a-judge rule in Langfuse ("Groundedness of scheduled reports") can score
+runs against their evidence: target the root observation of `hearth.watcher` traces
+whose metadata `draft` is `yes`. A trace scored *Not grounded* is the next case for
+`evals/`.
 
 ## Safety properties
 
-- The webhook rejects any request without the right `x-telegram-bot-api-secret-token`.
-- **Authorisation is per person, never per room.** A message is answered only if
-  the *sender's* Telegram id is an allowed member, so a room grants nothing by
-  existing and the family can spin up new group chats without registering them.
-  `ALLOWED_TELEGRAM_IDS` seeds the founders as admins; they add everyone else
-  with `/allow` or from the dashboard, neither of which needs a redeploy. A
-  deployment with no seed and no recorded members accepts **nothing** rather
-  than everything.
-- A group holding someone unrecognised is a group the bot stays quiet in. It
-  notices them either when they join or when they first speak, says so once, and
-  resumes when they are vouched for or leave. Without this, member-based auth
-  would still read a private inbox aloud in front of an outsider. Another
-  member's mail is opened by name, or swept in by `new_mail`, only in a group
-  that member is in, by Telegram's word, where they see it asked for; a group
-  of one member and the bot reads that member's mail alone. A DM, an MCP
-  client or a member's own custom automation reads its own member's mailbox
-  and nobody else's. Commands obey
-  it as well, bar the few that give nothing away (`/help`, `/whoami`, and
-  `/allow`, which is how a room unmutes): `/calendar` in front of a stranger
-  would hand them the feed. Someone who never speaks is caught by Telegram's
-  head count before anything is posted unasked.
-- Vouching for someone unmutes every room they are in, whether it is done in
-  the room, by DM or on the dashboard, and so does an allowed member speaking
-  anywhere, which is how a founder, never vouched for, unmutes. Revoking or
-  removing someone flags them in every group Telegram says they are still in
-  (where it cannot say, every group they have talked in), so a member who sits
-  silent after `/deny` is a stranger like any other. A group Telegram upgrades
-  to a supergroup gets a new id, and its flags, history and watchers move to
-  it. A group the bot is removed from stops counting as the household's;
-  Telegram reports that only to a webhook that asks for it, so one registered by
-  an older Hearth wants pointing at the deployment again from Settings, which
-  says so rather than showing it connected, as /setup does.
-- Whoever a private chat belongs to must still be allowed for any automation to
-  post there. Revoking someone stops their DM watchers and pauses the custom
-  automations they wrote, whose instructions are now a stranger's words run with
-  the household's read tools (deleting them pauses those at once). A ready-made
-  watcher they switched on in a group keeps running for the room, but never as
-  them.
-- OAuth `state` is a 10-minute signed JWT bound to one Telegram user, and each
-  consumer says which purpose it takes: the sign-in state anyone can ask for
-  never passes as a member's `/connect` link, and a link shows nothing to a
-  member revoked since it was sent. A link acts for the member it was sent to,
-  so an account the household already knows as someone else's (linked by them,
-  or recorded against them by an admin) is turned away, and they are told: a
-  link forwarded with a "please relink" cannot collect another member's mailbox.
-  An address in `ADMIN_EMAILS` counts as an admin's even with no row naming
-  its owner, so only an admin, or the member an admin recorded it against,
-  may link it; anyone else is turned away and every admin is told.
-- A member decides what the bot may do with each account they link: read it
-  and write from it, or, after `/readonly google`, read it alone. A read-only
-  account takes no draft and no calendar entry, is never swapped for another
-  account unasked when one is named, and sends nothing even from a draft
-  written before it was made read-only, from the chat or from Home. Linking
-  it again keeps the choice, and the context tells the model which accounts
-  are read-only.
+- **Authorisation is per person.** `/api/mcp` accepts only a bearer key it can match
+  to an allowed member; the dashboard only a session whose address belongs to one. A
+  deployment with nobody in the family accepts nothing but the `ADMIN_EMAILS`
+  bootstrap, and that only on the dashboard.
+- **A key is its member.** Every call runs as whoever holds it: their mailbox and
+  never another member's, their calendar, their name on what it writes. Keys are
+  stored as SHA-256 digests; each carries an HMAC tag that is checked before the
+  lookup, so a made-up one costs no database read. A revoked key's row is gone, so it
+  never matches again; a member who is revoked or removed takes every key with them.
+- **One member's things stay theirs.** Mail, personal calendars, drafts, goals,
+  reminders, reports and the record of changes are each member's own: no tool, client
+  or page reads another member's. The family calendar, lists, facts, proposals,
+  helpers and routines are the household's.
+- **OAuth for MCP clients** is PKCE (S256) only, for public clients; a client's
+  registration, the approval it asks for and each code are signed tokens, a code is
+  good for five minutes and one use, bound to its client, redirect and challenge, and
+  the approval page names the client and where it will send the member, refuses to be
+  framed, and needs a signed-in member. A malformed request is shown on Hearth's own
+  page rather than sent back to a redirect anyone could have registered; only the
+  member's own yes or no sends them back. A redirect is https, or http to this machine
+  for a native client, or a native app's own scheme; never one that runs in the browser.
+- **OAuth `state`** for sign-in and linking is a 10-minute signed JWT, and each
+  consumer says which purpose it takes: the sign-in state anyone can ask for never
+  passes as a member's link, and a link acts only for the member whose session asked
+  for it. An address in `ADMIN_EMAILS` counts as an admin's even with no row naming
+  its owner, so only an admin, or the member an admin recorded it against, may link it.
+- A member decides what Hearth may do with each account they link: read it and write
+  from it, or read it alone. A read-only account takes no draft and no calendar entry,
+  and sends nothing even from a draft written before it was made read-only.
 - Refresh tokens are AES-256-GCM encrypted with `TOKEN_ENC_KEY`.
-- The ICS feed sits behind a long random token, compared without early exit.
-  `/calendar new` replaces the token if the URL gets out, and sends the new one
-  to the admin by DM to pass on; everyone subscribed then subscribes again.
-  Hearth stops answering the old address at once, though for up to an hour
-  (the feed's `s-maxage`) the edge can still hand out a copy it cached before
-  the change; nothing added since reaches it. An instance reads the token again
-  for an address it does not recognise only once an hour, so one that has
-  already done so this hour may turn the new address away until the hour is
-  up; the calendar app's next try then gets it.
-- `/api/mcp` accepts only a bearer key it can match to an allowed member, and
-  keys are stored as SHA-256 digests, so the store cannot hand one back out.
-  Each key carries an HMAC tag that is checked before the lookup, so a made-up
-  one costs no database read.
+- The ICS feed sits behind a long random token, compared without early exit. An admin
+  can replace it if the URL gets out; everyone subscribed then subscribes again.
 - `/api/tick` verifies the QStash signature.
 - Email is never sent without a human "yes": `draft_email` and `send_email` are
   separate tools, the draft is persisted, and the send claims it atomically so a
-  repeated confirmation cannot send twice. A send that times out stays claimed
-  too, since it may have gone. In a chat, `send_email` refuses a
-  draft written in the same turn, and refuses anything at all in a turn that has
-  read mail, a web page, a search result, Notion, the board, a calendar invite or
-  an attached file, so the yes has to come from a person's own message and never
-  from an instruction planted in something the bot read. Over MCP each call
-  stands alone, so there the client's own approval of each tool call is the gate.
-  On Home the yes is the writer's own click on Send, against a draft only they
-  can see there, claimed the same way.
-- Nothing that runs unattended can do what would need a yes. A job handed to a
-  helper, a goal's check-in, a watch-until and a routine run on a schedule all
-  run as scheduled instructions: read-only tools (adding to a list and proposing
-  an event aside), their author's mailbox alone, and every post through the
-  claim check and the post decision before anyone sees it.
-- A helper can never take a family member's name, or the bot's own, and the
-  family is checked again on every message, so a message calling someone across
-  the group chat is never answered by a helper.
-- A member's own goals, drafts and activity stay theirs: a scheduled run in a
-  group sees the group's goals alone, whoever set it up; `/pending` lists only
-  the asker's drafts; and what an MCP client changed is filed on its member's
-  own record.
-- Once a turn has read anything from outside the household, `read_url` (and
-  `read_recipe`, the same way) opens only a link that appears, as written, in
-  something the turn was given or
-  read, and not one the model had put into a tool call first, so it requests
-  no address composed in that turn to carry the household's details out. That
-  holds for `read_url` in that turn only: Telegram still fetches a link in the
-  reply itself to preview it, and an automation saved in the turn opens any
-  link in a later run until that run reads outside text. The same turn creates
-  no calendar event with guests, since an invitation carries its details to
-  them; the member confirms who to invite in their next message.
+  repeated confirmation cannot send twice. A send that times out stays claimed, since
+  it may have gone. Over MCP each call stands alone, so the client's own approval of
+  each tool call is the gate; on Home the yes is the writer's own click on Send.
+- Nothing that runs unattended can do what would need a yes. Scheduled jobs (handed to
+  a helper, a goal's check-in, a watch-until, a routine on a schedule) get read-only
+  tools (adding to a list and proposing an event aside), their author's mailbox alone,
+  and every report goes through the claim check and the decision.
+- Once a scheduled run has read anything from outside the household, `read_url` (and
+  `read_recipe`) opens only a link that appears, as written, in something the run was
+  given or read, and not one the model had put into a tool call first, so it requests
+  no address composed in that run to carry the household's details out.
 
 ## Development
 
 ### Evals
 
-`npm run evals` runs the prompts against the live model chain with recorded
-tool results, and scores the replies two ways: deterministic checks (every
-dollar figure appears in what the tools returned, no trip read into a payee
-string, no working shown, the right tool called) and an LLM judge for
-groundedness and usefulness. The judge defaults to the last Gemini slot so it
-is not from the family under test; `EVAL_JUDGE_MODEL=provider:model`
-overrides it. Judge scores are reported and only fail the run with
-`EVAL_STRICT=1`. The cases in `evals/` are the failures the family has actually
-seen; when a new one turns up, it belongs there before the prompt is touched.
-It spends quota, so it is not part of `npm test` or CI.
+`npm run evals` runs scheduled-run prompts against the live model chain with recorded
+tool results, and scores the reports two ways: deterministic checks (every dollar
+figure appears in what the tools returned, no trip read into a payee string, no
+working shown) and an LLM judge for groundedness. It also puts drafts to the claim
+check and the decision. The judge defaults to the last Gemini slot so it is not from
+the family under test; `EVAL_JUDGE_MODEL=provider:model` overrides it. Judge scores
+are reported and only fail the run with `EVAL_STRICT=1`. It spends quota, so it is not
+part of `npm test` or CI.
 
 ```bash
 npm run dev           # http://localhost:3000
@@ -1282,23 +743,15 @@ npm run typecheck
 npm run db:generate   # after editing lib/db/schema.ts; CI fails without it
 ```
 
-The badge reads lower than the local run, and both are right: vitest reports
-line coverage, while Codecov counts a line whose branches are only partly taken
-as a partial and holds it against the total. Judge changes against the badge,
-since it is the stricter of the two.
+Query-layer tests run against a real Postgres, in process, via PGlite. The harness in
+`tests/helpers/db.ts` builds one database per test file with drizzle's migrator, the
+one the deploy runs, so the migrations in `drizzle/` go in as they will in production.
+Constraints, defaults and the claim-by-predicate updates that stop double-sends behave
+exactly as they do on Neon. `lib/db/index.ts` exposes `__setDb` purely so that
+instance can be swapped in.
 
-Query-layer tests run against a real Postgres, in process, via PGlite. The
-harness in `tests/helpers/db.ts` builds one database per test file with
-drizzle's migrator, the one the deploy runs, so the migrations in `drizzle/`
-go in as they will in production: in journal order, in one transaction. Each
-test starts from that database emptied, and a test that changed the schema
-leaves the next one a database built afresh. Constraints, defaults and the
-claim-by-predicate updates that stop double-sends behave exactly as they do
-on Neon. `lib/db/index.ts` exposes `__setDb` purely so that instance can be
-swapped in.
-
-To test the webhook locally, tunnel port 3000 and point `APP_URL` at the tunnel
-before running `npm run set-webhook`.
+To try a client against a local server, run `npm run dev`, sign in, make a key on Home
+and point the client at `http://localhost:3000/api/mcp`.
 
 ## Licence
 

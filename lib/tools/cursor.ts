@@ -2,8 +2,8 @@ import { getSetting, setSetting } from '../db/queries'
 
 /**
  * The discipline behind every "what's new since we last looked" tool: a marker
- * of when this chat last looked plus the ids seen at that instant, so nothing
- * is ever reported twice however often a scheduled sweep runs. Timestamps are
+ * of when this reader last looked plus the ids seen at that instant, so
+ * nothing is ever reported twice to the same reader however often it asks. Timestamps are
  * inclusive at the boundary, which is why the ids matter.
  */
 
@@ -32,9 +32,8 @@ export async function writeCursor(key: string, at: string, freshIds: string[], p
 /**
  * A cursor move waiting on its result reaching someone. A tool that reports
  * what is new stages the move rather than making it, and whoever delivers
- * the result commits it: the tick once the post has gone (or been
- * deliberately held back), a chat once its reply is sent, MCP once the call
- * returns. A run that dies in between leaves the mail for the next one,
+ * the result commits it: the tick once the report is kept (or deliberately
+ * held back), MCP once the call returns. A run that dies in between leaves the mail for the next one,
  * instead of consuming it unseen.
  */
 export type StagedCursor = { key: string; at: string; ids: string[]; prev: Cursor | null }
@@ -45,7 +44,7 @@ export function stageCursor(ctx: Staging, key: string, at: string, freshIds: str
   ;(ctx.pendingCursors ??= []).push({ key, at, ids: freshIds, prev })
 }
 
-/** The cursor as this turn sees it: its own staged move if it made one, else the stored one. */
+/** The cursor as this run sees it: its own staged move if it made one, else the stored one. */
 export async function currentCursor(ctx: Staging, key: string): Promise<Cursor | null> {
   const staged = ctx.pendingCursors?.findLast((s) => s.key === key)
   if (staged) return { at: staged.at, ids: [...staged.ids, ...(staged.prev?.ids ?? [])].slice(0, CURSOR_MEMORY) }
@@ -53,11 +52,11 @@ export async function currentCursor(ctx: Staging, key: string): Promise<Cursor |
 }
 
 /**
- * Make the staged moves, the last per key: a later look this turn already
+ * Make the staged moves, the last per key: a later look this run already
  * includes an earlier one. A move only ever goes forward. Between staging and
- * committing another run may have moved the same cursor (a chat turn while the
- * brief was being written), so the stored one is read again, the later time
- * kept and both sets of ids remembered.
+ * committing another call may have moved the same cursor (a second call from
+ * the same key while the first was still reading), so the stored one is read
+ * again, the later time kept and both sets of ids remembered.
  */
 export async function commitCursors(staged: readonly StagedCursor[] | undefined): Promise<void> {
   const last = new Map<string, StagedCursor>()

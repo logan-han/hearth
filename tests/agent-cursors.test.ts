@@ -21,10 +21,13 @@ type Tools = Record<string, { execute: (a: unknown, o: unknown) => Promise<Recor
 
 const reply = (text: string) => ({ text, steps: [], usage: {} })
 const mail = (id: string) => ({ id, from: 'school@x.edu', to: 'me@x.com', subject: 'S', snippet: '…', date: new Date(Date.now() - 3600_000).toISOString(), unread: true })
+const rowan = () => q.saveMember({ name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false })
+const looked = (r: Record<string, unknown>) => (r.accounts as { messages: unknown[] }[])[0].messages.length
 
 beforeEach(async () => {
   vi.clearAllMocks()
   vi.spyOn(console, 'error').mockImplementation(() => {})
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
   process.env.GEMINI_API_KEY = 'k'
   process.env.GEMINI_MODEL = 'gemini-3.5-flash-lite'
@@ -37,168 +40,115 @@ beforeEach(async () => {
 })
 afterEach(async () => closeDb(client))
 
-describe('a turn that looks at new mail', () => {
-  it('hands its cursor moves back for the caller to make once the reply is out', async () => {
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+describe('a scheduled run that looks at new mail', () => {
+  it('hands its cursor moves back, on its own markers, for the caller to make once the report is kept', async () => {
+    const member = await rowan()
     listMail.mockResolvedValue([mail('a')])
     generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
-      const r = await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
-      expect((r.accounts as { messages: unknown[] }[])[0].messages).toHaveLength(1)
+      expect(looked(await opts.tools.new_mail.execute({ limit: 10 }, {}))).toBe(1)
       return reply('One email from the school.')
     })
-    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', text: 'any new mail?' })
-    const key = `mail_cursor:111:${member.id}:google`
+    const r = await runAgent({ member, memberName: 'Rowan', cursorScope: 'auto:7', text: 'report new school mail' })
+    const key = `mail_cursor:auto:7:${member.id}:google`
     expect(r.cursors?.map((c) => c.key)).toEqual([key])
-    // Nothing is spent until the caller says the reply went out.
+    // Nothing is spent until the caller says the report was kept.
     expect(await q.getSetting(key)).toBeNull()
     await commitCursors(r.cursors)
     expect(JSON.parse((await q.getSetting(key))!).ids).toEqual(['a'])
   })
 
+  it('reads on markers of its own kind when the caller names none', async () => {
+    const member = await rowan()
+    listMail.mockResolvedValue([mail('a')])
+    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
+      await opts.tools.new_mail.execute({ limit: 10 }, {})
+      return reply('One email from the school.')
+    })
+    const r = await runAgent({ member, memberName: 'Rowan', text: 'report new school mail' })
+    expect(r.cursors?.map((c) => c.key)).toEqual([`mail_cursor:own:${member.id}:google`])
+  })
+
   it('shows the next model the same new mail when the first failed after looking', async () => {
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+    const member = await rowan()
     listMail.mockResolvedValue([mail('a')])
     let secondSaw = -1
     generateText
       .mockImplementationOnce(async (opts: { tools: Tools }) => {
-        await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+        await opts.tools.new_mail.execute({ limit: 10 }, {})
         throw new Error('429 quota')
       })
       .mockImplementationOnce(async (opts: { tools: Tools }) => {
-        const r = await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
-        secondSaw = (r.accounts as { messages: unknown[] }[])[0].messages.length
+        secondSaw = looked(await opts.tools.new_mail.execute({ limit: 10 }, {}))
         return reply('One email from the school.')
       })
-    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', text: 'any new mail?' })
+    const r = await runAgent({ member, memberName: 'Rowan', cursorScope: 'auto:7', text: 'report new school mail' })
     expect(r.model).toContain('openrouter')
     expect(secondSaw).toBe(1)
-    // One move, from the model whose reply went out.
+    // One move, from the model whose report is kept.
     expect(r.cursors).toHaveLength(1)
   })
 
-  it('claims nothing when the reply is only notices, which say nothing of the mail', async () => {
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
-    listMail.mockResolvedValue([mail('a')])
-    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
-      await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
-      await opts.tools.add_family_event.execute({ title: 'Swimming', start: '2026-10-03T09:00', all_day: false }, {})
-      return reply('')
-    })
-    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', text: 'add swimming, and any new mail?' })
-    expect(r.text).toContain('Added to the family calendar')
-    expect(r.cursors).toBeUndefined()
-  })
-
-  it('drops the first reply\'s claim on the mail when the claim retry replaces that reply', async () => {
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+  it('claims nothing of the mail a failed model looked at when the next answers without looking', async () => {
+    const member = await rowan()
     listMail.mockResolvedValue([mail('a')])
     generateText
       .mockImplementationOnce(async (opts: { tools: Tools }) => {
-        await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
-        return reply('One email from the school, and I have replied to it.')
-      })
-      .mockResolvedValueOnce({ text: '', output: 'claims_change', steps: [], usage: {} })
-      .mockResolvedValueOnce(reply('I have not replied to anything; I can draft a reply if you like.'))
-      .mockResolvedValueOnce({ text: '', output: 'no_change_claimed', steps: [], usage: {} })
-    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', text: 'any new mail? reply to the school' })
-    expect(r.text).toBe('I have not replied to anything; I can draft a reply if you like.')
-    expect(r.cursors).toBeUndefined()
-  })
-
-  it('lets the claim retry see the mail as new, and keeps the first look when the first reply stands', async () => {
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
-    listMail.mockResolvedValue([mail('a')])
-    let retrySaw = -1
-    generateText
-      .mockImplementationOnce(async (opts: { tools: Tools }) => {
-        await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
-        return reply('One email from the school, and I have replied to it.')
-      })
-      .mockResolvedValueOnce({ text: '', output: 'claims_change', steps: [], usage: {} })
-      .mockImplementationOnce(async (opts: { tools: Tools }) => {
-        const r = await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
-        retrySaw = (r.accounts as { messages: unknown[] }[])[0].messages.length
+        await opts.tools.new_mail.execute({ limit: 10 }, {})
         throw new Error('429 quota')
       })
-    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', text: 'any new mail? reply to the school' })
-    // The retry could see the email; it failed, so the first reply stands with its claim on the mail.
-    expect(retrySaw).toBe(1)
-    expect(r.text).toContain('One email from the school')
-    expect(r.cursors?.map((c) => c.ids)).toEqual([['a']])
+      .mockResolvedValueOnce(reply('Bins out tonight.'))
+    const r = await runAgent({ member, memberName: 'Rowan', cursorScope: 'auto:7', text: 'remind about the bins' })
+    expect(r.text).toBe('Bins out tonight.')
+    expect(r.cursors).toBeUndefined()
   })
 
-  it('spends an unattended run\'s looks along with an unrepeatable write it made on them, even as it fails', async () => {
+  it("spends a run's looks along with an unrepeatable write it made on them, even as it fails", async () => {
     listMail.mockResolvedValue([mail('a')])
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+    const member = await rowan()
     generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
-      await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+      await opts.tools.new_mail.execute({ limit: 10 }, {})
       await opts.tools.add_to_list.execute({ items: ['gold coin'], list: 'shopping' }, {})
       throw new Error('429 quota')
     })
-    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', mode: 'watcher', tools: ['new_mail', 'add_to_list'], text: 'add what school mail asks us to buy' })
+    const r = await runAgent({ member, memberName: 'Rowan', cursorScope: 'auto:7', tools: ['new_mail', 'add_to_list'], text: 'add what school mail asks us to buy' })
     expect(r.text).toMatch(/^PROBLEM: .*added to a list/)
     expect(r.wrote).toEqual(['add_to_list'])
     expect(r.cursors?.map((c) => c.ids)).toEqual([['a']])
   })
 
-  it('keeps what a failed unattended run looked at against the error, for the tick to count it by', async () => {
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+  it('keeps what a failed run looked at against the error, for the tick to count it by', async () => {
+    const member = await rowan()
     listMail.mockResolvedValue([mail('a')])
     process.env.OPENROUTER_API_KEY = ''
     generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
-      await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+      await opts.tools.new_mail.execute({ limit: 10 }, {})
       throw new Error('the attachment cannot be read')
     })
-    const err = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', mode: 'watcher', tools: ['new_mail'], text: 'post new school mail' }).catch((e: unknown) => e)
+    const err = await runAgent({ member, memberName: 'Rowan', cursorScope: 'auto:7', tools: ['new_mail'], text: 'report new school mail' }).catch((e: unknown) => e)
     expect((err as Error).message).toBe('the attachment cannot be read')
     expect(looksBefore(err).map((c) => c.ids)).toEqual([['a']])
     // Nothing was spent: the looks ride on the error, not the cursor.
-    expect(await q.getSetting(`mail_cursor:111:${member.id}:google`)).toBeNull()
+    expect(await q.getSetting(`mail_cursor:auto:7:${member.id}:google`)).toBeNull()
     expect(looksBefore('not an error')).toEqual([])
+    expect(looksBefore(new Error('never seen'))).toEqual([])
   })
 
-  it('spends what a cut-short post read when it goes out because no later model answered', async () => {
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
+  it('spends what a cut-short report read when it is kept because no later model answered', async () => {
+    const member = await rowan()
     listMail.mockResolvedValue([mail('a')])
     const lines = Array.from({ length: 12 }, (_, i) => `- Item ${i}: something the school wants by Friday`)
     generateText
       .mockImplementationOnce(async (opts: { tools: Tools }) => {
-        await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+        await opts.tools.new_mail.execute({ limit: 10 }, {})
         return { ...reply(`**School**\n${lines.join('\n')}\n- Item 12: somethi`), finishReason: 'length' }
       })
       .mockImplementationOnce(async (opts: { tools: Tools }) => {
-        await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
+        await opts.tools.new_mail.execute({ limit: 10 }, {})
         throw new Error('429 quota')
       })
-    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', mode: 'watcher', tools: ['new_mail'], text: 'post new school mail' })
+    const r = await runAgent({ member, memberName: 'Rowan', cursorScope: 'auto:7', tools: ['new_mail'], text: 'report new school mail' })
     expect(r.cutShort).toBe(true)
     // The first model's look, once: the second's went with its failure.
     expect(r.cursors?.map((c) => c.ids)).toEqual([['a']])
-  })
-
-  it('keeps nothing against a failed chat turn, whose reply the member is still waiting on', async () => {
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
-    listMail.mockResolvedValue([mail('a')])
-    process.env.OPENROUTER_API_KEY = ''
-    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
-      await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
-      throw new Error('the attachment cannot be read')
-    })
-    const err = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', text: 'any new mail?' }).catch((e: unknown) => e)
-    expect(looksBefore(err)).toEqual([])
-  })
-
-  it('stages nothing for a failed look when the turn then ends on a write', async () => {
-    const member = await q.upsertMember('111', 'Rowan', { allowed: true })
-    listMail.mockResolvedValue([mail('a')])
-    generateText.mockImplementationOnce(async (opts: { tools: Tools }) => {
-      await opts.tools.new_mail.execute({ limit: 10, everyone: false }, {})
-      await opts.tools.add_to_list.execute({ items: ['milk'], list: 'shopping' }, {})
-      throw new Error('429 quota')
-    })
-    const r = await runAgent({ chatId: '111', chatType: 'private', member, memberName: 'Rowan', text: 'add milk, and any new mail?' })
-    // The reply says what was done, not what arrived, so the mail stays new.
-    expect(r.text).toContain('Done so far: added to a list')
-    expect(r.cursors).toBeUndefined()
   })
 })

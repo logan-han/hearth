@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MANAGED_KEYS } from '@/lib/settings'
-import { buildTools, CORE_TOOLS, MCP_TOOLS } from '@/lib/tools'
+import { allToolNames } from '@/lib/tools'
 
 /**
  * What the docs say against what the code does. Each of these drifted once
@@ -32,7 +32,7 @@ const example = new Map(
 const PLATFORM = /^(NODE_ENV|NEXT_RUNTIME|VERCEL_\w+)$/
 
 /** The dashboard settings .env.example fills in on purpose, as their starting values. */
-const STARTING_VALUES: readonly string[] = ['GEMINI_MODEL', 'OPENROUTER_MODEL', 'AMBIENT_MODE', 'TIMEZONE', 'LANGUAGE', 'UNITS']
+const STARTING_VALUES: readonly string[] = ['GEMINI_MODEL', 'OPENROUTER_MODEL', 'TIMEZONE', 'LANGUAGE', 'UNITS']
 
 describe('.env.example', () => {
   it('names every variable the code reads', () => {
@@ -50,7 +50,7 @@ describe('.env.example', () => {
       }
     }
     // A scan that matched nothing would pass whatever the file says.
-    expect(read.has('DATABASE_URL') && read.has('TELEGRAM_BOT_TOKEN')).toBe(true)
+    expect(read.has('DATABASE_URL') && read.has('TOKEN_ENC_KEY')).toBe(true)
     expect([...read].filter((key) => !PLATFORM.test(key) && !example.has(key)).sort()).toEqual([])
   })
 
@@ -67,7 +67,6 @@ describe('.env.example', () => {
 
 describe('the README', () => {
   const readme = readFileSync(join(root, 'README.md'), 'utf8')
-  const ctx = { chatId: '-100', member: null, memberName: 'Rowan', now: new Date(), notices: [] }
 
   /** The number a sentence of the README gives, wherever its lines happen to wrap. */
   function claimed(sentence: string): number {
@@ -77,12 +76,13 @@ describe('the README', () => {
   }
 
   it('counts the tools as the code does', () => {
-    const all = Object.keys(buildTools(ctx)).length
-    expect(claimed('does not see all (\\d+) tools')).toBe(all)
-    expect(claimed('The (\\d+) in the core are always in reach')).toBe(CORE_TOOLS.length)
-    expect(claimed('handed (\\d+) of the \\d+ tools')).toBe(MCP_TOOLS.length)
-    expect(claimed('handed \\d+ of the (\\d+) tools')).toBe(all)
-    expect(claimed('start from the (\\d+) in the core')).toBe(CORE_TOOLS.length)
+    expect(claimed('handed all (\\d+) tools')).toBe(allToolNames().length)
+  })
+
+  it('mentions Telegram only in the note that says when it was removed', () => {
+    const lines = readme.split('\n').filter((line) => /telegram/i.test(line))
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatch(/Telegram was removed on \d{1,2} \w+ \d{4}/)
   })
 })
 
@@ -97,5 +97,31 @@ describe('where the docs send an admin', () => {
     expect(readFileSync(join(root, 'app/chain-form.tsx'), 'utf8')).toContain("key: 'LLM_ORDER'")
     expect(renders(/Also set on (\w+)\b[^\n]*\n(?:#[^\n]*\n)*LLM_ORDER=/.exec(env)?.[1], 'ChainForm')).toBe(true)
     expect(renders(/`LLM_ORDER`\s+and\s+is\s+editable\s+from\s+\*\*(\w+)\*\*/.exec(readme)?.[1], 'ChainForm')).toBe(true)
+  })
+})
+
+describe('a household with no chat', () => {
+  // The Telegram bot is gone, and nothing it needed may be left behind: not a
+  // token, a webhook, a chat id to post to, or a dependency.
+  const CHAT_ERA = /\b(?:telegram|grammy|botfather|webhook)\b|chat[ _]?id/i
+
+  it('names nothing of the chat in code, scripts, settings or docs', () => {
+    const files = [
+      ...['lib', 'app', 'scripts', 'evals'].flatMap((dir) => sourceFiles(join(root, dir))),
+      ...['instrumentation.ts', 'drizzle.config.ts', '.env.example', 'AGENTS.md', 'package.json'].map((f) => join(root, f)),
+    ]
+    const found = files.flatMap((file) =>
+      readFileSync(file, 'utf8')
+        .split('\n')
+        .map((line, i) => ({ file: file.slice(root.length), line: i + 1, text: line.trim() }))
+        .filter((l) => CHAT_ERA.test(l.text)),
+    )
+    expect(found).toEqual([])
+  })
+
+  it('leaves only the dated removal note in the README', () => {
+    const readme = readFileSync(join(root, 'README.md'), 'utf8')
+    const lines = readme.split('\n').filter((line) => CHAT_ERA.test(line))
+    expect(lines).toEqual([expect.stringMatching(/Telegram was removed on \d{1,2} \w+ \d{4}/)])
   })
 })

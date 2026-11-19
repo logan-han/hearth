@@ -83,8 +83,8 @@ function propagatable<A extends { metadata?: Record<string, string> }>(attrs: A)
 /**
  * Run `fn` with trace attributes attached, or plainly when tracing is off.
  * Inside a run the trace keeps the run's name: each call setting its own
- * named a chat turn's trace after the claim check or the summary that
- * happened to come last, and every brief's after its post decision.
+ * once named every scheduled run's trace after its post decision, the call
+ * that happened to come last.
  */
 export async function traced<T>(attrs: PropagateAttributesParams, fn: () => Promise<T>): Promise<T> {
   if (!processor()) return fn()
@@ -94,11 +94,11 @@ export async function traced<T>(attrs: PropagateAttributesParams, fn: () => Prom
 }
 
 /**
- * One piece of work as a trace of its own: a chat turn, a watcher run, the
- * nightly pass. Every model call made inside nests under one root observation
+ * One piece of work as a trace of its own: a scheduled run. Every model call
+ * made inside nests under one root observation
  * named `name`, and what the work was given and what came of it go on that
  * root through noteRun(). Without it a tick's runs shared the request's trace,
- * and whether a draft was posted, cut or held back was only in a log that
+ * and whether a draft was kept, cut or held back was only in a log that
  * Vercel keeps for an hour. Plainly `fn()` when tracing is off, or when the
  * tracing modules cannot be loaded; `fn` runs exactly once either way.
  */

@@ -13,29 +13,31 @@ const money = (n: number, currency = 'AUD') =>
 
 const DATE = z.string().describe(`Date as YYYY-MM-DD, in ${timezone()}`)
 
-type BudgetLine = Pick<PsCategoryBudget, 'budgeted' | 'rollsOver' | 'forecast' | 'overBy' | 'underBy'>
+type BudgetLine = Pick<PsCategoryBudget, 'budgeted' | 'forecast' | 'overBy' | 'underBy'>
+
+/** The three budget states that must never be confused, worded exactly. */
+export const NO_BUDGET = 'no budget set'
+export const NOTHING_LEFT = 'nothing left after rollover'
 
 /**
  * Where a category stands, in PocketSmith's own reckoning. Its allowance for
- * a month is the budget after rollover, so a category overspent in earlier
- * months can be allowed nothing this month and still be budgeted: that is
- * over by whatever was spent, never "unbudgeted". Only a category with no
- * budget at all is called that, in words that say so.
+ * a month is the budget after rollover, so a category overspent earlier in
+ * the year can be allowed $0 this month while still being budgeted: that is
+ * "nothing left after rollover", never "no budget set", and never an
+ * overspend on its own, however PocketSmith counts its over-by against a
+ * zero. "Over by $X" is for an allowance above $0 that was spent past. Only
+ * a category with no budget at all is "no budget set".
  */
 export function budgetPosition(c: BudgetLine, currency: string): string {
-  if (!c.budgeted) return 'no budget set'
+  if (!c.budgeted) return NO_BUDGET
+  if (c.forecast === 0) return NOTHING_LEFT
   if (c.overBy > 0) return `over by ${money(c.overBy, currency)}`
   if (c.underBy > 0) return `under by ${money(c.underBy, currency)}`
   return 'on budget'
 }
 
-export const ROLLOVER_NOTE = 'nothing left this month after rollover'
-
-/** Why a budgeted category is allowed nothing this month, when it is. */
-export function budgetNote(c: BudgetLine): string | undefined {
-  if (!c.budgeted || c.forecast !== 0) return undefined
-  return c.rollsOver ? ROLLOVER_NOTE : 'nothing budgeted for this month'
-}
+/** Over budget in the only sense that counts: an allowance above $0, spent past. */
+export const overBudget = (c: BudgetLine) => c.budgeted && c.forecast > 0 && c.overBy > 0
 
 /** First and last day of the month containing `now`, as local date keys. */
 function currentMonth(now: Date): { start: string; end: string } {
@@ -269,7 +271,7 @@ export function moneyTools(ctx: ToolContext) {
             // Salary credits are the income source, not news; this list exists
             // so a genuinely unusual credit (a refund, a payout) is visible. A
             // credit filed under an expense came off that spend above, and
-            // says so: without the word, a post that called one a refund was
+            // says so: without the word, a report that called one a refund was
             // cut as saying what the evidence did not.
             largest_credits: real
               .filter((t) => t.amount > 0)
@@ -304,7 +306,7 @@ export function moneyTools(ctx: ToolContext) {
           ])
           const cur = s.expense.currency.toUpperCase()
 
-          // Pacing, precomputed so the snapshot quotes it: how much of the
+          // Pacing, precomputed so a caller quotes it: how much of the
           // budget is used, and (within one month) how far through it we are.
           const usedPct =
             s.expense.totalForecast !== 0
@@ -325,14 +327,19 @@ export function moneyTools(ctx: ToolContext) {
             monthProgress = `${elapsed} of ${daysInMonth} days (${Math.round((elapsed / daysInMonth) * 100)}% of the month)`
           }
 
-          // The budgeted categories come first, most over budget at the top;
-          // spending with no budget behind it is listed after them.
+          // The budgeted categories come first, most over budget at the top
+          // (a $0 allowance is never over it); spending with no budget behind
+          // it is listed after them.
+          const overAmount = (c: PsCategoryBudget) => (overBudget(c) ? c.overBy : 0)
           const listed = perCategory
             .filter((c) => c.forecast !== 0 || c.actual !== 0)
-            .sort((a, b) => Number(b.budgeted) - Number(a.budgeted) || b.overBy - a.overBy)
+            .sort((a, b) => Number(b.budgeted) - Number(a.budgeted) || overAmount(b) - overAmount(a))
             .slice(0, 12)
-          // Named once, together, so a post can say it in one line rather than beside every row.
-          const rolledOut = listed.filter((c) => budgetNote(c) === ROLLOVER_NOTE).map((c) => c.title)
+          // Each state named together, worked out here so nothing downstream
+          // has to tell a rollover-exhausted category from an unbudgeted one.
+          const over = listed.filter(overBudget)
+          const nothingLeft = listed.filter((c) => budgetPosition(c, cur) === NOTHING_LEFT).map((c) => c.title)
+          const noBudget = listed.filter((c) => !c.budgeted && c.actual !== 0).map((c) => c.title)
 
           return {
             from: startDate,
@@ -346,18 +353,16 @@ export function moneyTools(ctx: ToolContext) {
             },
             // PocketSmith precomputes over/under per category; quote these
             // positions verbatim rather than doing arithmetic in prose.
-            budget_by_category: listed.map((c) => {
-              const note = budgetNote(c)
-              return {
-                category: c.title,
-                actual: money(c.actual, cur),
-                forecast: money(c.forecast, cur),
-                budget_period: `${c.from} to ${c.to}`,
-                position: budgetPosition(c, cur),
-                ...(note ? { note } : {}),
-              }
-            }),
-            ...(rolledOut.length ? { rollover_used_up: rolledOut } : {}),
+            budget_by_category: listed.map((c) => ({
+              category: c.title,
+              actual: money(c.actual, cur),
+              forecast: money(c.forecast, cur),
+              budget_period: `${c.from} to ${c.to}`,
+              position: budgetPosition(c, cur),
+            })),
+            ...(over.length ? { over_budget: over.map((c) => ({ category: c.title, position: budgetPosition(c, cur) })) } : {}),
+            ...(nothingLeft.length ? { nothing_left_after_rollover: nothingLeft } : {}),
+            ...(noBudget.length ? { no_budget_set: noBudget } : {}),
           }
         } catch (e) {
           return { error: describeError(e) }

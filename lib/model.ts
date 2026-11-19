@@ -31,7 +31,8 @@ function slots(opts: {
     headers: opts.headers,
     // Without this the provider only logs a warning when a JSON schema is
     // requested and never sends response_format, so structured decisions
-    // (watcher post-or-skip, the ambient gate) would silently degrade to prose.
+    // (the claim check and the keep-or-hold decision on a scheduled run's
+    // report) would silently degrade to prose.
     supportsStructuredOutputs: true,
   })
   return opts.models.map((id) => ({ name: `${opts.label}:${id}`, model: provider(id) }))
@@ -125,11 +126,6 @@ export function describeChain(): { name: TierName; label: string; models: string
   })
 }
 
-/** The single cheapest model, used for the yes/no ambient gate. */
-export function gateSlot(): ModelSlot | null {
-  return modelChain()[0] ?? null
-}
-
 /** Five structured calls is enough to judge a slot by; one failure in five demotes it. */
 const STRUCTURED_MIN_SAMPLE = 5
 const STRUCTURED_FLAKY_SHARE = 0.2
@@ -157,7 +153,7 @@ export async function structuredChain(chain: ModelSlot[] = modelChain()): Promis
 }
 
 /**
- * A slot that failed, but whose turn has to end with it anyway (it had
+ * A slot that failed, but whose run has to end with it anyway (it had
  * already changed something, so another slot would do it all again), and what
  * to return. The chain records it as the failure it was and stops there.
  */

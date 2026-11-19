@@ -2,13 +2,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { Member } from '@/lib/db/schema'
 import { randomToken } from '@/lib/crypto'
 
-const member = { id: 7, telegramUserId: '111', name: 'Rowan', allowed: true, isAdmin: false } as Member
+const member = { id: 7, name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false, createdAt: new Date(0) } as Member
 
 // Any other key goes through the real lookup, against a database that is not there.
-const memberByMcpKey = vi.fn<(key: string) => Promise<Member | null>>()
+const memberByMcpKey = vi.fn<(key: string) => Promise<{ member: Member; keyId: number } | null>>()
 vi.mock('@/lib/db/queries', async (orig) => {
   const actual = await orig<typeof import('@/lib/db/queries')>()
-  memberByMcpKey.mockImplementation(async (key) => (key === 'good-key' ? member : actual.memberByMcpKey(key)))
+  memberByMcpKey.mockImplementation(async (key) => (key === 'good-key' ? { member, keyId: 3 } : actual.memberByMcpKey(key)))
   return { ...actual, memberByMcpKey }
 })
 const db = vi.fn(() => {
@@ -51,10 +51,12 @@ async function rpc(method: string, params: unknown, key?: string) {
 }
 
 describe('who the MCP endpoint lets in', () => {
-  it('turns away a call with no key at all', async () => {
+  it('turns away a call with no key, pointing it at the metadata that says how to sign in', async () => {
     const { status, headers } = await rpc('tools/list', {})
     expect(status).toBe(401)
-    expect(headers.get('www-authenticate')).toContain('Bearer')
+    const challenge = headers.get('www-authenticate') ?? ''
+    expect(challenge).toContain('Bearer')
+    expect(challenge).toContain('resource_metadata="https://hearth.example/.well-known/oauth-protected-resource/api/mcp"')
   })
 
   it('turns away a key it does not know', async () => {
@@ -75,12 +77,13 @@ describe('who the MCP endpoint lets in', () => {
     const names = json.result.tools.map((t: { name: string }) => t.name)
     expect(names).toContain('hearth_context')
     expect(names).toContain('add_family_event')
+    expect(names).toContain('morning_brief')
     expect(names).not.toContain('more_tools')
   })
 
-  it('runs the call as the member the key belongs to', async () => {
+  it('runs the call as the member the key belongs to, with which key it was', async () => {
     const { json } = await rpc('tools/call', { name: 'recall', arguments: { contains: 'bin' } }, 'good-key')
-    expect(callTool).toHaveBeenCalledWith('recall', { contains: 'bin' }, member)
+    expect(callTool).toHaveBeenCalledWith('recall', { contains: 'bin' }, { member, keyId: 3 })
     expect(JSON.stringify(json.result)).toContain('done')
   })
 })

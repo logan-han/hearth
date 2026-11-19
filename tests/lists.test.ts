@@ -40,7 +40,7 @@ vi.mock('@/lib/db/queries', () => ({
 
 const { listTools } = await import('@/lib/tools/lists')
 
-const ctx = { chatId: '-1', member: null, memberName: 'Rowan', now: new Date(), notices: [] }
+const ctx = { member: null, memberName: 'Rowan', now: new Date() }
 const tools = listTools(ctx as never)
 const run = (name: keyof ReturnType<typeof listTools>, args: unknown) =>
   (tools[name].execute as unknown as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)(args, {})

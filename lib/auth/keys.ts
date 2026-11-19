@@ -2,7 +2,7 @@ import { getSetting, setSetting } from '../db/queries'
 import { hashToken, randomToken, signingKey } from '../crypto'
 
 /**
- * The epoch every session and /connect link is signed under. Unset until the
+ * The epoch every session and account link is signed under. Unset until the
  * first sign-out everywhere, and replaced by each one after.
  */
 const EPOCH = 'signing_epoch'
@@ -35,7 +35,7 @@ export async function inThisEpoch(mark: unknown): Promise<boolean> {
 }
 
 /**
- * End every dashboard session and void every /connect link still out, by
+ * End every dashboard session and void every account link still under way, by
  * moving the epoch they were signed under. Before, the only lever was
  * replacing TOKEN_ENC_KEY, and with it every stored refresh token and setting.
  */

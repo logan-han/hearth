@@ -1,33 +1,24 @@
 /**
- * The morning brief's DATA, put together in code from what the tick
- * fetched for it.
+ * The morning brief and the money snapshot, gathered in code as on-demand
+ * reads and handed to the member's MCP client to give in its own words.
  */
-import { formatLocalDate, localDateKey, localToUtc } from './cron'
+import { formatLocalDate, localDateKey, localToUtc, dayAfter, daysAfter, formatLocal, formatLocalTime } from './cron'
+import { listAutomations, unaskedQuestions, markQuestionsAsked } from './db/queries'
+import type { ToolContext } from './tools/context'
 
 export const errorOf = (r: Record<string, unknown>): string | null => (typeof r.error === 'string' ? r.error : null)
 /** Optional integrations answer "not configured"; that is a setting, not a fault. */
 export const isUnconfigured = (err: string | null) => Boolean(err && /not configured/i.test(err))
 /** Nobody having linked a mailbox or calendar yet is a setting too; one that will not answer is a fault. */
-export const isUnlinked = (err: string | null) => Boolean(err && /linked a (?:mailbox|calendar)|no (?:email account|calendar) linked/i.test(err))
+export const isUnlinked = (err: string | null) => Boolean(err && /no (?:email account|calendar) linked/i.test(err))
 
 /**
- * An account as a post names it: by whose it is, under member. The names the
- * tools also give it ("Rowan's Gmail", "Rowan's Google Calendar") are the app
- * as well as the person, and a brief handed them copied them onto every line.
- * An admin's fault message still names the mailbox, from the tool's own result.
+ * The mailboxes that answered. One that failed is reported apart, under
+ * could_not_read, and its mail waits for the next brief: one mailbox timing
+ * out never holds back the rest.
  */
-const byMember = ({ mailbox: _mailbox, calendar: _calendar, ...acct }: Record<string, unknown>) => acct
-
-/**
- * A sweep's mailboxes as the writer is handed them: by member, and only those
- * that answered. One that failed is reported in code. Left in DATA, its error
- * reads to the writer as a tool that failed, which it answers with PROBLEM and
- * SKIP, so one mailbox timing out would cost the household the whole post.
- */
-export const accountsByMember = (r: Record<string, unknown>) =>
-  Array.isArray(r.accounts)
-    ? { ...r, accounts: (r.accounts as Record<string, unknown>[]).filter((acct) => !errorOf(acct)).map(byMember) }
-    : r
+const answered = (r: Record<string, unknown>) =>
+  Array.isArray(r.accounts) ? { ...r, accounts: (r.accounts as Record<string, unknown>[]).filter((acct) => !errorOf(acct)) } : r
 
 /** The local day an event as list_calendar shows it starts on: its date for an all-day one, its instant's day for a timed one. */
 function startDay(e: Record<string, unknown>): string | null {
@@ -75,13 +66,13 @@ export type Fetched = {
   data: Record<string, unknown>
   empty: boolean
   problems: string[]
-  /** Questions the nightly pass left for the family, put to them by this run. */
+  /** Questions still open for the family, put to them by this brief. */
   asked?: number[]
 }
 
 /**
- * The brief from what the tick fetched: what failed goes to problems and is
- * left out, and a day with nothing to tell comes back empty.
+ * The brief from what was fetched: what failed goes to problems and is left
+ * out, and a day with nothing to tell comes back empty.
  */
 export function assembleBrief(input: {
   day: string
@@ -144,19 +135,19 @@ export function assembleBrief(input: {
   const dueSoon = dueNext.filter((i) => i.due !== undefined && i.due >= next && i.due <= horizon)
   const todaysReminders = reminders.filter((r) => r.date === day).map(({ label, at }) => ({ label, at }))
   const laterReminders = reminders.filter((r) => r.date !== day).map(({ label, at }) => ({ label, at }))
-  // Coming is a reason to post, as a due date is; a reminder speaks for itself when it goes off, so on its own it only rides along.
+  // Coming is news, as a due date is; a reminder speaks for itself when it goes off, so on its own it only rides along.
   const ahead = comingFamily.length + days.comingCount + dueSoon.length
   // What failed is reported above and left out, so the rest of the brief still goes.
   const data: Record<string, unknown> = eventsErr ? {} : { events }
-  if (!calendarsErr) data.calendars = { ...calendars, accounts: days.today.map(byMember) }
+  if (!calendarsErr) data.calendars = { ...calendars, accounts: days.today }
   if (startsTomorrow.length || days.tomorrow.length) {
     data.tomorrow = {
       date: formatLocalDate(localToUtc(next)),
       ...(startsTomorrow.length ? { events: startsTomorrow } : {}),
-      ...(days.tomorrow.length ? { calendars: days.tomorrow.map(byMember) } : {}),
+      ...(days.tomorrow.length ? { calendars: days.tomorrow } : {}),
     }
   }
-  if (!mailErr) data.mail = accountsByMember(mail)
+  if (!mailErr) data.mail = answered(mail)
   // The board's due dates within the fortnight are under coming, so its own list of next dues is left out here.
   if (!errorOf(board)) data.board = { ...board, due_next: undefined }
   if (todaysReminders.length) data.reminders = todaysReminders
@@ -164,7 +155,7 @@ export function assembleBrief(input: {
     data.coming = {
       through: formatLocalDate(localToUtc(horizon)),
       ...(comingFamily.length ? { events: comingFamily } : {}),
-      ...(days.coming.length ? { calendars: days.coming.map(byMember) } : {}),
+      ...(days.coming.length ? { calendars: days.coming } : {}),
       ...(dueSoon.length ? { board: dueSoon } : {}),
       ...(laterReminders.length ? { reminders: laterReminders } : {}),
     }
@@ -172,11 +163,10 @@ export function assembleBrief(input: {
   if (waiting.length) data.proposals = waiting
   if (!errorOf(weather)) data.weather = weather
   if (questions.length) data.questions = questions.map((qn) => ({ id: qn.id, question: qn.question }))
-  // A day with nothing on anyone's calendar, nothing coming up in the
-  // fortnight, no new mail, nothing due and nothing to ask gets no brief.
-  // The weather, tomorrow, a reminder that will speak for itself and a
-  // proposal Home already lists are context for a brief, not news to wake
-  // the household for.
+  // A day with nothing on any calendar, nothing coming up in the fortnight,
+  // no new mail, nothing due and nothing to ask is a quiet one, and says so.
+  // The weather, tomorrow, a reminder and a proposal Home already lists are
+  // context for a brief, not news.
   return {
     data,
     empty:
@@ -190,4 +180,92 @@ export function assembleBrief(input: {
     problems,
     asked: questions.map((qn) => qn.id),
   }
+}
+
+/**
+ * How far past today the brief looks, in days: to the end of the fortnight,
+ * today included, so next Monday and this Friday are in view on any day of
+ * the week.
+ */
+export const LOOK_AHEAD_DAYS = 13
+
+/**
+ * The reminders a member has set that go off from now to `last`, for the
+ * brief to mention: today's by time, the rest of the fortnight's by day and
+ * time as well. A watch that runs until it finds something is a check, not a
+ * reminder: hourly, it would be in every brief at its next hour, saying nothing.
+ */
+export async function remindersBetween(memberId: number, now: Date, last: string): Promise<Reminder[]> {
+  const day = localDateKey(now)
+  return (await listAutomations(memberId))
+    .filter((r) => r.enabled && r.repeat !== 'until' && r.nextRunAt > now && localDateKey(r.nextRunAt) <= last)
+    .map((r) => {
+      const date = localDateKey(r.nextRunAt)
+      return { label: r.label, at: date === day ? formatLocalTime(r.nextRunAt) : formatLocal(r.nextRunAt), date }
+    })
+}
+
+type Run = (name: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>
+
+/**
+ * Today at a glance for one member: the family calendar and their own, what
+ * starts tomorrow and what is coming over the fortnight, the mail since their
+ * last brief (on the brief's own markers), the board, their reminders, the
+ * proposals waiting on a yes, the weather, and the questions still open. The
+ * questions it carries count as asked, so Home holds them from then on.
+ */
+export async function gatherBrief(ctx: ToolContext, run: Run): Promise<Fetched> {
+  const day = localDateKey(ctx.now)
+  const next = dayAfter(day)
+  const after = dayAfter(next)
+  const horizon = daysAfter(day, LOOK_AHEAD_DAYS)
+  const memberId = ctx.member?.id
+  const [events, tomorrowEvents, comingEvents, calendars, mail, board, weather, questions, proposals, reminders] = await Promise.all([
+    // The whole day, and anything on during it: day three of a camp is news too.
+    run('list_family_events', { from: day, to: day, include_cancelled: false }),
+    run('list_family_events', { from: next, to: next, include_cancelled: false }),
+    // The rest of the fortnight, so next Monday and this Friday are in view from any day of the week.
+    run('list_family_events', { from: after, to: horizon, include_cancelled: false }),
+    // Today to the end of the fortnight in one look, split by day in assembleBrief.
+    run('list_calendar', { from: day, to: horizon }),
+    // A day's mail, not an hour's. What does not fit is counted rather than dropped.
+    run('new_mail', { limit: 20 }),
+    run('jira_board_summary', {}),
+    run('weather', {}),
+    unaskedQuestions().catch(() => []),
+    // Context for the brief, never the reason for one: a lookup that fails leaves it out.
+    run('list_event_proposals', {}).catch((): Record<string, unknown> => ({})),
+    memberId ? remindersBetween(memberId, ctx.now, horizon).catch((): Reminder[] => []) : Promise.resolve([] as Reminder[]),
+  ])
+  const brief = assembleBrief({ day, next, horizon, events, tomorrowEvents, comingEvents, calendars, mail, board, weather, questions, proposals, reminders })
+  if (brief.asked?.length) await markQuestionsAsked(brief.asked)
+  return brief
+}
+
+/**
+ * The week's and the month's money: the past seven days and the month so far
+ * from PocketSmith, with the month's budget. A week in which no money moved
+ * comes back empty.
+ */
+export async function gatherSnapshot(ctx: ToolContext, run: Run): Promise<Fetched> {
+  const today = localDateKey(ctx.now)
+  const weekStart = localDateKey(new Date(ctx.now.getTime() - 6 * 86_400_000))
+  const [week, month, budget] = await Promise.all([
+    run('spending_summary', { from: weekStart, to: today }),
+    run('spending_summary', {}),
+    run('budget_summary', {}),
+  ])
+  const problems: string[] = []
+  for (const [name, r] of [['spending_summary (week)', week], ['spending_summary (month)', month], ['budget_summary', budget]] as const) {
+    const e = errorOf(r)
+    if (e && !isUnconfigured(e)) problems.push(`${name}: ${e}`)
+  }
+  const data: Record<string, unknown> = { week: `${weekStart} to ${today}` }
+  if (!errorOf(week)) data.this_week = week
+  if (!errorOf(month)) data.month_so_far = month
+  if (!errorOf(budget)) data.budget = budget
+  // No bank connected is a setting, not a fault, and a week in which no
+  // money moved has nothing to say either.
+  const moved = Number(week.transactions ?? 0) + Number(month.transactions ?? 0)
+  return { data, empty: moved === 0, problems }
 }

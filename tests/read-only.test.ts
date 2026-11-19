@@ -15,7 +15,7 @@ vi.mock('@/lib/providers', async (orig) => ({
 
 const { mailTools, readOnlyRefusal } = await import('@/lib/tools/mail')
 const { calendarTools } = await import('@/lib/tools/calendar')
-const { ambientContext } = await import('@/lib/agent')
+const { context } = await import('@/lib/mcp')
 
 let client: PGlite
 let ctx: ToolContext
@@ -26,8 +26,9 @@ beforeEach(async () => {
   vi.clearAllMocks()
   process.env.TOKEN_ENC_KEY = 'a'.repeat(64)
   client = (await freshDb()).client
-  const member = await q.upsertMember('111', 'Rowan', { allowed: true })
-  ctx = { chatId: '111', member, memberName: 'Rowan', now: new Date(), notices: [] }
+  process.env.APP_URL = 'https://hearth.example'
+  const member = await q.saveMember({ name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false })
+  ctx = { member, memberName: 'Rowan', now: new Date() }
   await q.saveConnection({ memberId: member.id, provider: 'google', email: 'r@gmail.example', refreshToken: 'r', scopes: null })
 })
 afterEach(async () => closeDb(client))
@@ -43,7 +44,7 @@ describe('an account linked to be read only', () => {
     expect(await call(mailTools(ctx), 'draft_email', { ...letter, provider: 'google' })).toEqual({ error: readOnlyRefusal('google') })
     expect((await call(mailTools(ctx), 'draft_email', letter)).from).toBe('microsoft')
     expect(readOnlyRefusal('google')).toBe(
-      'Your Google account is linked read-only, so nothing is drafted, sent or put on its calendar through it. Send /readonly google off to allow it again.',
+      "Your Google account is linked read-only, so nothing is drafted, sent or put on its calendar through it. You can allow it again on Hearth's Connect page: https://hearth.example/connect.",
     )
   })
 
@@ -71,7 +72,7 @@ describe('an account linked to be read only', () => {
     await q.setConnectionReadOnly(ctx.member!.id, 'google', true)
     await q.saveConnection({ memberId: ctx.member!.id, provider: 'google', email: 'r@gmail.example', refreshToken: 'new', scopes: null })
     expect((await q.connectionsFor(ctx.member!.id))[0].readOnly).toBe(true)
-    expect((await ambientContext('111', ctx.member, 'chat')).text).toContain('Rowan (google: r@gmail.example, read only)')
+    expect(await context(ctx.member!)).toContain('Rowan (google: r@gmail.example, read only)')
     await q.setConnectionReadOnly(ctx.member!.id, 'google', false)
     expect((await call(mailTools(ctx), 'draft_email', letter)).from).toBe('google')
     expect(await q.setConnectionReadOnly(ctx.member!.id, 'microsoft', true)).toBeUndefined()

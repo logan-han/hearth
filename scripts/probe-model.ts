@@ -8,8 +8,8 @@
  * Reads the provider's key from .env.local, or failing that from the
  * dashboard's store when .env.local has DATABASE_URL and TOKEN_ENC_KEY: a key
  * set up at /setup lives nowhere else. Every model in the chain must
- * drive tools and answer a typed choice (the ambient gate and the claimed-
- * action check rely on it), so both are exercised. Exits 1 when the model
+ * drive tools and answer a typed choice (scheduled runs and the checks on
+ * what they write rely on it), so both are exercised. Exits 1 when the model
  * never called the tool.
  */
 import { loadEnvLocal } from '../lib/load-env'

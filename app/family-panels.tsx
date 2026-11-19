@@ -6,7 +6,7 @@ import { Empty } from './ui'
 
 /**
  * The Home panels, able to act as well as show: everything here is something
- * any member could already do by asking the bot, so the buttons are just the
+ * a member could already do from their MCP client, so the buttons are just the
  * shorter path. Mutations go through /api/family, then the server component
  * re-renders via router.refresh(), so there is no client-side copy of truth.
  */
@@ -40,21 +40,51 @@ function useFamilyActions() {
 }
 
 /**
- * Events the bot found in an email or a photo and will not add on its own.
- * Saying yes here is the same yes as in the chat, one click closer, and it
- * says where each one came from so nobody has to go and find the message.
+ * Events found in an email or a notice that will not be added on their own.
+ * Saying yes here is the same yes as accept_event_proposal, one click closer,
+ * and it says where each one came from so nobody has to go and find the message.
  */
 export function Proposals({
   proposals,
 }: {
-  proposals: { id: number; title: string; when: string; chat: string; detail: string }[]
+  proposals: { id: number; title: string; when: string; who: string | null; detail: string }[]
 }) {
   const { act, busy, error } = useFamilyActions()
+  const router = useRouter()
+  // A proposal whose day already holds something on the calendar waits for a
+  // second click that says it is a different occasion, with the clash named.
+  const [held, setHeld] = useState<Record<number, string>>({})
+  const [adding, setAdding] = useState(false)
+  const [addError, setAddError] = useState<string | null>(null)
+
+  async function add(id: number, confirmedDistinct = false) {
+    setAdding(true)
+    setAddError(null)
+    try {
+      const res = await fetch('/api/family', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'accept_proposal', id, confirmedDistinct }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.reason ?? data.error ?? 'That did not work.')
+      if (data.status === 'needs_confirmation') {
+        setHeld((h) => ({ ...h, [id]: data.reason as string }))
+        return
+      }
+      setHeld(({ [id]: _, ...rest }) => rest)
+      router.refresh()
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setAdding(false)
+    }
+  }
 
   return (
     <div className="panel">
       <p className="group-note">
-        The bot spotted these in mail or a photo. Nothing here reaches the family calendar until someone says yes.
+        Found in mail or a notice. Nothing here reaches the family calendar until someone says yes.
       </p>
       <ul className="listing doable">
         {proposals.map((p) => (
@@ -62,22 +92,29 @@ export function Proposals({
             <span className="grow">
               <span className="title">{p.title}</span>
               <span className="meta">
-                {p.when} · proposed in {p.chat}
+                {p.when}{p.who ? ` · found for ${p.who}` : ''}
               </span>
               {p.detail ? <span className="meta">{p.detail}</span> : null}
+              {held[p.id] ? <span className="meta warn">{held[p.id]}</span> : null}
             </span>
             <span className="row-acts">
-              <button className="primary" disabled={busy} title="Add to the family calendar" onClick={() => act({ action: 'accept_proposal', id: p.id })}>
-                Add
-              </button>
-              <button disabled={busy} title="Not this one" onClick={() => act({ action: 'reject_proposal', id: p.id })}>
+              {held[p.id] ? (
+                <button className="primary" disabled={busy || adding} title="It is a different occasion: add it anyway" onClick={() => add(p.id, true)}>
+                  Add anyway
+                </button>
+              ) : (
+                <button className="primary" disabled={busy || adding} title="Add to the family calendar" onClick={() => add(p.id)}>
+                  Add
+                </button>
+              )}
+              <button disabled={busy || adding} title="Not this one" onClick={() => act({ action: 'reject_proposal', id: p.id })}>
                 No
               </button>
             </span>
           </li>
         ))}
       </ul>
-      {error ? <p className="flash bad">{error}</p> : null}
+      {error || addError ? <p className="flash bad">{error ?? addError}</p> : null}
     </div>
   )
 }
@@ -88,7 +125,7 @@ export function NextUp({ events }: { events: { id: number; title: string; when: 
   return (
     <div className="panel">
       {events.length === 0 ? (
-        <Empty>Nothing coming up. Tell the bot about an event and it lands here.</Empty>
+        <Empty>Nothing coming up. Add an event from your MCP client and it lands here.</Empty>
       ) : (
         <ul className="listing doable">
           {events.map((e) => (
@@ -123,8 +160,6 @@ export function Reminders({
     id: number
     label: string
     enabled: boolean
-    /** Part of the product: it can be paused, but the tick would only put a deleted one back. */
-    builtin: boolean
     /** A job that goes once it has run, or once it has found what it was waiting for. */
     repeat?: 'once' | 'until' | null
     nextRun: string | null
@@ -139,14 +174,14 @@ export function Reminders({
   return (
     <div className="panel">
       {automations.length === 0 ? (
-        <Empty>None scheduled. Ask the bot in the chat, or send /watch, to set one up.</Empty>
+        <Empty>None scheduled. Ask your MCP client to set one up; what each one finds is kept under Reports.</Empty>
       ) : (
         <ul className="listing doable">
           {automations.map((a) => (
             <li key={a.id}>
               <span className="grow">
                 <span className="title">
-                  {a.label} {a.builtin ? <span className="tag none">built in</span> : null}
+                  {a.label}
                   {a.repeat === 'once' ? <span className="tag none">once</span> : null}
                   {a.repeat === 'until' ? <span className="tag none">until it happens</span> : null}
                   {a.enabled ? null : <span className="tag none">paused</span>}
@@ -160,15 +195,13 @@ export function Reminders({
                 <button disabled={busy} onClick={() => act({ action: 'pause_automation', id: a.id, enabled: !a.enabled })}>
                   {a.enabled ? 'Pause' : 'Resume'}
                 </button>
-                {a.builtin ? null : (
-                  <button
-                    disabled={busy}
-                    title="Delete this reminder"
-                    onClick={() => confirm(`Delete "${a.label}" for good?`) && act({ action: 'delete_automation', id: a.id })}
-                  >
-                    ×
-                  </button>
-                )}
+                <button
+                  disabled={busy}
+                  title="Delete this reminder"
+                  onClick={() => confirm(`Delete "${a.label}" for good?`) && act({ action: 'delete_automation', id: a.id })}
+                >
+                  ×
+                </button>
               </span>
             </li>
           ))}
@@ -251,7 +284,7 @@ export function FamilyLists({
   return (
     <div className="panel">
       {lists.length === 0 ? (
-        <Empty>No lists yet. Say &ldquo;add milk to the shopping list&rdquo; in the chat, or start one below.</Empty>
+        <Empty>No lists yet. Ask your MCP client to &ldquo;add milk to the shopping list&rdquo;, or start one below.</Empty>
       ) : (
         lists.map((l) => (
           <div key={l.name} className="weblist">
@@ -342,17 +375,17 @@ export function FamilyLists({
 }
 
 /**
- * What the bot keeps in mind between conversations, so the household can
- * see what it has been told and take back what is wrong or out of date.
- * Forgetting here is the same soft forget as in the chat: the row stays as
- * history, it just stops being a Known fact.
+ * What the household keeps in mind, so everyone can see what Hearth has been
+ * told and take back what is wrong or out of date. Forgetting here is the same
+ * soft forget as the forget tool: the row stays as history, it just stops
+ * being a Known fact.
  */
 export function Remembered({
   memories,
   questions,
 }: {
   memories: { id: number; fact: string; who: string | null; since: string }[]
-  /** What the nightly pass would have filed but could not stand behind, waiting on a yes. */
+  /** What nobody could stand behind yet, waiting on a yes. */
   questions: { id: number; question: string; candidate: string; since: string }[]
 }) {
   const { act, busy, error } = useFamilyActions()
@@ -362,8 +395,8 @@ export function Remembered({
   return (
     <div className="panel">
       <p className="group-note">
-        What the bot keeps in mind between conversations, filed from the chat or by its nightly pass over the day&rsquo;s talk.
-        When it was not sure, it asks below rather than guessing. Forgetting one here is the same as telling it to forget in the chat.
+        What Hearth keeps in mind for the household, filed when someone asked it to remember. When something could not be
+        stood behind, it is asked below rather than guessed. Forgetting one here is the same as asking it to forget.
       </p>
       {questions.length > 0 ? (
         <>
@@ -400,7 +433,7 @@ export function Remembered({
         </>
       ) : null}
       {memories.length === 0 ? (
-        <Empty>Nothing remembered yet. Say &ldquo;remember that bin night is Monday&rdquo; in the chat and it lands here.</Empty>
+        <Empty>Nothing remembered yet. Ask your MCP client to &ldquo;remember that bin night is Monday&rdquo; and it lands here.</Empty>
       ) : (
         <ul className="listing doable">
           {memories.map((m) => (
@@ -408,7 +441,7 @@ export function Remembered({
               <span className="grow">
                 <span className="title">{m.fact}</span>
                 <span className="meta">
-                  {m.who ? `filed for ${m.who}` : 'filed by the bot'} · {m.since}
+                  {m.who ? `filed for ${m.who}` : 'filed by Hearth'} · {m.since}
                 </span>
               </span>
               <span className="row-acts">
@@ -430,19 +463,19 @@ export function Remembered({
 }
 
 /**
- * What the bot changed lately, and for whom: the household's record, so
- * nobody has to take its word that something was done. Read-only; each line
- * is undone the way it was done, by asking or on the panel that holds it.
+ * What was changed in the viewer's name lately, and how: their own record, so
+ * nobody has to take anyone's word that something was done. Read-only; each
+ * line is undone the way it was done, by asking or on the panel that holds it.
  */
 export function Lately({
   activity,
 }: {
-  activity: { id: number; summary: string; who: string; chat: string; when: string }[]
+  activity: { id: number; summary: string; how: string; when: string }[]
 }) {
   return (
     <div className="panel">
       {activity.length === 0 ? (
-        <Empty>Nothing changed yet. Whatever the bot adds, ticks off, sends or schedules is listed here, with who asked.</Empty>
+        <Empty>Nothing changed yet. Whatever is added, ticked off, sent or scheduled in your name is listed here, with how.</Empty>
       ) : (
         <ul className="listing">
           {activity.map((a) => (
@@ -450,7 +483,7 @@ export function Lately({
               <span className="grow">
                 <span className="title">{a.summary}</span>
                 <span className="meta">
-                  {a.when} · {a.who} · in {a.chat}
+                  {a.when} · {a.how}
                 </span>
               </span>
             </li>
@@ -462,8 +495,8 @@ export function Lately({
 }
 
 /**
- * What the household is working towards. Each goal's steps tick off here as
- * they do in the chat, and Done or Drop closes it and ends its check-ins.
+ * What the viewer is working towards. Each goal's steps tick off here as they
+ * do with update_goal, and Done or Drop closes it and ends its check-ins.
  */
 export function Goals({
   goals,
@@ -531,20 +564,20 @@ export function Goals({
 
 /**
  * The signed-in member's own email drafts, waiting on their yes. Send here is
- * the same yes as in the chat: the draft goes from their mailbox as written,
+ * the same yes as send_email: the draft goes from their mailbox as written,
  * once, and Discard throws it away. Nobody else's drafts are shown, since
  * only the writer can send one.
  */
 export function Drafts({
   drafts,
 }: {
-  drafts: { id: number; to: string; cc: string | null; subject: string; body: string; from: string; chat: string; when: string }[]
+  drafts: { id: number; to: string; cc: string | null; subject: string; body: string; from: string; when: string }[]
 }) {
   const { act, busy, error } = useFamilyActions()
 
   return (
     <div className="panel">
-      <p className="group-note">Your email drafts. Nothing is sent until you say yes, here or in the chat.</p>
+      <p className="group-note">Your email drafts. Nothing is sent until you say yes, here or to your MCP client.</p>
       <ul className="listing doable">
         {drafts.map((d) => (
           <li key={d.id}>
@@ -552,7 +585,7 @@ export function Drafts({
               <span className="title">{d.subject}</span>
               <span className="meta">
                 to {d.to}
-                {d.cc ? `, copy to ${d.cc}` : ''} · from your {d.from} · drafted {d.when} in {d.chat}
+                {d.cc ? `, copy to ${d.cc}` : ''} · from your {d.from} · drafted {d.when}
               </span>
               <span className="meta draft-body">{d.body}</span>
             </span>
@@ -578,16 +611,16 @@ export function Drafts({
 }
 
 /**
- * The household's helpers, each called by opening a message with its name.
- * New ones are made by asking in the chat, where a role is worked out with
- * whoever asks; here one can only be let go.
+ * The household's helpers, each handed jobs by name. New ones are made by
+ * asking an MCP client, where a role is worked out with whoever asks; here
+ * one can only be let go.
  */
 export function Helpers({ helpers }: { helpers: { id: number; name: string; role: string }[] }) {
   const { act, busy, error } = useFamilyActions()
 
   return (
     <div className="panel">
-      <p className="group-note">Call one by starting a message with its name, like &ldquo;{helpers[0].name}, ...&rdquo;. Ask in the chat to add another.</p>
+      <p className="group-note">Hand one a job from your MCP client, like &ldquo;ask {helpers[0].name} to ...&rdquo;; what it finds is kept under Reports. Ask your client to add another.</p>
       <ul className="listing doable">
         {helpers.map((h) => (
           <li key={h.id}>
@@ -604,6 +637,48 @@ export function Helpers({ helpers }: { helpers: { id: number; name: string; role
         ))}
       </ul>
       {error ? <p className="flash bad">{error}</p> : null}
+    </div>
+  )
+}
+
+/** How each report's state reads beside it. */
+const REPORT_TAG: Record<'ready' | 'held' | 'problem', string | null> = {
+  ready: null,
+  held: 'held back',
+  problem: 'problem',
+}
+
+/**
+ * What the viewer's scheduled jobs found: reminders, watches, goal check-ins
+ * and helpers' jobs, newest first. Nothing is posted anywhere, so this and
+ * the viewer's MCP client are where a job's findings wait. A draft the checks
+ * held back is shown marked, with why.
+ */
+export function Reports({
+  reports,
+}: {
+  reports: { id: number; label: string; helper: string | null; status: 'ready' | 'held' | 'problem'; body: string; detail: string | null; when: string }[]
+}) {
+  return (
+    <div className="panel">
+      <p className="group-note">What your reminders, watches, check-ins and helpers found. Your MCP client reads the same with list_reports.</p>
+      <ul className="listing">
+        {reports.map((r) => (
+          <li key={r.id}>
+            <span className="grow">
+              <span className="title">
+                {r.label} {REPORT_TAG[r.status] ? <span className="tag none">{REPORT_TAG[r.status]}</span> : null}
+              </span>
+              <span className="meta">
+                {r.when}
+                {r.helper ? ` · by ${r.helper}` : ''}
+              </span>
+              <span className="meta draft-body">{r.body}</span>
+              {r.detail ? <span className="meta">{r.detail}</span> : null}
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

@@ -2,7 +2,7 @@ import { localToUtc, formatLocal, formatLocalDate, nextLocalMidnight } from './c
 import { timezone } from './env'
 
 /**
- * Reading a calendar file someone sends the bot. Only what the family
+ * Reading a calendar file attached to an email. Only what the family
  * calendar can hold is kept: a title, a start, an end, a place, a note. A
  * repeating event is reported rather than expanded, because the family
  * calendar has no recurrence and guessing at occurrences would invent dates.

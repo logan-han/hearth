@@ -62,11 +62,15 @@ export async function decrypt(payload: string): Promise<string> {
 /**
  * A key for signing one kind of token, derived from TOKEN_ENC_KEY by HKDF
  * rather than being it. Each purpose gets its own, so a session can never
- * pass as OAuth state or the other way round, and the salt is an epoch the
- * caller stores: changing it voids everything signed before, while the key
- * that decrypts every stored refresh token and setting stays as it was.
+ * pass as OAuth state, an MCP client's registration as an authorisation
+ * code, or the other way round; and the salt is an epoch the caller stores:
+ * changing it voids everything signed before, while the key that decrypts
+ * every stored refresh token and setting stays as it was.
  */
-export async function signingKey(purpose: 'session' | 'oauth-state' | 'mcp', epoch: string): Promise<Uint8Array> {
+export async function signingKey(
+  purpose: 'session' | 'oauth-state' | 'mcp' | 'oauth-client' | 'oauth-consent' | 'oauth-code',
+  epoch: string,
+): Promise<Uint8Array> {
   const root = await crypto.subtle.importKey('raw', keyMaterial() as BufferSource, 'HKDF', false, ['deriveBits'])
   const bits = await crypto.subtle.deriveBits(
     {
@@ -115,12 +119,11 @@ export async function mcpKeyHolder(key: string): Promise<number | null> {
   const parts = /^(\d+)\.([\w-]+)\.([\w-]{43})$/.exec(key)
   if (!parts) return null
   const [, id, random, tag] = parts
-  const ok = await crypto.subtle.verify(
-    'HMAC',
-    await mcpTagKey(),
-    Buffer.from(tag, 'base64url'),
-    new TextEncoder().encode(`${id}.${random}`),
-  )
+  // Base64url decodes leniently: the last character carries spare bits, so
+  // several spellings of one tag decode alike. Only the one minted here counts.
+  const bytes = Buffer.from(tag, 'base64url')
+  if (bytes.toString('base64url') !== tag) return null
+  const ok = await crypto.subtle.verify('HMAC', await mcpTagKey(), bytes, new TextEncoder().encode(`${id}.${random}`))
   return ok ? Number(id) : null
 }
 

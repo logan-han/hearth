@@ -20,7 +20,7 @@ const MAX_CHARS = 9000
 const MAX_REDIRECTS = 5
 
 /**
- * Where the bot must never reach, whatever name led there: loopback, the
+ * Where Hearth must never reach, whatever name led there: loopback, the
  * private ranges, link-local (cloud metadata lives at 169.254.169.254),
  * carrier-grade NAT, multicast and the reserved blocks. An IPv4 address
  * written as IPv6 (::ffff:127.0.0.1) is checked against the IPv4 rules.
@@ -55,12 +55,12 @@ export const lookupPublic: LookupFunction = (hostname, options, callback) => {
   )
 }
 
-// Made on first use: the library behind it takes a while to load, and most turns read no link.
+// Made on first use: the library behind it takes a while to load, and most calls read no link.
 let publicOnly: Promise<Agent> | undefined
 const publicConnections = () => (publicOnly ??= import('undici').then(({ Agent }) => new Agent({ connect: { lookup: lookupPublic } })))
 
 /**
- * The bot fetches URLs out of family chat; it must never reach inward. An
+ * Hearth fetches URLs it was handed or read somewhere; it must never reach inward. An
  * address written into the URL is judged here, and a name as the connection
  * resolves it.
  */

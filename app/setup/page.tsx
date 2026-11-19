@@ -1,8 +1,7 @@
 import { requireMember } from '@/lib/auth/session'
 import { hydrateSecrets, SETTING_META } from '@/lib/settings'
-import { telegramStatus } from '@/lib/telegram-admin'
 import { allowedMembers } from '@/lib/db/queries'
-import { idSet, timezone, language, units } from '@/lib/env'
+import { timezone, language, units } from '@/lib/env'
 import { Shell } from '../shell'
 import { SignIn } from '../sign-in'
 import { Denied } from '../denied'
@@ -12,8 +11,8 @@ export const dynamic = 'force-dynamic'
 
 /**
  * The first-run walkthrough: everything between "deployed" and "the family is
- * talking to it", in order. Home sends fresh admins here; it stays reachable
- * afterwards for reconnecting the webhook or adding people.
+ * using it", in order. Home sends an admin here while the household has
+ * nobody in it; it stays reachable afterwards for adding people.
  */
 export default async function SetupPage() {
   const session = await requireMember()
@@ -21,14 +20,12 @@ export default async function SetupPage() {
   if (session.role !== 'admin') return <Denied />
 
   await hydrateSecrets()
-  const [status, people] = await Promise.all([telegramStatus(), allowedMembers()])
+  const people = await allowedMembers()
 
   return (
     <Shell session={session} here="/setup">
       <SetupWizard
-        status={status}
-        members={people.map((m) => ({ name: m.name, telegramUserId: m.telegramUserId, isAdmin: m.isAdmin }))}
-        seeded={[...idSet('ALLOWED_TELEGRAM_IDS')]}
+        members={people.map((m) => ({ name: m.name, email: m.email, isAdmin: m.isAdmin }))}
         llm={{
           gemini: Boolean(process.env.GEMINI_API_KEY),
           openrouter: Boolean(process.env.OPENROUTER_API_KEY),

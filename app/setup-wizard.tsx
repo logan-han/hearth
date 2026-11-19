@@ -1,9 +1,8 @@
 'use client'
 
 import { useState } from 'react'
-import type { TelegramStatus } from '@/lib/telegram-admin'
 
-type Person = { name: string; telegramUserId: string; isAdmin: boolean }
+type Person = { name: string; email: string | null; isAdmin: boolean }
 type LlmTier = 'gemini' | 'openrouter' | 'local'
 type LlmState = Record<LlmTier, boolean>
 
@@ -19,35 +18,28 @@ async function post(url: string, body: unknown) {
 }
 
 export function SetupWizard({
-  status: initialStatus,
   members: initialMembers,
-  seeded,
   llm: initialLlm,
   timezone: initialTz,
   language: initialLanguage,
   units: initialUnits,
   languageOptions,
 }: {
-  status: TelegramStatus
   members: Person[]
-  seeded: string[]
   llm: LlmState
   timezone: string
   language: string
   units: string
   languageOptions: readonly string[]
 }) {
-  const [status, setStatus] = useState(initialStatus)
   const [members, setMembers] = useState(initialMembers)
   const [llm, setLlm] = useState(initialLlm)
   const [busy, setBusy] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [notes, setNotes] = useState<Record<string, string>>({})
 
-  const [token, setToken] = useState('')
-  const [changingToken, setChangingToken] = useState(false)
-  const [person, setPerson] = useState({ name: '', telegramUserId: '', email: '' })
-  const [personAdmin, setPersonAdmin] = useState(initialMembers.length === 0 && seeded.length === 0)
+  const [person, setPerson] = useState({ name: '', email: '' })
+  const [personAdmin, setPersonAdmin] = useState(initialMembers.length === 0)
   const [provider, setProvider] = useState<LlmTier | null>(null)
   const [apiKey, setApiKey] = useState('')
   const [local, setLocal] = useState({ url: '', model: '', key: '' })
@@ -69,38 +61,25 @@ export function SetupWizard({
     }
   }
 
-  const saveToken = () =>
-    step('bot', async () => {
-      setStatus((await post('/api/admin/telegram', { token: token.trim() })) as TelegramStatus)
-      setToken('')
-      setChangingToken(false)
-    })
-
-  const connect = () =>
-    step('hook', async () => {
-      setStatus((await post('/api/admin/telegram', { register: true })) as TelegramStatus)
-    })
-
   const addPerson = () =>
     step(
       'family',
       async () => {
-        // Only what was filled in, so an id already here keeps its email and
-        // admin. Access is said outright: adding someone here is letting them
-        // in, and the list above shows only those who are.
+        // Access is said outright: adding someone here is letting them in,
+        // and the list above shows only those who are. An address already in
+        // the family names that person, who keeps their admin.
         const data = await post('/api/admin/members', {
-          telegramUserId: person.telegramUserId,
           name: person.name,
-          email: person.email.trim() || undefined,
+          email: person.email.trim(),
           allowed: true,
           isAdmin: personAdmin || undefined,
         })
         setMembers(
           (data.members as (Person & { allowed: boolean })[])
             .filter((m) => m.allowed)
-            .map((m) => ({ name: m.name, telegramUserId: m.telegramUserId, isAdmin: m.isAdmin })),
+            .map((m) => ({ name: m.name, email: m.email, isAdmin: m.isAdmin })),
         )
-        setPerson({ name: '', telegramUserId: '', email: '' })
+        setPerson({ name: '', email: '' })
         setPersonAdmin(false)
       },
       'Added.',
@@ -163,11 +142,9 @@ export function SetupWizard({
       'Saved.',
     )
 
-  const botDone = status.ok
-  const hookDone = status.connected
-  const familyDone = members.length > 0 || seeded.length > 0
+  const familyDone = members.length > 0
   const llmReady = llm.gemini || llm.openrouter || llm.local
-  const ready = botDone && hookDone && familyDone && llmReady
+  const ready = familyDone
 
   const keyForm = (which: 'gemini' | 'openrouter', placeholder: string) => (
     <div className="wizard-row">
@@ -224,122 +201,30 @@ export function SetupWizard({
     <div className="wizard">
       <h1>Light the fire</h1>
       <p className="lede">
-        Four things stand between a fresh deployment and a working household bot. They save as you go, so
-        it is safe to leave and come back.
+        A fresh deployment needs its family before anyone can use it; the rest is optional. Everything saves as you
+        go, so it is safe to leave and come back.
       </p>
 
       <section>
         <h2>
-          <i className={`stepdot${botDone ? ' on' : ''}`} />1 · The bot
-        </h2>
-        <div className="panel">
-          {botDone && !changingToken ? (
-            <div className="wizard-done">
-              <p className="empty">
-                Talking to Telegram as <b className="mono">@{status.username}</b>.
-              </p>
-              <button onClick={() => setChangingToken(true)}>Change token</button>
-            </div>
-          ) : (
-            <>
-              <p className="empty">
-                Message{' '}
-                <a href="https://t.me/BotFather" target="_blank" rel="noreferrer">
-                  @BotFather
-                </a>{' '}
-                in Telegram, send <span className="mono">/newbot</span>, pick a name, and paste the token it
-                prints. The token is checked with Telegram before it is kept.
-              </p>
-              {status.configured && !status.ok ? (
-                <p className="empty warn">The stored token is being rejected: {status.error ?? 'unknown error'}</p>
-              ) : null}
-              <div className="wizard-row">
-                <input
-                  type="password"
-                  placeholder="123456:ABC-…"
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && saveToken()}
-                />
-                <button className="primary" disabled={busy === 'bot' || !token.trim()} onClick={saveToken}>
-                  Save token
-                </button>
-                {changingToken ? <button onClick={() => setChangingToken(false)}>Cancel</button> : null}
-              </div>
-            </>
-          )}
-          {flash('bot')}
-        </div>
-      </section>
-
-      <section>
-        <h2>
-          <i className={`stepdot${hookDone ? ' on' : ''}`} />2 · The webhook
+          <i className={`stepdot${familyDone ? ' on' : ''}`} />1 · The family
         </h2>
         <div className="panel">
           <p className="empty">
-            Telegram has to be told where this deployment lives before any message arrives. One click:
-            Hearth mints a webhook secret if there is none and registers{' '}
-            <span className="mono">{status.expectedUrl}</span> with Telegram.
+            Hearth acts for recognised people only, each signing in here with their Google or Microsoft account. Add
+            yourself first, then everyone else, by the address they sign in with. Admins can add more later from
+            Settings.
           </p>
-          {hookDone ? (
-            <p className="empty" style={{ marginTop: '0.5rem' }}>
-              Connected{status.webhook && status.webhook.pending > 0 ? `, ${status.webhook.pending} updates pending` : ''}.
-            </p>
-          ) : status.webhook?.url === status.expectedUrl && status.webhook.missing.length ? (
-            <p className="empty warn" style={{ marginTop: '0.5rem' }}>
-              The webhook was registered by an older Hearth, so Telegram never says when the bot is removed from a
-              group. Reconnect it.
-            </p>
-          ) : status.webhook?.url ? (
-            <p className="empty warn" style={{ marginTop: '0.5rem' }}>
-              The webhook currently points at {status.webhook.url}.
-            </p>
-          ) : null}
-          {status.webhook?.lastError ? (
-            <p className="empty warn" style={{ marginTop: '0.5rem' }}>
-              Telegram&rsquo;s last delivery error: {status.webhook.lastError}
-            </p>
-          ) : null}
-          <div className="wizard-row">
-            <button className="primary" disabled={busy === 'hook' || !botDone} onClick={connect}>
-              {hookDone ? 'Reconnect webhook' : 'Connect webhook'}
-            </button>
-          </div>
-          {flash('hook')}
-        </div>
-      </section>
-
-      <section>
-        <h2>
-          <i className={`stepdot${familyDone ? ' on' : ''}`} />3 · The family
-        </h2>
-        <div className="panel">
-          <p className="empty">
-            The bot answers recognised people only. Everyone&rsquo;s Telegram id is easy to get: DM the bot{' '}
-            <span className="mono">/start</span> and it replies with the sender&rsquo;s id, even before they are
-            added. Admins can grant everyone else later with /allow or from Settings.
-          </p>
-          {members.length > 0 || seeded.length > 0 ? (
+          {members.length > 0 ? (
             <ul className="listing" style={{ marginTop: '0.5rem' }}>
               {members.map((m) => (
-                <li key={m.telegramUserId}>
+                <li key={`${m.name}-${m.email ?? ''}`}>
                   <span className="title">
                     {m.name} {m.isAdmin ? <span className="tag admin">admin</span> : null}
                   </span>
-                  <span className="meta mono">{m.telegramUserId}</span>
+                  <span className="meta mono">{m.email ?? 'no address yet'}</span>
                 </li>
               ))}
-              {seeded
-                .filter((id) => !members.some((m) => m.telegramUserId === id))
-                .map((id) => (
-                  <li key={id}>
-                    <span className="title">
-                      Founding member <span className="tag admin">admin</span>
-                    </span>
-                    <span className="meta mono">{id} · from ALLOWED_TELEGRAM_IDS, joins on first message</span>
-                  </li>
-                ))}
             </ul>
           ) : null}
           <div className="wizard-row">
@@ -349,13 +234,8 @@ export function SetupWizard({
               onChange={(e) => setPerson({ ...person, name: e.target.value })}
             />
             <input
-              placeholder="Telegram id"
-              inputMode="numeric"
-              value={person.telegramUserId}
-              onChange={(e) => setPerson({ ...person, telegramUserId: e.target.value })}
-            />
-            <input
-              placeholder="Email (optional, lets them sign in here)"
+              placeholder="Email they sign in with"
+              type="email"
               value={person.email}
               onChange={(e) => setPerson({ ...person, email: e.target.value })}
             />
@@ -365,7 +245,7 @@ export function SetupWizard({
             </label>
             <button
               className="primary"
-              disabled={busy === 'family' || !person.name.trim() || !person.telegramUserId.trim()}
+              disabled={busy === 'family' || !person.name.trim() || !person.email.trim()}
               onClick={addPerson}
             >
               Add
@@ -377,12 +257,14 @@ export function SetupWizard({
 
       <section>
         <h2>
-          <i className={`stepdot${llmReady ? ' on' : ''}`} />4 · The brain
+          <i className={`stepdot${llmReady ? ' on' : ''}`} />2 · A model for scheduled jobs
         </h2>
         <div className="panel">
           <p className="empty">
-            Answers need a model, and <b>one provider is enough</b>. Set up whichever suits; anything extra
-            becomes a fallback, in an order managed from <a href="/settings">Settings</a>.
+            Optional. Your MCP client is the brain for everything you ask; Hearth needs a model of its own only for
+            what runs while nobody is asking: reminders, watches, goal check-ins and jobs handed to helpers. <b>One
+            provider is enough</b>, and anything extra becomes a fallback, in an order managed from{' '}
+            <a href="/settings">Settings</a>.
           </p>
           {providerRow(
             'gemini',
@@ -448,12 +330,12 @@ export function SetupWizard({
 
       <section>
         <h2>
-          <i className="stepdot on" />5 · The household clock and voice
+          <i className="stepdot on" />3 · The household clock and voice
         </h2>
         <div className="panel">
           <p className="empty">
-            Reminders and calendar entries mean this time wherever anyone happens to be reading, and replies
-            come in this language with these units.
+            Reminders and calendar entries mean this time wherever anyone happens to be reading, and scheduled
+            reports are written in this language with these units.
           </p>
           <div className="wizard-row">
             <input value={tz} onChange={(e) => setTz(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && saveTz()} />
@@ -497,9 +379,10 @@ export function SetupWizard({
         <div className="panel">
           <ul className="listing">
             <li>
-              <span className="title">Let the bot hear the group</span>
+              <span className="title">Connect an MCP client</span>
               <span className="meta">
-                In BotFather: /setprivacy → Disable. Without it the bot only sees @mentions and replies.
+                Each member signs in here, makes a key under Claude and other MCP clients on Home, and adds it to their
+                client with the one line shown there. Clients that speak OAuth can sign in from the client instead.
               </span>
             </li>
             <li>

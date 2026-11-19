@@ -188,8 +188,6 @@ export type PsCategoryBudget = {
   to: string
   /** Whether the category has a budget at all, in PocketSmith's own words. */
   budgeted: boolean
-  /** Whether the category rolls a period's over- or underspend into the next. */
-  rollsOver: boolean
 }
 
 /** Per-category budget analysis; PocketSmith precomputes over/under for us. */
@@ -214,7 +212,6 @@ export async function budgetByCategory(opts: { startDate: string; endDate: strin
         to: e.expense.end_date ?? opts.endDate,
         // Absent only from a sparse reply; an allowance then means a budget.
         budgeted: typeof e.is_budgeted === 'boolean' ? e.is_budgeted : forecast !== 0,
-        rollsOver: Boolean(e.category?.rollover_type),
       }
     })
 }

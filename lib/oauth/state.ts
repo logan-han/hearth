@@ -6,51 +6,57 @@ const ALG = 'HS256'
 const secret = () => signingSecret('oauth-state')
 
 /**
- * `purpose` separates the two things this round trip is used for: linking a
- * family member's mailbox, and signing in to the web dashboard. Both go through
+ * `purpose` separates the two things this round trip is used for: signing in
+ * to the dashboard, and a signed-in member linking a mailbox. Both go through
  * the same provider callback so the OAuth consoles need only one redirect URI
- * registered.
+ * registered. A sign-in may carry `next`, the page to land on afterwards (an
+ * MCP client's approval page, say); a link carries the member it is for.
  */
-export type StatePayload = { tg: string; name: string; chat: string; purpose?: 'link' | 'signin' }
+export type StatePayload =
+  | { purpose: 'signin'; next?: string }
+  | { purpose: 'link'; member: number }
 
 /**
- * Signed, short-lived state binding an OAuth round-trip to one Telegram user.
- * A sign-in state is handed to anyone who asks and binds nobody, so it carries
- * no epoch and costs no read; a link carries one, so signing out everywhere
- * voids it.
+ * Where a sign-in may send its member afterwards: a page on this site, never
+ * another one. A path starting with one slash, and not two (`//host` is
+ * another site), with nothing in it a browser would read as a new origin.
+ */
+export function safeNext(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const path = value.trim()
+  if (!path.startsWith('/') || path.startsWith('//') || /[\\\s]/.test(path) || path.length > 2000) return undefined
+  return path
+}
+
+/**
+ * Signed, short-lived state for one OAuth round trip. A sign-in state is
+ * handed to anyone who asks and binds nobody, so it carries no epoch and
+ * costs no read; a link carries one, so signing out everywhere voids it.
  */
 export async function signState(payload: StatePayload, ttl = '10m'): Promise<string> {
-  return new SignJWT({ ...payload, ...(payload.purpose === 'signin' ? {} : { ep: await epochMark() }) })
-    .setProtectedHeader({ alg: ALG })
-    .setIssuedAt()
-    .setExpirationTime(ttl)
-    .sign(await secret())
+  const claims =
+    payload.purpose === 'signin'
+      ? { purpose: 'signin', ...(safeNext(payload.next) ? { next: safeNext(payload.next) } : {}) }
+      : { purpose: 'link', member: payload.member, ep: await epochMark() }
+  return new SignJWT(claims).setProtectedHeader({ alg: ALG }).setIssuedAt().setExpirationTime(ttl).sign(await secret())
 }
 
 /**
  * Verify a state, and when `expect` is given, that it was minted for that
  * purpose. A sign-in state is handed to anyone who asks, so a consumer that
- * acts for a Telegram member must say so here: otherwise that anonymous state
- * passes as a link bound to nobody.
+ * acts for a member must say so here: otherwise that anonymous state passes
+ * as a link bound to nobody.
  */
-export async function verifyState(token: string, expect?: 'link' | 'signin'): Promise<StatePayload> {
+export async function verifyState(token: string, expect?: StatePayload['purpose']): Promise<StatePayload> {
   const { payload } = await jwtVerify(token, await secret(), { algorithms: [ALG] })
-  const { tg, name, chat, purpose, ep } = payload as Record<string, unknown>
+  const { purpose, member, next, ep } = payload as Record<string, unknown>
   const kind = purpose === 'signin' ? 'signin' : 'link'
   if (expect && kind !== expect) throw new Error(`state is for ${kind}, not ${expect}`)
-  if (kind === 'link' && !(await inThisEpoch(ep))) throw new Error('state signed before everyone was signed out')
-  // Signing in is not bound to a Telegram account, so only the linking flow
-  // requires one, and an empty id binds nothing.
-  if (kind === 'link' && (typeof tg !== 'string' || !tg.trim())) throw new Error('state missing telegram id')
-  return {
-    tg: typeof tg === 'string' ? tg : '',
-    name: typeof name === 'string' ? name : 'Family member',
-    chat: typeof chat === 'string' ? chat : '',
-    purpose: kind,
+  if (kind === 'signin') {
+    const to = safeNext(next)
+    return to ? { purpose: 'signin', next: to } : { purpose: 'signin' }
   }
-}
-
-/** The /connect deep link handed to a member over DM. */
-export async function connectLink(base: string, payload: StatePayload): Promise<string> {
-  return `${base}/connect?t=${encodeURIComponent(await signState(payload, '30m'))}`
+  if (!(await inThisEpoch(ep))) throw new Error('state signed before everyone was signed out')
+  if (typeof member !== 'number' || !Number.isInteger(member) || member < 1) throw new Error('state names no member')
+  return { purpose: 'link', member }
 }

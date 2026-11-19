@@ -695,11 +695,12 @@ main { padding-top: 1.75rem; }
 .wizard-row label { display: flex; align-items: center; gap: 0.3rem; font-size: 0.82rem; color: var(--muted); }
 .wizard-done { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
 
-/* Telegram webhook status, inside the settings panel and the setup guide. */
+/* The live status of a settings group's integrations, under its keys. */
 .hook { border-top: 1px solid var(--line-soft); margin-top: 0.65rem; padding-top: 0.65rem; }
-.hook .flash { margin: 0.6rem 0 0; }
-.hook .empty.warn { margin-top: 0.4rem; }
-.hook-acts { display: flex; gap: 0.45rem; margin-top: 0.7rem; flex-wrap: wrap; }
+
+/* A key shown once, as it is made, with the line that adds it to a client. */
+.key-made { border: 1px solid var(--line-soft); border-radius: 8px; padding: 0.75rem; margin: 0.5rem 0 0.75rem; }
+.key-made .url { display: block; margin: 0.35rem 0; word-break: break-all; }
 
 .group-note {
   margin: 0 0 0.5rem;

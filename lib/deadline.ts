@@ -1,8 +1,9 @@
 /**
  * How long one request to an outside service may take. A service that takes
  * the connection and then never answers would otherwise hold the request until
- * the platform stops the whole function at 300 seconds: the turn gets no reply
- * and no second model, and a tick loses the automation it was running. The
+ * the platform stops the whole function at 300 seconds: an MCP call gets no
+ * answer, and a tick loses the scheduled job it was running and its second
+ * model. The
  * model call's own step timeout cannot cut a tool short, since the step waits
  * for the tool whatever happens.
  */

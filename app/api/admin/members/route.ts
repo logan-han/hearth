@@ -1,11 +1,6 @@
 import { NextResponse } from 'next/server'
 import { requireAdmin } from '@/lib/auth/session'
-import {
-  allMembersWithLinks, saveMember, deleteMember, memberByTelegramId, allowedMembers, clearStrangerEverywhere,
-} from '@/lib/db/queries'
-import { idSet } from '@/lib/env'
-import { hydrateSecrets } from '@/lib/settings'
-import { flagRevoked } from '@/lib/headcount'
+import { allMembersWithLinks, saveMember, deleteMember, memberById, allowedMembers } from '@/lib/db/queries'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -25,13 +20,13 @@ function looksLikeEmail(value: string): boolean {
 }
 
 /**
- * Losing the last admin would leave the bot with nobody to run it from the
- * chat, so the only admin cannot be revoked, demoted or removed — only
+ * Losing the last admin would leave the household with nobody to run it from
+ * here, so the only admin cannot be revoked, demoted or removed, only
  * succeeded. ADMIN_EMAILS still opens this dashboard, which is how you would
  * appoint the successor.
  */
-async function isLastAdmin(telegramUserId: string): Promise<boolean> {
-  const target = await memberByTelegramId(telegramUserId)
+async function isLastAdmin(id: number): Promise<boolean> {
+  const target = await memberById(id)
   if (!target?.allowed || !target.isAdmin) return false
   return (await allowedMembers()).filter((m) => m.isAdmin).length === 1
 }
@@ -41,6 +36,13 @@ export async function GET() {
   return NextResponse.json({ members: await allMembersWithLinks() })
 }
 
+/**
+ * Add someone, or change one. A new member needs a name and the address they
+ * will sign in with; adding an address already in the family changes that
+ * person instead of making a second. A change names its member by id, and
+ * keeps whatever the body leaves out, so fixing a name cannot quietly clear
+ * an address, demote, or let back in someone who was revoked.
+ */
 export async function POST(req: Request) {
   const session = await requireAdmin()
   if (!session) return deny()
@@ -52,9 +54,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Malformed request' }, { status: 400 })
   }
 
-  const telegramUserId = String(body.telegramUserId ?? '').replace(/[^0-9]/g, '')
+  const id = body.id === undefined ? undefined : Number(body.id)
+  if (id !== undefined && (!Number.isInteger(id) || id < 1)) return NextResponse.json({ error: 'Which member?' }, { status: 400 })
   const name = String(body.name ?? '').trim()
-  if (!telegramUserId) return NextResponse.json({ error: 'A numeric Telegram id is required.' }, { status: 400 })
   if (!name) return NextResponse.json({ error: 'A name is required.' }, { status: 400 })
 
   const typed = String(body.email ?? '').trim().toLowerCase() || null
@@ -62,53 +64,26 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: `"${typed}" does not look like an email address.` }, { status: 400 })
   }
 
-  // Someone already in the family keeps the email, access and admin the body
-  // leaves out. The Add row sends only what was typed into it, so adding an id
-  // that is already here to fix a name cannot quietly clear an email, demote,
-  // or let back in someone who was revoked; the row's Allow button does that.
-  const existing = await memberByTelegramId(telegramUserId)
+  const byAddress = typed ? (await allMembersWithLinks()).find((m) => (m.email ?? '').toLowerCase() === typed) : undefined
+  const existing = id !== undefined ? await memberById(id) : byAddress
+  if (id !== undefined && !existing) return NextResponse.json({ error: 'No such member.' }, { status: 404 })
+  if (id !== undefined && byAddress && byAddress.id !== id) {
+    return NextResponse.json({ error: `${typed} is already ${byAddress.name}'s address.` }, { status: 400 })
+  }
+  if (!existing && !typed) {
+    return NextResponse.json({ error: 'An email address is required: it is how they sign in.' }, { status: 400 })
+  }
+
   const email = body.email === undefined ? (existing?.email ?? null) : typed
   const allowed = body.allowed === undefined ? (existing?.allowed ?? true) : body.allowed !== false
   const isAdmin = body.isAdmin === undefined ? (existing?.isAdmin ?? false) : body.isAdmin === true
 
-  const revokes = !allowed
-  if (revokes) {
-    // The founder guard reads ALLOWED_TELEGRAM_IDS, and flagging their rooms
-    // asks Telegram who is where with the bot token; either may be stored.
-    await hydrateSecrets()
-    // As with removing one: a founder is re-granted on their next message, so
-    // revoking them here would undo itself, having muted every room they sit
-    // in until then.
-    if (idSet('ALLOWED_TELEGRAM_IDS').has(telegramUserId)) {
-      return NextResponse.json(
-        { error: 'That is a founding member, set in ALLOWED_TELEGRAM_IDS. Remove them there instead.' },
-        { status: 400 },
-      )
-    }
+  const demotes = !allowed || !isAdmin
+  if (existing && demotes && (await isLastAdmin(existing.id))) {
+    return NextResponse.json({ error: 'That is the only admin. Make someone else an admin first.' }, { status: 400 })
   }
 
-  const demotes = revokes || !isAdmin
-  if (demotes && (await isLastAdmin(telegramUserId))) {
-    return NextResponse.json(
-      { error: 'That is the only admin. Make someone else an admin first.' },
-      { status: 400 },
-    )
-  }
-
-  const saved = await saveMember({
-    telegramUserId,
-    name,
-    email,
-    allowed,
-    isAdmin,
-  })
-  // The rooms follow the grant, as they do for /allow and /deny: vouched for
-  // here, they unmute every room; revoked, every room they are in goes quiet.
-  if (saved.allowed) {
-    await clearStrangerEverywhere(telegramUserId)
-  } else {
-    await flagRevoked(saved)
-  }
+  await saveMember({ ...(existing ? { id: existing.id } : {}), name, email, allowed, isAdmin })
   return NextResponse.json({ ok: true, members: await allMembersWithLinks() })
 }
 
@@ -116,31 +91,15 @@ export async function DELETE(req: Request) {
   const session = await requireAdmin()
   if (!session) return deny()
 
-  // The founder guard below reads ALLOWED_TELEGRAM_IDS, which may live in the dashboard.
-  await hydrateSecrets()
-  const id = new URL(req.url).searchParams.get('telegramUserId') ?? ''
-  if (!id) return NextResponse.json({ error: 'Which member?' }, { status: 400 })
-
-  // A seeded founder would be recreated as an admin on their next message, so
-  // deleting them here would be a lie rather than a revocation.
-  if (idSet('ALLOWED_TELEGRAM_IDS').has(id)) {
-    return NextResponse.json(
-      { error: 'That is a founding member, set in ALLOWED_TELEGRAM_IDS. Remove them there instead.' },
-      { status: 400 },
-    )
-  }
+  const id = Number(new URL(req.url).searchParams.get('id'))
+  if (!Number.isInteger(id) || id < 1) return NextResponse.json({ error: 'Which member?' }, { status: 400 })
 
   if (await isLastAdmin(id)) {
-    return NextResponse.json(
-      { error: 'That is the only admin. Make someone else an admin first.' },
-      { status: 400 },
-    )
+    return NextResponse.json({ error: 'That is the only admin. Make someone else an admin first.' }, { status: 400 })
   }
 
-  // Removed is revoked as well. Their rooms are flagged first, while the
-  // history still says which ones they talked in.
-  const leaving = await memberByTelegramId(id)
-  if (leaving) await flagRevoked(leaving)
+  // Removed is revoked as well: their keys, links and drafts go with them, and
+  // their scheduled jobs are paused before the row that says whose they are goes.
   const gone = await deleteMember(id)
   return gone
     ? NextResponse.json({ ok: true, members: await allMembersWithLinks() })

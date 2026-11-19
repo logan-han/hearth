@@ -29,7 +29,7 @@ export function tokens(text: string): Set<string> {
       .normalize('NFKD')
       // Spelt out, the "not" of a contraction is kept rather than lost as a
       // stray "t", with or without its apostrophe. "Cant" and "wont" are words
-      // too, but in a family chat they are nearly always a missed apostrophe.
+      // too, but in what a family writes they are nearly always a missed apostrophe.
       .replace(/\bcan['’]?t\b|\bcannot\b/g, 'can not')
       .replace(/\bwon['’]?t\b/g, 'will not')
       .replace(/n['’]t\b/g, ' not')

@@ -1,20 +1,19 @@
 import { createMcpHandler, withMcpAuth } from 'mcp-handler'
 import type { AuthInfo } from '@modelcontextprotocol/server'
 import { memberByMcpKey } from '@/lib/db/queries'
-import { callTool, descriptors, INSTRUCTIONS, SERVER_INFO } from '@/lib/mcp'
-import type { Member } from '@/lib/db/schema'
+import { callTool, descriptors, INSTRUCTIONS, SERVER_INFO, type Caller } from '@/lib/mcp'
+import { RESOURCE_METADATA_PATH } from '@/lib/oauth/server'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
 export const dynamic = 'force-dynamic'
 
 /**
- * Hearth over MCP: the household's tools for a client that is not Telegram.
+ * Hearth over MCP: the household's tools for a member's own client.
  *
  * Streamable HTTP with no session state, so nothing has to be remembered
  * between calls and the endpoint costs nothing while idle. Each request
- * carries its own key, which is what says who is calling — rooms are never
- * trusted here either.
+ * carries its own key, which is what says who is calling.
  */
 const handler = createMcpHandler(
   (server) => {
@@ -23,11 +22,11 @@ const handler = createMcpHandler(
         name,
         { description, inputSchema },
         async (input, ctx) => {
-          const member = (ctx.http?.authInfo?.extra as { member?: Member } | undefined)?.member
+          const caller = (ctx.http?.authInfo?.extra as { caller?: Caller } | undefined)?.caller
           // withMcpAuth turns an unauthenticated request away before this runs;
-          // a call without a member would be a bug in the wiring, not a caller.
-          if (!member) return { content: [{ type: 'text' as const, text: 'No key.' }], isError: true }
-          return callTool(name, input, member)
+          // a call without a caller would be a bug in the wiring, not a caller.
+          if (!caller) return { content: [{ type: 'text' as const, text: 'No key.' }], isError: true }
+          return callTool(name, input, caller)
         },
       )
     }
@@ -40,20 +39,28 @@ const handler = createMcpHandler(
  * and every tool runs in their name: their mailbox, their calendar, their
  * word on the household board. A key this deployment did not mint is turned
  * away on its tag, before anything is read (see memberByMcpKey), so made-up
- * keys sent every few minutes cannot keep the database awake.
+ * keys sent every few minutes cannot keep the database awake. A key made on
+ * the web and one the OAuth flow handed a client are the same kind of key.
  */
 async function verify(_req: Request, bearer?: string): Promise<AuthInfo | undefined> {
   if (!bearer) return undefined
-  const member = await memberByMcpKey(bearer)
-  if (!member) return undefined
+  const found = await memberByMcpKey(bearer)
+  if (!found) return undefined
+  const caller: Caller = { member: found.member, keyId: found.keyId }
   return {
     token: bearer,
-    clientId: `member-${member.id}`,
+    clientId: `member-${found.member.id}`,
     scopes: [],
-    extra: { member },
+    extra: { caller },
   }
 }
 
-const authed = withMcpAuth(handler, verify, { required: true })
+/**
+ * Turned away, a client is pointed at the protected-resource metadata, which
+ * names this deployment as the authorisation server: a client that speaks
+ * OAuth signs its member in from there, and one that does not is given a key
+ * on the web instead.
+ */
+const authed = withMcpAuth(handler, verify, { required: true, resourceMetadataPath: RESOURCE_METADATA_PATH })
 
 export { authed as GET, authed as POST, authed as DELETE }

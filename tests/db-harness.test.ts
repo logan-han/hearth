@@ -43,19 +43,22 @@ describe('the migrations', () => {
   })
 })
 
+/** Someone in the family, as an admin adds them. */
+const add = (name: string) => q.saveMember({ name, email: `${name.toLowerCase()}@example.com`, allowed: true, isAdmin: false })
+
 describe('each test', () => {
   let before: PGlite
 
   it('may write rows', async () => {
-    expect((await q.upsertMember('111', 'Rowan', { allowed: true })).id).toBe(1)
-    await q.upsertMember('222', 'Ada', { allowed: true })
+    expect((await add('Rowan')).id).toBe(1)
+    await add('Ada')
     before = client
   })
 
   it('starts with the tables empty and the ids from one, on the same database', async () => {
     expect(client).toBe(before)
     expect(await q.allMembers()).toEqual([])
-    expect((await q.upsertMember('333', 'Juno', { allowed: true })).id).toBe(1)
+    expect((await add('Juno')).id).toBe(1)
   })
 
   it('may change the schema', async () => {
@@ -67,7 +70,7 @@ describe('each test', () => {
   it('starts from the schema as migrated, on a database built afresh', async () => {
     expect(client).not.toBe(before)
     await expect(db().execute(sql`select count(*) from model_events`)).resolves.toBeTruthy()
-    expect((await q.upsertMember('111', 'Rowan', { allowed: true })).id).toBe(1)
+    expect((await add('Rowan')).id).toBe(1)
   })
 
   it('keeps the database when a schema change was rolled back', async () => {

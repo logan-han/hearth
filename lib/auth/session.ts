@@ -95,7 +95,7 @@ export async function requireMember(): Promise<(Session & { memberId: number | n
   if (!session) return null
   const resolved = await resolveRole(session.email)
   if (!resolved) return null
-  // The id, not the row: a session travels to the page, and the row carries the MCP key's digest.
+  // The id, not the row: a session travels to the page, which needs no more of it.
   return { ...session, role: resolved.role, memberId: resolved.member?.id ?? null }
 }
 

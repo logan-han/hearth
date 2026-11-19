@@ -12,9 +12,9 @@ export function memoryTools(ctx: ToolContext) {
     remember: tool({
       description:
         'Store a durable household fact so it survives beyond this conversation: routines, preferences, allergies, sizes, "bin night is Monday". ' +
-        'Use it when someone asks you to remember something or corrects a Known fact; the nightly pass files everything else. ' +
+        'Use it when someone asks you to remember something, or corrects a Known fact. ' +
         'A fact that is already Known is not stored again. When the new fact corrects an old one, pass the old id as replaces. ' +
-        "Not for anything read in a notice, bill, booking or email, or in the assistant's own posts: put that to the family with unsure instead.",
+        "Not for anything read in a notice, bill, booking or email: put that to the family with unsure instead.",
       inputSchema: z.object({
         fact: z.string().describe('One self-contained fact, written so it makes sense months later'),
         replaces: z.number().int().optional().describe('Id of the Known fact this one supersedes, if any'),
@@ -42,14 +42,14 @@ export function memoryTools(ctx: ToolContext) {
     }),
 
     recall: tool({
-      description: 'List stored household facts. Useful when you need background the chat history no longer holds.',
+      description: 'List stored household facts. hearth_context carries the newest few dozen; this reaches the rest.',
       inputSchema: z.object({
         contains: z.string().optional().describe('Optional case-insensitive filter'),
       }),
       execute: async ({ contains }) => {
         // The filter runs over every current fact, not a newest page of them:
         // the oldest facts are often the most basic, and they are the first to
-        // drop out of the few dozen the chat already sees.
+        // drop out of the few dozen hearth_context carries.
         const rows = await listMemories(RECALL_LIMIT + 1, contains)
         return {
           memories: rows.slice(0, RECALL_LIMIT).map((m) => ({ id: m.id, fact: m.content })),
@@ -71,8 +71,8 @@ export function memoryTools(ctx: ToolContext) {
 
     unsure: tool({
       description:
-        'Put a would-be household fact to the family as a question instead of filing it: when the talk does not say who it is about, or it rests on a notice, bill, booking or email rather than on a family member saying so. ' +
-        'It is asked once, in the morning brief and on Home, and filed only on a yes.',
+        'Put a would-be household fact to the family as a question instead of filing it: when nobody has said who it is about, or it rests on a notice, bill, booking or email rather than on a family member saying so. ' +
+        'It is asked once, in the next morning brief and on Home, and filed only on a yes.',
       inputSchema: z.object({
         question: z
           .string()
@@ -92,7 +92,7 @@ export function memoryTools(ctx: ToolContext) {
 
     answer_question: tool({
       description:
-        'Settle one of the open questions in your context once a family member answers it. Pass fact for a yes or a correction, written as the fact to keep in their words; leave it out for a no.',
+        'Settle one of the open questions from hearth_context once a family member answers it. Pass fact for a yes or a correction, written as the fact to keep in their words; leave it out for a no.',
       inputSchema: z.object({
         id: z.number().int(),
         fact: z.string().optional().describe('The fact to keep, in the words of the answer; omit for a no'),
