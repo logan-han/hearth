@@ -14,6 +14,13 @@ export const dynamic = 'force-dynamic'
  * Streamable HTTP with no session state, so nothing has to be remembered
  * between calls and the endpoint costs nothing while idle. Each request
  * carries its own key, which is what says who is calling.
+ *
+ * Idle stays free only while no client holds a stream open. The tool list is
+ * fixed for the life of a deployment, so the server says it will not change:
+ * a client told otherwise opens a listen stream to wait for changes, and here
+ * an open stream is a function running until maxDuration cuts it, opened again
+ * for as long as that client is connected. A listen sent regardless is refused
+ * at once rather than held.
  */
 const handler = createMcpHandler(
   (server) => {
@@ -31,7 +38,12 @@ const handler = createMcpHandler(
       )
     }
   },
-  { serverInfo: SERVER_INFO, instructions: INSTRUCTIONS },
+  {
+    serverInfo: SERVER_INFO,
+    instructions: INSTRUCTIONS,
+    capabilities: { tools: { listChanged: false } },
+    maxSubscriptions: 0,
+  },
 )
 
 /**

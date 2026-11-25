@@ -50,6 +50,58 @@ async function rpc(method: string, params: unknown, key?: string) {
   return { status: res.status, headers: res.headers, json }
 }
 
+/** A call the way a 2026-07-28 client sends it: the method in a header as well, and who is asking in `_meta`. */
+function modern(method: string, params: Record<string, unknown> = {}, signal?: AbortSignal) {
+  return POST(
+    new Request('https://hearth.example/api/mcp', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: 'Bearer good-key',
+        'mcp-method': method,
+        'mcp-protocol-version': '2026-07-28',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'call-1',
+        method,
+        params: {
+          ...params,
+          _meta: {
+            'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+            'io.modelcontextprotocol/clientInfo': { name: 'a-client', version: '1.0.0' },
+            'io.modelcontextprotocol/clientCapabilities': {},
+          },
+        },
+      }),
+      signal,
+    }),
+  )
+}
+
+describe('what a connected client holds open', () => {
+  it('tells a client of either era that the tool list will not change, so it has nothing to wait for', async () => {
+    const initialised = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'a-client', version: '1.0.0' } }, 'good-key')
+    expect(initialised.json.result.capabilities.tools).toEqual({ listChanged: false })
+
+    const discovered = await (await modern('server/discover')).json()
+    expect(discovered.result.capabilities.tools).toEqual({ listChanged: false })
+  })
+
+  it('refuses a listen at once instead of leaving a stream open for the host to run until it times out', async () => {
+    // A stream handed back here would never end, so the client hangs up whatever the answer was.
+    const client = new AbortController()
+    try {
+      const res = await modern('subscriptions/listen', { notifications: { toolsListChanged: true } }, client.signal)
+      expect(res.headers.get('content-type')).toContain('application/json')
+      expect((await res.json()).error).toMatchObject({ code: -32603 })
+    } finally {
+      client.abort()
+    }
+  })
+})
+
 describe('who the MCP endpoint lets in', () => {
   it('turns away a call with no key, pointing it at the metadata that says how to sign in', async () => {
     const { status, headers } = await rpc('tools/list', {})
