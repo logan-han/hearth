@@ -39,7 +39,7 @@ const familyEvents = () => q.listFamilyEvents(new Date('2030-01-01'), new Date('
 beforeEach(async () => {
   client = (await freshDb()).client
   const member = await q.saveMember({ name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false })
-  ctx = { member, memberName: 'Rowan', now: NOW, via: 'mcp', cursorScope: 'key:1' }
+  ctx = { member, memberName: 'Rowan', now: NOW, via: 'mcp' }
 })
 afterEach(async () => closeDb(client))
 

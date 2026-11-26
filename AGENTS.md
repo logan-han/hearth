@@ -19,15 +19,18 @@ account; this is what to keep in mind while changing code.
   `mcp_keys` (`memberByMcpKey`). Members make, list and revoke keys on Home
   (`app/api/mcp-keys/route.ts`); an OAuth 2.1 client gets the same kind of key through
   `lib/oauth/server.ts` (PKCE, dynamic registration, signed codes). Tools run as that
-  member: `ToolContext.member`, `cursorScope: key:<keyId>`, `via: 'mcp'`.
+  member: `ToolContext.member`, `via: 'mcp'`.
 - **Connecting a client by hand:**
   `claude mcp add --transport http hearth https://<deployment>/api/mcp --header "Authorization: Bearer <key>"`.
-- **What is whose.** Mail, personal calendars, drafts, goals, automations, reports and
-  activity are per member; never read another member's. The family calendar, lists, facts,
+- **What is whose.** Personal calendars, goals, automations, reports and activity are
+  per member; never read another member's. The family calendar, lists, facts,
   proposals, helpers and routines are household-wide.
 - **The morning brief and money snapshot** are on-demand MCP reads (`morning_brief`,
   `money_snapshot` in `lib/tools/brief.ts`, gathered in `lib/brief.ts`), not scheduled posts.
-  The brief reads mail on its own `brief` cursor scope.
+- **No mail.** Hearth reads and sends none, for Gmail or Outlook: members' clients reach
+  their mail directly. A member's Google Calendar goes through Google's Calendar MCP server
+  (`lib/providers/google-mcp.ts`), with a token from the agent OAuth client
+  (`GOOGLE_AGENT_CLIENT_ID`); dashboard sign-in has a Google client of its own.
 - **Scheduled jobs** (`create_automation`, `hand_off`, goal check-ins) run on the hourly
   tick (`app/api/tick/route.ts`) through the model chain with read-only tools, pass the
   claim check and the keep-or-hold decision (`lib/agent.ts`), and end as rows in

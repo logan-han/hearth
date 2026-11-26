@@ -6,10 +6,6 @@ import type { Member } from '@/lib/db/schema'
 import { jar } from './helpers/next-headers'
 
 vi.mock('next/headers', async () => ({ cookies: (await import('./helpers/next-headers')).jar.cookies }))
-// The mailbox a draft goes from; sending is the provider's, and stands in here.
-const sendMail = vi.hoisted(() => vi.fn())
-const clientFor = vi.hoisted(() => vi.fn((_id: number, provider: string) => ({ provider, sendMail })))
-vi.mock('@/lib/providers', async (orig) => ({ ...(await orig<typeof import('@/lib/providers')>()), clientFor }))
 
 const { GET, POST } = await import('@/app/api/family/route')
 const { createSession } = await import('@/lib/auth/session')
@@ -270,92 +266,6 @@ describe('the family API', () => {
     expect(await q.getGoal(theirs.id)).toMatchObject({ status: 'active' })
     expect((await post({ action: 'close_goal', id: mine.id, status: 'dropped' })).status).toBe(200)
     expect((await post({ action: 'close_goal', id: 999, status: 'done' })).status).toBe(404)
-  })
-
-  describe('email drafts waiting on their writer', () => {
-    async function draftOf(memberId: number, subject = 'Excursion form') {
-      return q.createDraft({ memberId, provider: 'google', to: ['office@example.org'], cc: ['nan@example.org'], subject, body: 'Signed and attached.' })
-    }
-
-    it("sends a draft on its writer's click, once, as written, and keeps it on their record", async () => {
-      await asMember()
-      const draft = await draftOf(ada.id)
-      sendMail.mockResolvedValue({ ok: true })
-      const res = await post({ action: 'send_draft', id: draft.id })
-      expect(await res.json()).toEqual({ ok: true, sent: 'Excursion form' })
-      expect(clientFor).toHaveBeenCalledWith(ada.id, 'google')
-      expect(sendMail).toHaveBeenCalledWith({ to: ['office@example.org'], cc: ['nan@example.org'], subject: 'Excursion form', body: 'Signed and attached.' })
-      expect((await q.getDraft(draft.id))!.status).toBe('sent')
-      expect((await post({ action: 'send_draft', id: draft.id })).status).toBe(409)
-      expect(sendMail).toHaveBeenCalledTimes(1)
-      const [logged] = await q.recentActivity({ memberId: ada.id })
-      expect(logged).toMatchObject({ via: 'web', tool: 'send_email', summary: 'sent the email to office@example.org, "Excursion form"' })
-    })
-
-    it('sends nothing from an account linked read only since the draft was written', async () => {
-      await asMember()
-      await q.saveConnection({ memberId: ada.id, provider: 'google', email: 'ada@gmail.example', refreshToken: 'r', scopes: null })
-      await q.setConnectionReadOnly(ada.id, 'google', true)
-      const draft = await draftOf(ada.id)
-      const res = await post({ action: 'send_draft', id: draft.id })
-      expect(res.status).toBe(409)
-      expect((await res.json()).error).toContain('linked read-only')
-      expect(sendMail).not.toHaveBeenCalled()
-      expect((await q.getDraft(draft.id))!.status).toBe('pending')
-    })
-
-    it("will not send or discard anyone else's", async () => {
-      await asMember()
-      const other = await add('Rowan')
-      const draft = await draftOf(other.id)
-      expect((await post({ action: 'send_draft', id: draft.id })).status).toBe(404)
-      expect((await post({ action: 'discard_draft', id: draft.id })).status).toBe(404)
-      expect((await post({ action: 'send_draft', id: 999 })).status).toBe(404)
-      expect(sendMail).not.toHaveBeenCalled()
-      expect((await q.getDraft(draft.id))!.status).toBe('pending')
-    })
-
-    it('hands a draft back when the send fails, and keeps one that may have gone', async () => {
-      await asMember()
-      const draft = await draftOf(ada.id)
-      sendMail.mockRejectedValueOnce(new Error('Gmail said no'))
-      const failed = await post({ action: 'send_draft', id: draft.id })
-      expect(failed.status).toBe(502)
-      expect((await failed.json()).error).toContain('Gmail said no')
-      expect((await q.getDraft(draft.id))!.status).toBe('pending')
-
-      const { UnconfirmedError } = await import('@/lib/deadline')
-      sendMail.mockRejectedValueOnce(new UnconfirmedError())
-      const unsure = await post({ action: 'send_draft', id: draft.id })
-      expect(unsure.status).toBe(504)
-      expect((await unsure.json()).error).toContain('may or may not have gone')
-      expect((await q.getDraft(draft.id))!.status).toBe('sent')
-    })
-
-    it('discards a draft, once', async () => {
-      await asMember()
-      const draft = await draftOf(ada.id)
-      expect(await (await post({ action: 'discard_draft', id: draft.id })).json()).toEqual({ ok: true, discarded: 'Excursion form' })
-      expect((await q.getDraft(draft.id))!.status).toBe('cancelled')
-      expect((await post({ action: 'discard_draft', id: draft.id })).status).toBe(409)
-      expect((await q.recentActivity())[0]).toMatchObject({ via: 'web', summary: `discarded email draft ${draft.id}` })
-    })
-
-    it('are listed on Home for their writer alone', async () => {
-      ada = await add('Ada')
-      const rowan = await add('Rowan')
-      await draftOf(ada.id, 'Hers')
-      await draftOf(rowan.id, 'His')
-      const done = await draftOf(ada.id, 'Sent already')
-      await q.markDraft(done.id, 'sent')
-      await q.createDraft({ memberId: ada.id, provider: 'microsoft', to: ['bank@example.org'], subject: 'From Outlook', body: 'x' })
-      const stats = await gatherFamilyStats(undefined, ada.id)
-      expect(stats.drafts).toEqual([
-        { id: expect.any(Number), to: 'bank@example.org', cc: null, subject: 'From Outlook', body: 'x', from: 'Outlook', when: expect.any(String) },
-        { id: expect.any(Number), to: 'office@example.org', cc: 'nan@example.org', subject: 'Hers', body: 'Signed and attached.', from: 'Gmail', when: expect.any(String) },
-      ])
-      expect((await gatherFamilyStats()).drafts).toEqual([])
-    })
   })
 
   describe("the signed-in member's own linked accounts", () => {

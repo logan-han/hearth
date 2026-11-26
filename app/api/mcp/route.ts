@@ -48,8 +48,8 @@ const handler = createMcpHandler(
 
 /**
  * A key is one member's, so the member it belongs to travels with the request
- * and every tool runs in their name: their mailbox, their calendar, their
- * word on the household board. A key this deployment did not mint is turned
+ * and every tool runs in their name: their calendar, their word on the
+ * household board. A key this deployment did not mint is turned
  * away on its tag, before anything is read (see memberByMcpKey), so made-up
  * keys sent every few minutes cannot keep the database awake. A key made on
  * the web and one the OAuth flow handed a client are the same kind of key.

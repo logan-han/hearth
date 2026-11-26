@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { authorizeUrl, exchangeCode, emailFromIdToken, type Provider } from './providers'
+import { authorizeUrl, exchangeCode, emailFromIdToken, signinLinks, type Provider } from './providers'
 import { signState, verifyState, safeNext } from './state'
 import { saveConnection, connectionFor, memberById, allMembersWithLinks } from '../db/queries'
 import { appUrl, idSet } from '../env'
@@ -8,7 +8,7 @@ import type { Member } from '../db/schema'
 
 /**
  * Step 1: bounce to the provider. Two entry points share this: anyone signing
- * in to the dashboard, and a signed-in member linking a mailbox from Connect.
+ * in to the dashboard, and a signed-in member linking a calendar from Connect.
  * Sign-in needs no prior token, because the gate is the email check on the
  * way back, not the way out; a link is bound to the member whose session
  * asked for it.
@@ -49,7 +49,7 @@ export async function completeAuth(req: Request, provider: Provider): Promise<Re
 
   let tokens
   try {
-    tokens = await exchangeCode(provider, code)
+    tokens = await exchangeCode(provider, code, payload.purpose)
   } catch (err) {
     console.error('[oauth] code exchange failed:', err)
     return fail('Could not complete the link with the provider. Please try again.')
@@ -64,13 +64,14 @@ export async function completeAuth(req: Request, provider: Provider): Promise<Re
       return fail(`${email} is not recognised. Ask whoever runs this Hearth to add your address.`)
     }
 
-    // The consent screen already asked for the full mail and calendar scopes,
-    // so a recognised member's sign-in doubles as the mailbox link: the family
-    // cannot be expected to know signing in and linking are different
-    // ceremonies. Fill a gap or refresh the same account, but never repoint an
-    // existing link at a different address; and never let a failed save cost
-    // the session, which is what this flow is actually for.
-    if (resolved.member && tokens.refresh_token) {
+    // Where signing in goes through the link's own client, its consent screen
+    // already asked for the calendar scopes, so a recognised member's sign-in
+    // doubles as the calendar link: the family cannot be expected to know
+    // signing in and linking are different ceremonies. Fill a gap or refresh
+    // the same account, but never repoint an existing link at a different
+    // address; and never let a failed save cost the session, which is what
+    // this flow is actually for.
+    if (signinLinks(provider) && resolved.member && tokens.refresh_token) {
       try {
         const existing = await connectionFor(resolved.member.id, provider)
         if (!existing || (existing.email ?? '').toLowerCase() === email.toLowerCase()) {
@@ -110,7 +111,7 @@ export async function completeAuth(req: Request, provider: Provider): Promise<Re
 
   // An account the household already knows as another member's is theirs
   // alone, so it is turned away: one member must never collect another's
-  // mailbox, whatever account they happen to be signed in to in the browser.
+  // calendar, whatever account they happen to be signed in to in the browser.
   const owner = email ? await ownerOf(email, member.id) : undefined
   if (owner) {
     return fail(`${email} is ${owner.name}'s account in this household, so it cannot be linked to ${member.name} as well.`)
@@ -133,7 +134,7 @@ export async function completeAuth(req: Request, provider: Provider): Promise<Re
   return NextResponse.redirect(`${appUrl()}/connect?linked=${provider}`)
 }
 
-/** The other member an address belongs to, whether an admin recorded it or they linked a mailbox with it. */
+/** The other member an address belongs to, whether an admin recorded it or they linked a calendar with it. */
 async function ownerOf(email: string, memberId: number) {
   const same = (a: string | null) => (a ?? '').trim().toLowerCase() === email.trim().toLowerCase()
   return (await allMembersWithLinks()).find(

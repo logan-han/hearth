@@ -278,13 +278,12 @@ describe('admin sign-in through the shared OAuth callback', () => {
     expect(res.status).toBe(307)
   })
 
-  it('doubles as the mailbox link when the provider hands back a refresh token', async () => {
+  it('links no mailbox, since Gmail and Calendar are linked through an agent client of their own', async () => {
     const q = await import('@/lib/db/queries')
     const member = await q.saveMember({ name: 'Ada', email: 'ada@hearth.example', allowed: true, isAdmin: false })
-    const res = await callback('ada@hearth.example', { refresh_token: 'rt-1', scope: 'mail calendar' })
+    const res = await callback('ada@hearth.example', { refresh_token: 'rt-1', scope: 'openid email' })
     expect(res.status).toBe(307)
-    const conn = await q.connectionFor(member.id, 'google')
-    expect(conn).toMatchObject({ provider: 'google', email: 'ada@hearth.example' })
+    expect(await q.connectionFor(member.id, 'google')).toBeUndefined()
   })
 
   it('never repoints an existing link at a different account', async () => {

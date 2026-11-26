@@ -78,6 +78,13 @@
       "when": 1795124786480,
       "tag": "0010_mcp_only",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795733562534,
+      "tag": "0011_no_mail",
+      "breakpoints": true
     }
   ]
 }

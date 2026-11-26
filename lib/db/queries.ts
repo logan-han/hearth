@@ -1,9 +1,9 @@
 import { and, asc, desc, eq, gte, inArray, lte, lt, ne, or, sql, isNull, gt, exists, notExists, ilike } from 'drizzle-orm'
 import { db } from './index'
 import {
-  members, mcpKeys, connections, familyEvents, memories, memoryQuestions, automations, automationReports, settings, emailDrafts,
+  members, mcpKeys, connections, familyEvents, memories, memoryQuestions, automations, automationReports, settings,
   lists, listItems, eventProposals, activity, goals, goalSteps, goalUpdates, helpers, routines,
-  type Member, type McpKey, type Connection, type EmailDraft, type AutomationReport,
+  type Member, type McpKey, type Connection, type AutomationReport,
   type List, type ListItem, type EventProposal, type Memory, type MemoryQuestion, type Activity,
   type Goal, type GoalStep, type GoalUpdate, type Helper, type Routine,
 } from './schema'
@@ -776,64 +776,6 @@ export async function rotateCalendarToken(): Promise<string> {
   return token
 }
 
-/* ----------------------------------------------------------- email drafts */
-
-export async function createDraft(input: {
-  memberId: number
-  provider: string
-  to: string[]
-  cc?: string[]
-  subject: string
-  body: string
-}): Promise<EmailDraft> {
-  const [row] = await db()
-    .insert(emailDrafts)
-    .values({
-      memberId: input.memberId,
-      provider: input.provider,
-      recipients: input.to.join(', '),
-      cc: input.cc?.length ? input.cc.join(', ') : null,
-      subject: input.subject,
-      body: input.body,
-    })
-    .returning()
-  return row
-}
-
-export async function getDraft(id: number): Promise<EmailDraft | undefined> {
-  const [row] = await db().select().from(emailDrafts).where(eq(emailDrafts.id, id)).limit(1)
-  return row
-}
-
-/** A member's own drafts still waiting on their yes, newest first. Only the writer can send one, so only they see it. */
-export async function pendingDrafts(memberId: number): Promise<EmailDraft[]> {
-  return db()
-    .select()
-    .from(emailDrafts)
-    .where(and(eq(emailDrafts.memberId, memberId), eq(emailDrafts.status, 'pending')))
-    .orderBy(desc(emailDrafts.id))
-    .limit(5)
-}
-
-export type DraftStatus = 'pending' | 'sent' | 'cancelled'
-
-/**
- * Move a draft between states, but only from the state we expect. The predicate
- * makes this a claim: a duplicate confirmation cannot send the same email twice.
- */
-export async function markDraft(
-  id: number,
-  status: DraftStatus,
-  from: DraftStatus = 'pending',
-): Promise<boolean> {
-  const rows = await db()
-    .update(emailDrafts)
-    .set({ status })
-    .where(and(eq(emailDrafts.id, id), eq(emailDrafts.status, from)))
-    .returning()
-  return rows.length > 0
-}
-
 /* ------------------------------------------------------------ shared lists */
 
 /**
@@ -1056,7 +998,7 @@ export async function settleProposal(
 
 export type MemberRow = Member & { linked: { provider: string; email: string | null; readOnly: boolean }[] }
 
-/** Everyone the bot knows, with whatever mailboxes each has linked. */
+/** Everyone in the family, with whatever accounts each has linked. */
 export async function allMembersWithLinks(): Promise<MemberRow[]> {
   const [people, links] = await Promise.all([
     db().select().from(members).orderBy(asc(members.id)),

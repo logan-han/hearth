@@ -87,13 +87,12 @@ describe('Home', () => {
     expect(page).not.toContain('href="/system"')
   })
 
-  it("shows a member their own reports, keys and drafts, and where to connect a client, and never another member's", async () => {
+  it("shows a member their own reports and keys, and where to connect a client, and never another member's", async () => {
     const juno = (await q.allMembers()).find((m) => m.name === 'Juno')!
     await q.addReport({ memberId: ada.id, automationId: null, label: 'Camp dates', status: 'held', body: 'Camp is 3 to 5 March', detail: 'Held back: unsure' })
     await q.addReport({ memberId: juno.id, automationId: null, label: 'Juno only', status: 'ready', body: 'Not for Ada' })
     await q.issueMcpKey(ada.id, 'Claude on the laptop')
     await q.issueMcpKey(juno.id, 'Juno phone')
-    await q.createDraft({ memberId: ada.id, provider: 'google', to: ['school@example.com'], subject: 'Absence note', body: 'b' })
     await q.addProposal({ title: 'Working bee', startsAt: new Date(Date.now() + 86_400_000), endsAt: new Date(Date.now() + 90_000_000) })
     await asMember()
 
@@ -106,7 +105,6 @@ describe('Home', () => {
     expect(page).toContain('Claude on the laptop')
     expect(page).not.toContain('Juno phone')
     expect(page).toContain('https://hearth.example/api/mcp')
-    expect(page).toContain('Absence note')
     expect(page).toContain('Working bee')
   })
 
@@ -134,13 +132,13 @@ describe('System', () => {
     await asMember()
     const page = html(await SystemPage())
     expect(page).toContain(DENIED)
-    expect(page).not.toContain('Mailboxes linked')
+    expect(page).not.toContain('Calendars linked')
   })
 
   it('shows an admin a new house as empty, not broken', async () => {
     await asAdmin()
     const page = html(await SystemPage())
-    expect(page).toContain('Mailboxes linked')
+    expect(page).toContain('Calendars linked')
     expect(page).toContain('MCP keys')
     expect(page).toContain('No model calls recorded yet.')
     expect(page).toContain('Nothing changed in the last fortnight.')

@@ -7,9 +7,9 @@
 A self-hosted family assistant you reach through [MCP](https://modelcontextprotocol.io):
 Claude Code, Claude Desktop, claude.ai's connectors or any other MCP client. It keeps a
 shared family calendar everyone can subscribe to, shared lists, the facts the household
-keeps, goals, helpers and routines; it reads and writes each member's own email and
-calendar (Google and Microsoft), the household's money feed (PocketSmith), Notion and the
-family board (Jira); and it runs jobs on a schedule, keeping what each one finds for the
+keeps, goals, helpers and routines; it reads and writes each member's own calendar
+(Google and Microsoft), the household's money feed (PocketSmith), Notion and the family
+board (Jira); and it runs jobs on a schedule, keeping what each one finds for the
 member who set it up. Every change is kept on a record, so nobody has to take its word for it.
 
 Your MCP client is the brain. Hearth is the household behind it: the tools, the data, the
@@ -28,7 +28,7 @@ its own is optional, needed only for the jobs that run while nobody is asking.
 - [Setup](#setup): [Google Cloud](#1-google-cloud) · [Azure Entra](#2-azure-entra) · [Services](#3-services) · [Model chain](#model-chain) · [Deploy](#4-deploy)
 - [Connecting a client](#connecting-a-client)
 - [The morning brief and the money snapshot](#the-morning-brief-and-the-money-snapshot)
-- [Sweeping email onto the calendar](#sweeping-email-onto-the-calendar)
+- [Proposing dates for the family calendar](#proposing-dates-for-the-family-calendar)
 - [Jobs on a schedule, and their reports](#jobs-on-a-schedule-and-their-reports)
 - [What it remembers](#what-it-remembers)
 - [Goals](#goals) · [Helpers](#helpers) · [Routines](#routines)
@@ -42,7 +42,7 @@ its own is optional, needed only for the jobs that run while nobody is asking.
 ## How it fits together
 
 ```
-MCP client ──key or OAuth──> /api/mcp ──> tools ──> Gmail, Google Calendar, MS Graph,
+MCP client ──key or OAuth──> /api/mcp ──> tools ──> Google Calendar, MS Graph,
    (Claude)                     │                    PocketSmith, Notion, Jira, Tavily,
                                 │                    OpenWeatherMap
                                 └──> family calendar, lists, facts, goals, proposals (Neon)
@@ -54,8 +54,7 @@ Google/Outlook/Apple Calendar ──subscribe──> /api/calendar/{token}/famil
 
 `/api/mcp` is stateless streamable HTTP: every request carries its own key, nothing is
 remembered between calls, and an idle endpoint costs nothing. The key is the member: every
-call runs as whoever holds it, against their mailbox, their calendar, their name on what it
-writes.
+call runs as whoever holds it, against their calendar, their name on what it writes.
 
 The hourly tick runs the jobs members have scheduled (reminders, watches, goal check-ins,
 jobs handed to helpers) through Hearth's own model chain. What a job writes passes two
@@ -93,15 +92,14 @@ the next tick, rather than claimed and then stopped halfway through.
 | `lib/agent.ts` | A scheduled run, and the checks on what it writes |
 | `lib/brief.ts` | The morning brief and the money snapshot, gathered in code |
 | `lib/model.ts` | Tiered model chain: local, OpenRouter, Gemini |
-| `lib/tools/` | search, mail, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations and reports, goals, helpers, routines, activity, brief |
+| `lib/tools/` | search, calendar, family calendar, proposals, lists, money, notion, jira, memory, automations and reports, goals, helpers, routines, activity, brief |
 | `lib/activity.ts` | Each member's record of every change made in their name, one readable line each |
 | `lib/helpers.ts` | Named helpers: the ready-made ones and their roles |
 | `lib/free-time.ts` | Free time worked out from busy time, for `find_free_time` |
 | `lib/recurring.ts` | Subscriptions and regular bills found in the bank feed |
-| `lib/ics-parse.ts` | Reading a calendar file attached to an email |
 | `lib/model-events.ts` | One row per model call, folded into the chain health on System |
 | `scripts/probe-model.ts` | `npm run probe`: a real tool call against a candidate model before it joins the chain |
-| `lib/providers/` | Gmail and Microsoft Graph behind one interface, and the other services |
+| `lib/providers/` | Google Calendar (through Google's MCP server) and Microsoft Graph behind one interface, and the other services |
 | `lib/db/` | Drizzle schema and queries |
 | `lib/crypto.ts` | AES-256-GCM for refresh tokens at rest, signing keys, MCP key tags |
 
@@ -126,13 +124,27 @@ read again and can be deleted; change the setting in Settings.
 
 ### 1. Google Cloud
 
-Create an OAuth **Web application** client. Authorised redirect URI:
+Google takes an AI agent's Calendar calls only through its own MCP server (its
+Workspace AI Tools terms), and Hearth's every calendar call is an agent's: a
+member's MCP client or a scheduled job's model asks for it. So Hearth calls
+`calendarmcp.googleapis.com`, never the Calendar REST API, and needs two OAuth
+**Web application** clients, both with this authorised redirect URI:
 
 ```
 https://<your-deployment>/api/oauth/google/callback
 ```
 
-Scopes: `gmail.modify`, `gmail.send`, `calendar.events`, `calendar.readonly`.
+- **The agent client** (`GOOGLE_AGENT_CLIENT_ID`, `GOOGLE_AGENT_CLIENT_SECRET`)
+  links each member's Google Calendar. Tick **Use this client for an AI-powered
+  agent** when creating it: the MCP server turns away a token from any other
+  client. Scopes: `calendar.events`, `calendar.readonly`.
+- **The sign-in client** (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`) signs
+  people in to the dashboard and asks only who they are. Leave the agent box
+  unticked: Google wants an agent's client to do nothing else.
+
+Enable the **Google Calendar MCP API** for the project. It runs on the free
+Standard tier, which a household stays well inside; leave the paid Scaled tier
+alone. Hearth reads and sends no mail, so it asks for no Gmail scope.
 
 Publish the consent screen to **Production** and leave it unverified. Members see
 a one-time "Google hasn't verified this app" warning and click through
@@ -148,8 +160,7 @@ Microsoft accounts**. Redirect URI (Web):
 https://<your-deployment>/api/oauth/microsoft/callback
 ```
 
-Delegated permissions: `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`,
-`User.Read`, `offline_access`.
+Delegated permissions: `Calendars.ReadWrite`, `User.Read`, `offline_access`.
 
 Microsoft hands back a new refresh token every time one is used, each good for
 90 days from its own issue, and Hearth stores each one as it arrives. A link in
@@ -157,10 +168,12 @@ use stays linked; one Microsoft stops honouring (a password change, a revoked
 consent) tells the member to link it again on Connect rather than failing with
 an AADSTS code.
 
-Both clients serve two purposes through the same callback: signing in to the
-dashboard, and a signed-in member linking their mailbox and calendar. They are
-told apart by a `purpose` claim in the signed state, so **no extra redirect URI
-has to be registered** in either console.
+Each provider serves two purposes through one callback: signing in to the
+dashboard, and a signed-in member linking their calendar. They are told apart
+by a `purpose` claim in the signed state, which also picks the Google client the
+code goes back through, so **no extra redirect URI has to be registered** in
+either console. A Microsoft sign-in links the calendar as well; a Google one does
+not, since it goes through the sign-in client.
 
 ### 3. Services
 
@@ -320,16 +333,15 @@ voids every key. Keys issued before keys were made on the web had the same forma
 and were carried over, labelled "Key from before keys were made on the web";
 revoke them on Home once their clients have a new one.
 
-A client is handed all 71 tools at once, and `hearth_context` beside them.
+A client is handed all 63 tools at once, and `hearth_context` beside them.
 `hearth_context` is the first call to make: who it is acting as, the household
-clock, the family and their linked accounts, the facts on file, your drafts, the
-event proposals and open questions with the ids the other tools want, your goals,
+clock, the family and their linked accounts, the facts on file, the event
+proposals and open questions with the ids the other tools want, your goals,
 the helpers and routines, and the latest reports from your scheduled jobs.
 
-What a client has seen is its own: `new_mail` keeps markers per key, so asking
-one client "any new mail?" never spends what another of your clients, your
-scheduled jobs or your morning brief has not shown you. Nothing is posted
-anywhere on a client's behalf: what a tool returns is for the client to pass on.
+Hearth reads and sends no mail: a client that has a mailbox of its own reaches it
+directly. Nothing is posted anywhere on a client's behalf: what a tool returns is
+for the client to pass on.
 
 ## The morning brief and the money snapshot
 
@@ -339,17 +351,12 @@ in code so they cost no model call of Hearth's own:
 - **`morning_brief`**: what is on today on the family calendar and your own
   (Google or Outlook), what starts tomorrow, what is coming over the rest of the
   fortnight (the family calendar, your calendar, your reminders and the board's
-  due dates), the mail that has arrived since your last brief, anything overdue
-  or due today on the board, your reminders later today, the events waiting on a
-  yes, the weather, and the questions still open for the family. "Today" means
-  anything on during the day, so the third day of a camp is on it too; tomorrow
-  is only what starts then. The brief keeps mail markers of its own, up to 20
-  messages a mailbox, and says how many more there were rather than dropping
-  them. A mailbox or calendar that will not answer is listed under
-  `could_not_read`, and its mail waits for the next brief. A quiet day says
-  `nothing_new`. `how_to_read` says how to give it: in parts, mail sorted into
-  To do and Heads up, requests a later email answered set aside, mail copied in
-  to the household treated as someone else's, and calendar-worthy dates proposed.
+  due dates), anything overdue or due today on the board, your reminders later
+  today, the events waiting on a yes, the weather, and the questions still open
+  for the family. "Today" means anything on during the day, so the third day of
+  a camp is on it too; tomorrow is only what starts then. A calendar that will
+  not answer is listed under `could_not_read`. A quiet day says `nothing_new`.
+  `how_to_read` says how to give it, in parts.
 - **`money_snapshot`**: the past seven days in, out and net with their categories
   and largest payments, the month so far against the budget, and where each
   budgeted category stands (see [Money](#money)).
@@ -357,25 +364,25 @@ in code so they cost no model call of Hearth's own:
 Neither is pushed on a schedule any more: a member who wants one asks their client
 for it, whenever suits.
 
-## Sweeping email onto the calendar
+## Proposing dates for the family calendar
 
-Dates found in mail become **proposals**, never calendar entries: a person says
-yes first, from a client (`accept_event_proposal`) or on Home. The brief's guide
-tells a client to propose any calendar-worthy date still ahead, tagged with the
-message it came from, and a scheduled job can do the same ("every weekday at 7am,
-check my inbox for anything with a date in it and propose it for the family
-calendar").
+Dates a client or a scheduled job finds (on a school's site, in Notion, in
+something a member pastes in) become **proposals**, never calendar entries: a
+person says yes first, from a client (`accept_event_proposal`) or on Home. A
+proposal is tagged with where it came from, and a scheduled job can propose too
+("every weekday at 7am, check the school's news page for anything with a date in
+it and propose it for the family calendar").
 
 The same notice is never proposed twice, however many mornings it turns up or
 however many clients read it. Before anything is proposed, code looks for the
-proposal already standing for that occasion: the same source; the same message
-on the same day, with or without the date a message holding several events adds
+proposal already standing for that occasion: the same source; the same source
+on the same day, with or without the date a source holding several events adds
 after a slash; or the same title on the same day (case, spacing and punctuation
 aside) that is still waiting or was turned down. A match comes back as that
 proposal (`already_proposed`), or as `skipped` for one already settled, and
 nothing new is made. Past that, a find on a day that already holds something is
 handed back with that day's events and proposals for the client to judge, since
-the same occasion reaches several mailboxes under different subjects.
+the same occasion can reach the family from several places under different names.
 
 Accepting says what happened, in `status`:
 
@@ -403,7 +410,7 @@ and says how often:
   and kept as that very moment: a cron has no year. The claim that starts its
   run switches it off, and once it has had its run it leaves the list.
 - **until**: on a schedule until it finds what it is waiting for. "Let me know
-  when the school emails the camp dates" checks hourly, says nothing while there
+  when the school's site lists the camp dates" checks hourly, says nothing while there
   is nothing, and once it reports, the report says it has stopped and the job
   leaves the list.
 
@@ -415,16 +422,9 @@ member who set it up: `hearth_context` carries the last three days' newest few,
   (a statement cut, the checks unavailable, the output allowance cutting its end);
 - **held back by the checks**: the unchecked draft, marked, with why;
 - **ran into a problem**: what went wrong, from the job's own PROBLEM line or a
-  failure. A mailbox held at the same place for three runs and twelve hours is
-  moved past, and a report says which span was skipped.
+  failure.
 
-What a job read counts as seen only once a report is kept or it deliberately kept
-none. A run that fails leaves the mail new, so the next run tries again; one that
-wrote something it cannot take back on the strength of it (a list item) spends it
-whatever happened. Each job keeps its own markers for what is new, so an hourly
-watch over the mail never spends what your brief or your clients are there to show.
-
-A job runs as its author: their mailbox alone. An author revoked or removed takes
+A job runs as its author: their own calendar alone. An author revoked or removed takes
 their jobs with them: they are paused before they run again. Home marks each job
 with **once** or **until it happens**, and every member pauses, resumes or
 deletes their own there.
@@ -437,7 +437,7 @@ Monday") with `remember`, corrects one by passing the old id, and retires one wi
 `forget`. A rewording of a fact already on file is turned away at write time.
 
 When a fact would be worth keeping but nobody has said who it is about, or it
-rests on a notice, bill or email rather than on a person, a client puts it to the
+rests on a notice or a bill rather than on a person, a client puts it to the
 family with `unsure` instead of guessing. The next morning brief asks it once,
 Home lists it until it is answered, and any member can answer from a client
 (`answer_question`) or on Home. A yes keeps the fact in their words, a correction
@@ -445,7 +445,7 @@ keeps the corrected version, a no keeps nothing. A yes that changes only a numbe
 or a "not" in a Known fact retires the old one, so the two do not both stand.
 
 Scheduled jobs read the same facts. A standing instruction remembered earlier,
-such as leaving one sender's mail out, holds for every job. Home lists what is
+such as leaving one source out, holds for every job. Home lists what is
 remembered with a Forget for each; forgetting is soft, so a fact can be brought
 back by hand.
 
@@ -575,9 +575,8 @@ rates, renewals, tax, repairs.
 **with scopes**" does not: a scoped token returns 401 against the site URL, which
 looks exactly like a wrong password.
 
-Issues can be created, changed, moved between statuses and commented on, and an
-email's attachment copied onto one (`jira_attach_email_file`). There is **no
-delete**: no tool exposes it and the client has no code path for it. Moving an
+Issues can be created, changed, moved between statuses and commented on. There is
+**no delete**: no tool exposes it and the client has no code path for it. Moving an
 issue goes through Jira's transitions, so an unreachable target reports what *is*
 reachable from where the issue sits. Free-text search terms are escaped before they
 reach JQL, so a quote cannot rewrite the query or reach another project.
@@ -599,23 +598,23 @@ record keeps ninety days.
 ## The web dashboard
 
 The site root is a sign-in screen (Google or Microsoft), then **Home**: anything
-waiting on a yes (your own email drafts, with Send and Discard, and the event
-proposals any member can settle), your reports, the month calendar, your goals, next
+waiting on a yes (the event proposals any member can settle), your reports, the month calendar, your goals, next
 up, your reminders, the shared lists, what is remembered and the questions still
 open, the helpers, what was changed in your name lately, and your MCP keys. Home is
 not read-only: everything on it is something you could ask a client to do, one click
 closer.
 
 **Connect** is where a signed-in member links their Google or Microsoft account, makes
-one read-only (read, never draft, send or add events through it) or unlinks it, and
+one read-only (read, never add events through it) or unlinks it, and
 finds the family calendar's subscription address. Linking acts for whoever is signed
 in, never for whoever a link was sent to, and an account the household already knows
-as another member's is turned away. Signing in also completes the link whenever the
-provider hands back a refresh token, though it only fills a gap or refreshes the same
-address, never repointing a link at a different account.
+as another member's is turned away. Signing in with Microsoft also completes the link
+whenever it hands back a refresh token, though it only fills a gap or refreshes the
+same address, never repointing a link at a different account; signing in with Google
+goes through the sign-in client and links nothing.
 
 An address is recognised if it is in `ADMIN_EMAILS`, or an admin recorded it against a
-member, or that member linked a mailbox with it. Admin members get **System** and
+member, or that member linked a calendar with it. Admin members get **System** and
 **Settings** as well; an admin landing on a deployment with nobody in the family yet
 is sent to **/setup**. The check happens on every request, not only at sign-in: the
 session cookie only says who signed in, so a revoke or a demotion takes effect on the
@@ -627,7 +626,7 @@ Admins manage the family on Settings: add someone by name and the address they s
 with, change an address, allow, revoke, promote or remove. Adding an address already
 in the family renames that person and changes only what was filled in. The **last
 admin cannot be revoked, demoted or removed**, only succeeded, so the house cannot
-lock itself out. Removing someone takes their keys, links and drafts with them, and
+lock itself out. Removing someone takes their keys and links with them, and
 pauses their scheduled jobs.
 
 System shows the chain's health over a week (per slot: how many calls it answered and
@@ -662,7 +661,7 @@ back`, `skipped`, `not run`, `failed`), the decision and its confidence, and how
 claims were checked. Tracing is registered once at server start from
 `instrumentation.ts` and is inert without the keys.
 
-Traces carry the family's mail; set `LANGFUSE_RECORD_CONTENT=off` to keep only the
+Traces carry the household's data; set `LANGFUSE_RECORD_CONTENT=off` to keep only the
 shape of each call. The keys are environment variables, not dashboard settings,
 because the tracer starts before the database is read. The integration is built for
 Langfuse v4 (`@langfuse/otel` 5.4 or later, 5.13 installed); `tests/langfuse-v4.test.ts`
@@ -679,15 +678,15 @@ whose metadata `draft` is `yes`. A trace scored *Not grounded* is the next case 
   to an allowed member; the dashboard only a session whose address belongs to one. A
   deployment with nobody in the family accepts nothing but the `ADMIN_EMAILS`
   bootstrap, and that only on the dashboard.
-- **A key is its member.** Every call runs as whoever holds it: their mailbox and
-  never another member's, their calendar, their name on what it writes. Keys are
+- **A key is its member.** Every call runs as whoever holds it: their calendar and
+  never another member's, their name on what it writes. Keys are
   stored as SHA-256 digests; each carries an HMAC tag that is checked before the
   lookup, so a made-up one costs no database read. A revoked key's row is gone, so it
   never matches again; a member who is revoked or removed takes every key with them.
-- **One member's things stay theirs.** Mail, personal calendars, drafts, goals,
-  reminders, reports and the record of changes are each member's own: no tool, client
-  or page reads another member's. The family calendar, lists, facts, proposals,
-  helpers and routines are the household's.
+- **One member's things stay theirs.** Personal calendars, goals, reminders, reports
+  and the record of changes are each member's own: no tool, client or page reads
+  another member's. The family calendar, lists, facts, proposals, helpers and
+  routines are the household's.
 - **OAuth for MCP clients** is PKCE (S256) only, for public clients; a client's
   registration, the approval it asks for and each code are signed tokens, a code is
   good for five minutes and one use, bound to its client, redirect and challenge, and
@@ -701,21 +700,16 @@ whose metadata `draft` is `yes`. A trace scored *Not grounded* is the next case 
   passes as a member's link, and a link acts only for the member whose session asked
   for it. An address in `ADMIN_EMAILS` counts as an admin's even with no row naming
   its owner, so only an admin, or the member an admin recorded it against, may link it.
-- A member decides what Hearth may do with each account they link: read it and write
-  from it, or read it alone. A read-only account takes no draft and no calendar entry,
-  and sends nothing even from a draft written before it was made read-only.
+- A member decides what Hearth may do with each account they link: read its calendar
+  and add to it, or read it alone. A read-only account takes no calendar entry.
+- Hearth reads and sends no mail, and asks no provider for a mail scope.
 - Refresh tokens are AES-256-GCM encrypted with `TOKEN_ENC_KEY`.
 - The ICS feed sits behind a long random token, compared without early exit. An admin
   can replace it if the URL gets out; everyone subscribed then subscribes again.
 - `/api/tick` verifies the QStash signature.
-- Email is never sent without a human "yes": `draft_email` and `send_email` are
-  separate tools, the draft is persisted, and the send claims it atomically so a
-  repeated confirmation cannot send twice. A send that times out stays claimed, since
-  it may have gone. Over MCP each call stands alone, so the client's own approval of
-  each tool call is the gate; on Home the yes is the writer's own click on Send.
 - Nothing that runs unattended can do what would need a yes. Scheduled jobs (handed to
   a helper, a goal's check-in, a watch-until, a routine on a schedule) get read-only
-  tools (adding to a list and proposing an event aside), their author's mailbox alone,
+  tools (adding to a list and proposing an event aside), their author's calendar alone,
   and every report goes through the claim check and the decision.
 - Once a scheduled run has read anything from outside the household, `read_url` (and
   `read_recipe`) opens only a link that appears, as written, in something the run was

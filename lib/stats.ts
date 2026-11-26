@@ -40,9 +40,7 @@ export async function gatherStats(month?: string) {
         (select count(*) from mcp_keys) as keys,
         (select count(*) from family_events where not cancelled) as events,
         (select count(*) from memories where invalidated_at is null) as memories,
-        (select count(*) from event_proposals p where ${LIVE_PROPOSAL}) as proposals,
-        (select count(*) from email_drafts where status = 'pending') as drafts,
-        (select count(*) from email_drafts where status = 'sent') as sent
+        (select count(*) from event_proposals p where ${LIVE_PROPOSAL}) as proposals
     `),
     // What was changed each day of the fortnight, and how it was asked for:
     // through an MCP client, on Home, or by a scheduled job.
@@ -108,8 +106,6 @@ export async function gatherStats(month?: string) {
       events: n(c.events),
       memories: n(c.memories),
       proposals: n(c.proposals),
-      drafts: n(c.drafts),
-      sent: n(c.sent),
     },
     activity: fortnight(
       rows(byDay).map((r) => ({ day: String(r.day), mcp: n(r.mcp), web: n(r.web), scheduled: n(r.scheduled) })),
@@ -214,13 +210,13 @@ const REPORTS_SHOWN = 10
 
 /**
  * What any recognised family member may see: the household's shared things,
- * and the viewer's own goals, drafts, reminders, reports, keys and record of
+ * and the viewer's own goals, reminders, reports, keys and record of
  * changes. No settings, no integration wiring, and nothing of another member's.
  */
 export async function gatherFamilyStats(month?: string, viewer?: number | null) {
   const view = monthView(month, ctxNow())
   const me = viewer ?? -1
-  const [counts, upcoming, automations, listRows, monthEvents, proposalRows, memoryRows, questionRows, lastTickAt, prevTickAt, activityRows, goalRows, draftRows, helperRows, reportRows, keyRows] = await Promise.all([
+  const [counts, upcoming, automations, listRows, monthEvents, proposalRows, memoryRows, questionRows, lastTickAt, prevTickAt, activityRows, goalRows, helperRows, reportRows, keyRows] = await Promise.all([
     db().execute(sql`
       select
         (select count(*) from family_events where not cancelled) as events,
@@ -275,7 +271,7 @@ export async function gatherFamilyStats(month?: string, viewer?: number | null) 
     getSetting('last_tick_at').catch((): string | null => null),
     getSetting('prev_tick_at').catch((): string | null => null),
     // What was changed in the viewer's name lately: another member's record
-    // (their drafts, their calendar) is theirs to look back over.
+    // (their goals, their calendar) is theirs to look back over.
     db().execute(sql`
       select a.id, a.summary, a.via, a.created_at
       from activity a
@@ -289,13 +285,6 @@ export async function gatherFamilyStats(month?: string, viewer?: number | null) 
       from goals g
       where g.status = 'active' and g.member_id = ${me}
       order by g.target_date nulls last, g.id
-    `),
-    // The viewer's own email drafts waiting on their yes: nobody else's, since only the writer can send one.
-    db().execute(sql`
-      select d.id, d.recipients, d.cc, d.subject, d.body, d.provider, d.created_at
-      from email_drafts d
-      where d.status = 'pending' and d.member_id = ${me}
-      order by d.id desc limit 10
     `),
     // The household's helpers, which anyone can hand a job to.
     db().execute(sql`select id, name, role from helpers order by id`),
@@ -378,15 +367,6 @@ export async function gatherFamilyStats(month?: string, viewer?: number | null) 
       since: formatLocalDate(new Date(r.created_at as string)),
     })),
     helpers: rows(helperRows).map((r) => ({ id: n(r.id), name: String(r.name), role: roleInBrief(String(r.role)) })),
-    drafts: rows(draftRows).map((r) => ({
-      id: n(r.id),
-      to: String(r.recipients),
-      cc: r.cc ? String(r.cc) : null,
-      subject: String(r.subject),
-      body: String(r.body),
-      from: r.provider === 'microsoft' ? 'Outlook' : 'Gmail',
-      when: formatLocal(new Date(r.created_at as string)),
-    })),
     goals: rows(goalRows).map((r) => {
       const steps = stepRows.filter((i) => n(i.goal_id) === n(r.id)).map((i) => ({ id: n(i.id), content: String(i.content), done: Boolean(i.done) }))
       const target = r.target_date ? String(r.target_date) : null

@@ -76,7 +76,7 @@ export function memoryTools(ctx: ToolContext) {
       inputSchema: z.object({
         question: z
           .string()
-          .describe('The question as the family will read it, e.g. "Who attends <school>? A tuition notice was in <name>\'s mail."'),
+          .describe('The question as the family will read it, e.g. "Who attends <school>? A tuition notice named <name>."'),
         fact: z.string().describe('The fact to file if the answer is yes, self-contained, as remember would take it'),
       }),
       execute: async ({ question, fact }) => {

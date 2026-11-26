@@ -1,9 +1,9 @@
 /**
- * Turning markup into text happens in three places — a browsed page and two
- * mail providers — and each one has to get the same edge cases right: a
- * `</script >` end tag a naive pattern walks straight past, a tag that only
- * becomes visible once the tag wrapped around it is removed, and an `&amp;lt;`
- * that a second decoding pass would take all the way down to `<`.
+ * Turning markup into text has to get the same edge cases right wherever it
+ * happens (a browsed page, a recipe): a `</script >` end tag a naive pattern
+ * walks straight past, a tag that only becomes visible once the tag wrapped
+ * around it is removed, and an `&amp;lt;` that a second decoding pass would
+ * take all the way down to `<`.
  *
  * The markup is whatever a stranger sent, so no pattern may be left to fail
  * slowly. One that looks for a closing mark and never finds it is tried again

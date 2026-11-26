@@ -4,7 +4,6 @@ import type { Automation, Member } from '@/lib/db/schema'
 const dueAutomations = vi.fn<(now: Date) => Promise<Automation[]>>()
 const claimAutomation = vi.fn<(id: number, expected: Date, next: Date | null) => Promise<boolean>>()
 const runAgent = vi.fn()
-const looksBefore = vi.fn((_err?: unknown) => [] as unknown[])
 const decideWatcherPost = vi.fn()
 const reviewDraft = vi.fn()
 const cutFromDraft = vi.fn()
@@ -20,7 +19,6 @@ const q = vi.hoisted(() => ({
   memberById: vi.fn(async (_id: number) => undefined as unknown),
   addReport: vi.fn(async (_input: Record<string, unknown>) => ({})),
   getSetting: vi.fn<(key: string) => Promise<string | null>>(async () => null),
-  setSetting: vi.fn<(key: string, value: string) => Promise<void>>(async () => {}),
   recordTick: vi.fn<(now: Date) => Promise<void>>(async () => {}),
   retireStaleProposals: vi.fn(async (_now: Date) => ({ expired: 0, superseded: 0 })),
 }))
@@ -44,7 +42,7 @@ vi.mock('@/lib/oauth/server', () => ({ pruneUsedCodes }))
 vi.mock('@/lib/agent', async (orig) => {
   const actual = await orig<typeof import('@/lib/agent')>()
   return {
-    runAgent, decideWatcherPost, reviewDraft, cutFromDraft, looksBefore,
+    runAgent, decideWatcherPost, reviewDraft, cutFromDraft,
     scheduledInstruction: actual.scheduledInstruction,
     TURN_BUDGET_MS: actual.TURN_BUDGET_MS,
   }
@@ -107,7 +105,6 @@ beforeEach(() => {
   vi.spyOn(console, 'info').mockImplementation(() => {})
   vi.spyOn(console, 'warn').mockImplementation(() => {})
   for (const k of ['QSTASH_CURRENT_SIGNING_KEY', 'QSTASH_NEXT_SIGNING_KEY', 'TICK_SECRET']) delete process.env[k]
-  looksBefore.mockImplementation(() => [])
   dueAutomations.mockResolvedValue([])
   claimAutomation.mockResolvedValue(true)
   runAgent.mockResolvedValue({ text: 'Bins out tonight.', model: 'primary:test' })
@@ -118,7 +115,6 @@ beforeEach(() => {
   q.getHelper.mockResolvedValue(undefined)
   q.addReport.mockResolvedValue({})
   q.getSetting.mockResolvedValue(null)
-  q.setSetting.mockResolvedValue(undefined)
   q.deleteAutomation.mockResolvedValue(true)
   q.retireStaleProposals.mockResolvedValue({ expired: 0, superseded: 0 })
 })
@@ -322,12 +318,13 @@ describe('running due automations', () => {
     expect(q.addReport).not.toHaveBeenCalled()
   })
 
-  it("runs the author's own words as the author, on markers of its own, with the read-only tools a run gets", async () => {
+  it("runs the author's own words as the author, with the read-only tools a run gets", async () => {
     dueAutomations.mockResolvedValue([automation({ id: 12 })])
     await authed()
     expect(q.memberById).toHaveBeenCalledWith(9)
     const input = runAgent.mock.calls[0][0] as Record<string, unknown>
-    expect(input).toMatchObject({ member: ROWAN, memberName: 'Rowan', cursorScope: 'auto:12' })
+    expect(input).toMatchObject({ member: ROWAN, memberName: 'Rowan' })
+    expect(input).not.toHaveProperty('cursorScope')
     expect(input.helper).toBeUndefined()
     // The default list, which is what a scheduled run may reach for.
     expect(input.tools).toBeUndefined()
@@ -458,73 +455,6 @@ describe('running due automations', () => {
     expect(console.error).toHaveBeenCalledWith('[tick] could not retire stale proposals:', expect.any(Error))
   })
 
-  describe('what a run read', () => {
-    const KEY = 'mail_cursor:auto:1:9:google'
-    const staged = [{ key: KEY, at: '2026-09-24T01:00:00.000Z', ids: ['m1'], prev: null }]
-
-    it('is spent once its report is kept, and not when the model fails', async () => {
-      dueAutomations.mockResolvedValue([automation()])
-      runAgent.mockResolvedValueOnce({ text: 'School: excursion form due Friday.', model: 'primary:test', cursors: staged })
-      await authed()
-      expect(q.setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
-
-      q.setSetting.mockClear()
-      runAgent.mockRejectedValueOnce(new Error('429 quota'))
-      await authed()
-      expect(q.setSetting).not.toHaveBeenCalledWith(KEY, expect.anything())
-    })
-
-    it('is spent with a PROBLEM when the run already wrote something unrepeatable on it, and left new when it did not', async () => {
-      dueAutomations.mockResolvedValue([automation()])
-      runAgent.mockResolvedValueOnce({ text: 'PROBLEM: read_email failed after adding to the list\nSKIP', model: 'primary:test', cursors: staged, wrote: ['add_to_list'] })
-      await authed()
-      expect(reports()[0]).toMatchObject({ status: 'problem', body: 'PROBLEM: read_email failed after adding to the list' })
-      expect(q.setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
-
-      vi.clearAllMocks()
-      dueAutomations.mockResolvedValue([automation()])
-      runAgent.mockResolvedValueOnce({ text: 'PROBLEM: read_email failed for the school message\nSKIP', model: 'primary:test', cursors: staged })
-      await authed()
-      expect(q.setSetting).not.toHaveBeenCalledWith(KEY, expect.anything())
-      // And counted, being about what was read.
-      expect(q.setSetting).toHaveBeenCalledWith('unspent:1', expect.stringContaining(KEY))
-    })
-
-    it('is spent on a plain SKIP, which is the run deciding there is nothing to say', async () => {
-      dueAutomations.mockResolvedValue([automation()])
-      runAgent.mockResolvedValueOnce({ text: 'SKIP', model: 'primary:test', cursors: staged })
-      await authed()
-      expect(q.setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
-    })
-
-    it('is spent when the checks hold the draft back, since the member has the draft, marked', async () => {
-      dueAutomations.mockResolvedValue([automation()])
-      runAgent.mockResolvedValueOnce({ text: 'Bins out tonight.', model: 'primary:test', cursors: staged })
-      decideWatcherPost.mockResolvedValue({ decision: 'skip', confidence: 0.8, model: 'primary:test', reason: 'a time the evidence does not give' })
-      await authed()
-      expect(q.setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
-      expect(reports()[0]).toMatchObject({ status: 'held' })
-    })
-
-    it('counts a failure on what its model looked at, and moves past it in time', async () => {
-      const look = staged[0]
-      const since = new Date(Date.now() - 20 * 3600_000).toISOString()
-      dueAutomations.mockResolvedValue([automation()])
-      const failure = new Error('the attachment cannot be read')
-      runAgent.mockRejectedValueOnce(failure)
-      looksBefore.mockImplementation((err) => (err === failure ? [look] : []))
-      q.getSetting.mockImplementation(async (key: string) =>
-        key === 'unspent:1' ? JSON.stringify({ [look.key]: { from: '-', since, last: since, runs: 2, move: look } }) : null,
-      )
-      await authed()
-      expect(q.setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
-      expect(reports().map((r) => r.body)).toEqual([
-        expect.stringMatching(/^Failed on the same new items 3 runs running \(the attachment cannot be read\), so it has moved past them without reporting them: mail in your linked Gmail mailbox up to /),
-        'It failed: the attachment cannot be read',
-      ])
-    })
-  })
-
   describe('jobs that run once, or until they find something', () => {
     it('runs a one-off once: the claim switches it off and the run takes it off the list', async () => {
       dueAutomations.mockResolvedValue([automation({ id: 4, repeat: 'once', label: 'call the plumber' })])
@@ -569,7 +499,7 @@ describe('running due automations', () => {
       expect(decideWatcherPost.mock.calls[0][0].draft).toBe('Camp is 3 to 5 March.')
     })
 
-    it('stops a watch-until whose find the checks held back, since what it read is spent, and says so', async () => {
+    it('stops a watch-until whose find the checks held back, and says so', async () => {
       dueAutomations.mockResolvedValue([automation({ id: 5, repeat: 'until', label: 'camp dates' })])
       runAgent.mockResolvedValue({ text: 'Camp is 3 to 5 March.', model: 'primary:test' })
       decideWatcherPost.mockResolvedValue({ decision: 'skip', confidence: 0.9, reason: 'invented', model: 'primary:test' })
@@ -715,12 +645,11 @@ describe('the checks on what a run wrote', () => {
     expect(String(reports()[0].detail)).toContain('; it could not be cut and judged again (No object generated)')
   })
 
-  it('leaves the first ruling standing, the draft held and what it read spent, when the tick ran out of time for the second round', async () => {
+  it('leaves the first ruling standing, the draft held, when the tick ran out of time for the second round', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     try {
       const start = Date.now()
-      const staged = [{ key: 'mail_cursor:auto:1:9:google', at: '2026-10-06T01:00:00.000Z', ids: ['m1'], prev: null }]
-      runAgent.mockResolvedValueOnce({ text: 'Bins out tonight.', model: 'primary:test', cursors: staged })
+      runAgent.mockResolvedValueOnce({ text: 'Bins out tonight.', model: 'primary:test' })
       reviewDraft.mockResolvedValue({ claims: ['bins tonight'], unsupported: [], message: 'Bins out tonight.' })
       decideWatcherPost.mockResolvedValue({
         decision: 'skip', confidence: 0.95, model: 'primary:test', reason: 'the draft states something the evidence does not contain: tonight', notInEvidence: 'tonight',
@@ -735,7 +664,6 @@ describe('the checks on what a run wrote', () => {
       expect(reports()[0]).toMatchObject({ status: 'held' })
       expect(String(reports()[0].detail)).toContain('Held back: the check said skip at 0.95')
       expect(String(reports()[0].detail)).toContain('could not be cut and judged again (Timed out before any model was asked)')
-      expect(q.setSetting).toHaveBeenCalledWith('mail_cursor:auto:1:9:google', expect.anything())
     } finally {
       vi.useRealTimers()
     }
@@ -783,12 +711,11 @@ describe('the checks on what a run wrote', () => {
     expect(reports()[0].detail).toBe('Not checked against its evidence: the check failed (No object generated). The claim check cut: a refund')
   })
 
-  it('keeps nothing, and leaves what the run read new, when the tick ran out of time for the decision', async () => {
+  it('keeps nothing when the tick ran out of time for the decision', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     try {
       const start = Date.now()
-      const staged = [{ key: 'mail_cursor:auto:1:9:google', at: '2026-10-06T01:00:00.000Z', ids: ['m1'], prev: null }]
-      runAgent.mockResolvedValueOnce({ text: 'Bins out tonight.', model: 'primary:test', cursors: staged })
+      runAgent.mockResolvedValueOnce({ text: 'Bins out tonight.', model: 'primary:test' })
       // The first judge used up the tick, and the next was never asked.
       decideWatcherPost.mockImplementation(async () => {
         vi.setSystemTime(start + 280_000)
@@ -796,9 +723,6 @@ describe('the checks on what a run wrote', () => {
       })
       await authed()
       expect(q.addReport).not.toHaveBeenCalled()
-      expect(q.setSetting).not.toHaveBeenCalledWith('mail_cursor:auto:1:9:google', expect.anything())
-      // Nobody ruled on it, which says nothing about the mail: it is not counted either.
-      expect(q.setSetting).not.toHaveBeenCalledWith('unspent:1', expect.anything())
       expect(noteRun).toHaveBeenCalledWith({ metadata: { decision: 'out of time' } })
       expect(noteRun).toHaveBeenCalledWith({ output: 'Bins out tonight.', metadata: { outcome: 'held back unjudged' }, level: 'WARNING' })
     } finally {
@@ -806,18 +730,16 @@ describe('the checks on what a run wrote', () => {
     }
   })
 
-  it('keeps an unjudged draft held, and spends what it read, when the run already acted on it', async () => {
+  it('keeps an unjudged draft held when the run already acted on it', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     try {
       const start = Date.now()
-      const staged = [{ key: 'mail_cursor:auto:1:9:google', at: '2026-10-06T01:00:00.000Z', ids: ['m1'], prev: null }]
-      runAgent.mockResolvedValueOnce({ text: 'Added the permission slip to the list.', model: 'primary:test', cursors: staged, wrote: ['add_to_list'] })
+      runAgent.mockResolvedValueOnce({ text: 'Added the permission slip to the list.', model: 'primary:test', wrote: ['add_to_list'] })
       decideWatcherPost.mockImplementation(async () => {
         vi.setSystemTime(start + 280_000)
         throw new Error('The operation was aborted due to timeout')
       })
       await authed()
-      expect(q.setSetting).toHaveBeenCalledWith('mail_cursor:auto:1:9:google', expect.stringContaining('m1'))
       expect(reports()).toEqual([
         expect.objectContaining({
           status: 'held',
@@ -882,12 +804,11 @@ describe('the checks on what a run wrote', () => {
     expect(String(reports()[0].detail)).toBe('Held back: claims failed the check and could not be cut out (Timed out before any model was asked): a trip to Lisbon.')
   })
 
-  it('keeps nothing and leaves what it read new when the tick ran out of time to cut out a failed claim', async () => {
+  it('keeps nothing when the tick ran out of time to cut out a failed claim', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     try {
       const start = Date.now()
-      const staged = [{ key: 'mail_cursor:auto:1:9:google', at: '2026-09-24T01:00:00.000Z', ids: ['m1'], prev: null }]
-      runAgent.mockResolvedValueOnce({ text: 'Bins out tonight, and a trip to Lisbon.', model: 'primary:test', cursors: staged })
+      runAgent.mockResolvedValueOnce({ text: 'Bins out tonight, and a trip to Lisbon.', model: 'primary:test' })
       // The check ran long, and the rewrite was refused for want of time, not by any judge.
       reviewDraft.mockImplementation(async () => {
         vi.setSystemTime(start + 255_000)
@@ -896,8 +817,6 @@ describe('the checks on what a run wrote', () => {
       await authed()
       expect(decideWatcherPost).not.toHaveBeenCalled()
       expect(q.addReport).not.toHaveBeenCalled()
-      expect(q.setSetting).not.toHaveBeenCalledWith('mail_cursor:auto:1:9:google', expect.anything())
-      expect(q.setSetting).not.toHaveBeenCalledWith('unspent:1', expect.anything())
       expect(console.warn).toHaveBeenCalledWith('[tick] bin night: held back, the tick ran out of time to cut out claims that failed the check: a trip to Lisbon')
     } finally {
       vi.useRealTimers()
@@ -910,260 +829,6 @@ describe('the checks on what a run wrote', () => {
     await authed()
     expect(reports()[0].detail).toBe('The claim check cut: a refund The output allowance cut it short, so it lost its unfinished end.')
     expect(noteRun).toHaveBeenCalledWith({ output: '**To do**\n- Bins out tonight.', metadata: { outcome: 'kept', cut_short: true }, level: 'WARNING' })
-  })
-})
-
-describe('the stuck guard', () => {
-  const KEY = 'mail_cursor:auto:1:9:google'
-  const HOUR = 3600_000
-  const move = (ids: string[], at = '2026-09-24T01:00:00.000Z', key = KEY) => ({ key, at, ids, prev: null })
-  const stuckAt = (entries: Record<string, unknown>) =>
-    q.getSetting.mockImplementation(async (key: string) => (key === 'unspent:1' ? JSON.stringify(entries) : null))
-  const ago = (hours: number) => new Date(Date.now() - hours * HOUR).toISOString()
-  const entry = (runs: number, hoursAgo: number, ids = ['m1']) => ({ from: '-', since: ago(hoursAgo), last: ago(hoursAgo), runs, move: move(ids) })
-  const written = () => {
-    const call = q.setSetting.mock.calls.findLast(([k]) => k === 'unspent:1')
-    return call?.[1] ? JSON.parse(call[1]) : call ? {} : undefined
-  }
-  const problem = () => ({ text: 'PROBLEM: read_email failed for the school message\nSKIP', model: 'primary:test', cursors: [move(['m1'])] })
-  /** A run that fails outright after looking, its look kept against the error. */
-  const failsWith = (err: unknown) => {
-    runAgent.mockRejectedValueOnce(err)
-    looksBefore.mockImplementation((e) => (e === err ? [move(['m1'])] : []))
-  }
-  const movedReport = () => reports().find((r) => String(r.body).startsWith('Failed on the same new items'))
-
-  beforeEach(() => {
-    process.env.TICK_SECRET = 'let-me-in'
-    dueAutomations.mockResolvedValue([automation()])
-  })
-
-  it('counts a run that leaves the mail unspent, and says nothing more yet', async () => {
-    runAgent.mockResolvedValue(problem())
-    await authed()
-    expect(written()[KEY]).toMatchObject({ from: '-', runs: 1, move: { ids: ['m1'] } })
-    expect(q.setSetting).not.toHaveBeenCalledWith(KEY, expect.anything())
-    expect(movedReport()).toBeUndefined()
-  })
-
-  it('counts on from the last run when it is stuck at the same place, keeping when it started', async () => {
-    const first = entry(1, 2)
-    stuckAt({ [KEY]: first })
-    failsWith(new Error('the attachment cannot be read'))
-    await authed()
-    expect(written()[KEY]).toMatchObject({ from: '-', since: first.since, runs: 2, move: first.move })
-    expect(Date.parse(written()[KEY].last)).toBeGreaterThan(Date.parse(first.last))
-  })
-
-  const apiError = (message: string, statusCode: number | undefined, isRetryable = false) =>
-    new APICallError({ message, url: 'https://llm.test', requestBodyValues: {}, statusCode, isRetryable })
-  const retried = (last: Error) => new RetryError({ message: `Failed after 3 attempts. Last error: ${last.message}`, reason: 'maxRetriesExceeded', errors: [last] })
-
-  it.each([
-    ['a rate limit', () => retried(apiError('Provider returned error', 429, true))],
-    ['a retried call whose last try the provider marked retryable, in words that say nothing', () => retried(apiError('Conflict', 409, true))],
-    ['a gateway error', () => apiError('Bad Gateway', 502, true)],
-    ['no credit left', () => apiError('Insufficient credits', 402)],
-    ['a key the provider refuses', () => apiError('User not found.', 401)],
-    ['a key Gemini answers a 400 for', () => apiError('API key not valid. Please pass a valid API key.', 400)],
-    ['no connection', () => apiError('Cannot connect to API: connect ECONNREFUSED 10.0.0.1:443', undefined, true)],
-    ['a step that timed out', () => new DOMException('The operation was aborted due to timeout', 'TimeoutError')],
-    ['a request aborted', () => Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })],
-    ['nothing configured', () => new Error('No LLM configured: set GEMINI_API_KEY, OPENROUTER_API_KEY, or LLM_BASE_URL + LLM_MODEL')],
-  ])('does not count %s, which says nothing about the mail', async (_what, make) => {
-    stuckAt({ [KEY]: entry(2, 20) })
-    failsWith(make())
-    await authed()
-    expect(q.setSetting).not.toHaveBeenCalledWith('unspent:1', expect.anything())
-    expect(q.setSetting).not.toHaveBeenCalledWith(KEY, expect.anything())
-  })
-
-  it.each([
-    ['a request too long for the model, whose token count is no status code', () => retried(apiError('The input token count (1048576) exceeds the maximum number of tokens allowed (1048576).', 400))],
-    ['a payload the provider will not take', () => apiError('Request Entity Too Large', 413)],
-    ['a reply no model could finish', () => new Error('openrouter:minimax/minimax-m3:free returned no text')],
-  ])('counts %s, which fails the same way every time', async (_what, make) => {
-    stuckAt({ [KEY]: entry(2, 20) })
-    failsWith(make())
-    await authed()
-    expect(q.setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
-  })
-
-  it("does not count a PROBLEM that is a tool's service down or unset, only one about what was read", async () => {
-    stuckAt({ [KEY]: entry(2, 20) })
-    runAgent.mockResolvedValue({ ...problem(), text: 'PROBLEM: weather returned 503 Service Unavailable\nPROBLEM: Jira is not configured\nSKIP' })
-    await authed()
-    expect(q.setSetting).not.toHaveBeenCalledWith('unspent:1', expect.anything())
-    // Both kept for the member all the same: they are what went wrong.
-    expect(reports()[0]).toMatchObject({ status: 'problem', body: 'PROBLEM: weather returned 503 Service Unavailable\nPROBLEM: Jira is not configured' })
-
-    runAgent.mockResolvedValue({ ...problem(), text: 'PROBLEM: weather returned 503\nPROBLEM: read_email failed for the school message\nSKIP' })
-    await authed()
-    expect(q.setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
-  })
-
-  it('counts a PROBLEM whose status is a link in the mail, not a service', async () => {
-    stuckAt({ [KEY]: entry(2, 20) })
-    runAgent.mockResolvedValue({ ...problem(), text: 'PROBLEM: read_url on the school newsletter link failed: The page answered 403.\nSKIP' })
-    await authed()
-    expect(q.setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
-  })
-
-  it('reads a count that never noted its last run by when it started', async () => {
-    const { last: _last, ...older } = entry(1, 2)
-    stuckAt({ [KEY]: older })
-    runAgent.mockResolvedValue(problem())
-    await authed()
-    expect(written()[KEY]).toMatchObject({ since: older.since, runs: 2 })
-  })
-
-  it('forgets a count not added to in over a week', async () => {
-    stuckAt({ [KEY]: entry(2, 9 * 24) })
-    runAgent.mockResolvedValue(problem())
-    await authed()
-    expect(written()[KEY]).toMatchObject({ runs: 1 })
-    expect(q.setSetting).not.toHaveBeenCalledWith(KEY, expect.anything())
-  })
-
-  it('still moves a weekly automation on, whose runs are a week apart', async () => {
-    stuckAt({ [KEY]: { ...entry(2, 14 * 24), last: ago(7 * 24) } })
-    runAgent.mockResolvedValue(problem())
-    await authed()
-    expect(q.setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
-  })
-
-  it('moves a cursor held at a real place on no further than it has got since, naming the span', async () => {
-    const from = '2026-09-22T21:00:00.000Z'
-    const ahead = '2026-09-24T03:00:00.000Z'
-    const first = { from, since: ago(20), last: ago(20), runs: 2, move: { key: KEY, at: '2026-09-23T01:00:00.000Z', ids: ['m0'], prev: { at: from, ids: [] } } }
-    // Another reader has meanwhile moved the stored cursor on past the stuck move.
-    q.getSetting.mockImplementation(async (key: string) =>
-      key === 'unspent:1' ? JSON.stringify({ [KEY]: first })
-      : key === KEY ? JSON.stringify({ at: ahead, ids: ['c1'] })
-      : null,
-    )
-    runAgent.mockResolvedValue({ ...problem(), cursors: [{ key: KEY, at: '2026-09-24T01:00:00.000Z', ids: ['m1'], prev: { at: from, ids: [] } }] })
-    await authed()
-    const spent = JSON.parse(q.setSetting.mock.calls.find(([k]) => k === KEY)![1])
-    expect(spent.at).toBe(ahead)
-    expect(spent.ids).toEqual(['c1', 'm0'])
-    expect(String(movedReport()!.body)).toMatch(/mail in your linked Gmail mailbox from Wed,? 23 Sept 2026,? 7:00\s?am to Wed,? 23 Sept 2026,? 11:00\s?am/)
-  })
-
-  it('starts the count again when the cursor is held somewhere new', async () => {
-    stuckAt({ [KEY]: { ...entry(2, 20), from: '2026-09-20T00:00:00.000Z' } })
-    runAgent.mockResolvedValue(problem())
-    await authed()
-    expect(written()[KEY]).toMatchObject({ from: '-', runs: 1 })
-    expect(q.setSetting).not.toHaveBeenCalledWith(KEY, expect.anything())
-  })
-
-  it('does not move past three quick failures, only ones spread over hours', async () => {
-    stuckAt({ [KEY]: entry(2, 2) })
-    runAgent.mockResolvedValue(problem())
-    await authed()
-    expect(written()[KEY]).toMatchObject({ runs: 3 })
-    expect(q.setSetting).not.toHaveBeenCalledWith(KEY, expect.anything())
-  })
-
-  it('moves past what the first stuck run saw, not what has arrived since, and says so once', async () => {
-    stuckAt({ [KEY]: entry(2, 20, ['m0']) })
-    runAgent.mockResolvedValue(problem())
-    await authed()
-    const spent = q.setSetting.mock.calls.find(([k]) => k === KEY)
-    expect(JSON.parse(spent![1]).ids).toEqual(['m0'])
-    expect(q.setSetting).toHaveBeenCalledWith('unspent:1', '')
-    const told = reports().filter((r) => String(r.body).startsWith('Failed on the same new items'))
-    expect(told).toHaveLength(1)
-    expect(told[0]).toMatchObject({ memberId: 9, automationId: 1, status: 'problem' })
-    expect(String(told[0].body)).toContain('Failed on the same new items 3 runs running (the run reported a problem)')
-    expect(String(told[0].body)).toContain('mail in your linked Gmail mailbox up to')
-  })
-
-  it('moves past on a third failure outright too, and still reports that failure', async () => {
-    stuckAt({ [KEY]: entry(2, 20) })
-    failsWith(new Error('the attachment cannot be read'))
-    await authed()
-    expect(q.setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
-    expect(String(movedReport()!.body)).toContain('(the attachment cannot be read), so it has moved past them')
-    expect(reports().at(-1)).toMatchObject({ body: 'It failed: the attachment cannot be read' })
-  })
-
-  it('names each mailbox it moves past by what it is', async () => {
-    const outlook = 'mail_cursor:auto:1:9:microsoft'
-    const other = 'mail_cursor:auto:1:9:yahoo'
-    const odd = 'board_cursor:auto:1'
-    const old = (key: string) => ({ ...entry(2, 20), move: move(['x'], '2026-09-24T01:00:00.000Z', key) })
-    stuckAt({ [outlook]: old(outlook), [other]: old(other), [odd]: old(odd) })
-    runAgent.mockResolvedValue({ ...problem(), cursors: [move(['x'], '2026-09-24T01:00:00.000Z', outlook), move(['x'], '2026-09-24T01:00:00.000Z', other), move(['x'], '2026-09-24T01:00:00.000Z', odd)] })
-    await authed()
-    const body = String(movedReport()!.body)
-    expect(body).toContain('mail in your linked Outlook mailbox up to')
-    expect(body).toContain('mail in your linked yahoo mailbox up to')
-    expect(body).toContain('new items up to')
-  })
-
-  it("keeps each mailbox's count apart, so one whose fetch fails some runs neither resets nor rides on another", async () => {
-    const other = 'mail_cursor:auto:1:9:microsoft'
-    const otherEntry = { ...entry(1, 1), move: { ...move(['o1']), key: other } }
-    stuckAt({ [KEY]: entry(2, 20), [other]: otherEntry })
-    runAgent.mockResolvedValue(problem())
-    await authed()
-    // Only this mailbox was looked at this run: it moves on, the other waits where it was.
-    expect(q.setSetting).toHaveBeenCalledWith(KEY, expect.stringContaining('m1'))
-    expect(q.setSetting).not.toHaveBeenCalledWith(other, expect.anything())
-    expect(written()).toEqual({ [other]: otherEntry })
-  })
-
-  it('clears a cursor from the count once a run spends it, and leaves the count alone when it held nothing of the run', async () => {
-    stuckAt({ [KEY]: entry(2, 20) })
-    runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.', model: 'primary:test', cursors: [move(['m1'])] })
-    await authed()
-    expect(reports()[0]).toMatchObject({ status: 'ready', body: '**To do**\n- School: permission slip due Friday.' })
-    expect(q.setSetting).toHaveBeenCalledWith('unspent:1', '')
-    expect(movedReport()).toBeUndefined()
-
-    q.setSetting.mockClear()
-    stuckAt({ 'mail_cursor:auto:1:9:microsoft': { ...entry(1, 1), move: move(['o1'], '2026-09-24T01:00:00.000Z', 'mail_cursor:auto:1:9:microsoft') } })
-    await authed()
-    expect(q.setSetting).not.toHaveBeenCalledWith('unspent:1', expect.anything())
-  })
-
-  it('treats an unreadable count as none', async () => {
-    for (const raw of ['{not json', 'null', '42']) {
-      vi.clearAllMocks()
-      dueAutomations.mockResolvedValue([automation()])
-      q.getSetting.mockImplementation(async (key: string) => (key === 'unspent:1' ? raw : null))
-      runAgent.mockResolvedValue(problem())
-      await authed()
-      expect(written()[KEY]).toMatchObject({ runs: 1 })
-    }
-  })
-
-  it('keeps the run going when the guard itself cannot be written, and still keeps a report when clearing fails', async () => {
-    q.setSetting.mockImplementation(async (key: string) => {
-      if (key === 'unspent:1') throw new Error('db down')
-    })
-    failsWith(new Error('the attachment cannot be read'))
-    await authed()
-    expect(console.error).toHaveBeenCalledWith('[tick] stuck guard failed:', expect.any(Error))
-    expect(reports().at(-1)).toMatchObject({ body: 'It failed: the attachment cannot be read' })
-
-    q.addReport.mockClear()
-    stuckAt({ [KEY]: entry(1, 1) })
-    runAgent.mockResolvedValue({ text: '**To do**\n- School: permission slip due Friday.', model: 'primary:test', cursors: [move(['m1'])] })
-    await authed()
-    expect(reports()[0]).toMatchObject({ status: 'ready' })
-    expect(console.error).toHaveBeenCalledWith('[tick] stuck guard failed:', 'db down')
-  })
-
-  it('logs a guard that fails on a PROBLEM, and still counts the run', async () => {
-    q.setSetting.mockImplementation(async (key: string) => {
-      if (key === 'unspent:1') throw new Error('db down')
-    })
-    runAgent.mockResolvedValue(problem())
-    await expect((await authed()).json()).resolves.toEqual({ ok: true, ran: 1, skipped: 0 })
-    expect(console.error).toHaveBeenCalledWith('[tick] stuck guard failed:', expect.any(Error))
   })
 })
 

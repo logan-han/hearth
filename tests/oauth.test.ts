@@ -14,6 +14,8 @@ beforeEach(() => {
   process.env.APP_URL = 'https://hearth.example'
   process.env.GOOGLE_CLIENT_ID = 'gid'
   process.env.GOOGLE_CLIENT_SECRET = 'gsecret'
+  process.env.GOOGLE_AGENT_CLIENT_ID = 'agent-gid'
+  process.env.GOOGLE_AGENT_CLIENT_SECRET = 'agent-gsecret'
   process.env.MS_CLIENT_ID = 'mid'
   process.env.MS_CLIENT_SECRET = 'msecret'
   vi.stubGlobal('fetch', fetchMock)
@@ -131,22 +133,25 @@ describe('where a sign-in may land afterwards', () => {
 })
 
 describe('authorize urls', () => {
-  it('asks Google for offline access and forced consent when linking a mailbox', () => {
+  it('links a Gmail mailbox through the agent client, with offline access and forced consent', () => {
     const url = new URL(authorizeUrl('google', 'st'))
     expect(url.origin + url.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth')
+    expect(url.searchParams.get('client_id')).toBe('agent-gid')
     expect(url.searchParams.get('access_type')).toBe('offline')
     expect(url.searchParams.get('prompt')).toBe('consent')
     expect(url.searchParams.get('state')).toBe('st')
     expect(url.searchParams.get('redirect_uri')).toBe('https://hearth.example/api/oauth/google/callback')
   })
 
-  it('does not force the consent screen on every dashboard sign-in', () => {
-    // Forced consent is for minting a refresh token; a returning admin should
-    // just pick an account. Offline access stays so a first sign-in still links.
+  it('signs in to the dashboard through the other Google client, asking only who is signing in', () => {
+    // Forced consent is for minting a refresh token; a returning admin should just pick an account.
     const url = new URL(authorizeUrl('google', 'st', 'signin'))
+    expect(url.searchParams.get('client_id')).toBe('gid')
     expect(url.searchParams.get('prompt')).toBeNull()
-    expect(url.searchParams.get('access_type')).toBe('offline')
-    expect(url.searchParams.get('scope')).toContain('gmail.modify')
+    expect(url.searchParams.get('access_type')).toBeNull()
+    expect(url.searchParams.get('scope')).toBe('openid email')
+    // The same callback either way, so neither client needs a second redirect registered.
+    expect(url.searchParams.get('redirect_uri')).toBe('https://hearth.example/api/oauth/google/callback')
   })
 
   it('uses the same params for Microsoft either way, which never re-asks', () => {
@@ -155,10 +160,13 @@ describe('authorize urls', () => {
     expect([...signin.entries()]).toEqual([...link.entries()])
   })
 
-  it('asks Google for mail and calendar scopes', () => {
-    const scopes = new URL(authorizeUrl('google', 's')).searchParams.get('scope')!.split(' ')
-    expect(scopes).toContain('https://www.googleapis.com/auth/gmail.modify')
-    expect(scopes).toContain('https://www.googleapis.com/auth/calendar.events')
+  it('asks Google for the calendar alone, and nothing an older link was granted besides', () => {
+    const url = new URL(authorizeUrl('google', 's'))
+    expect(url.searchParams.get('scope')!.split(' ')).toEqual([
+      'openid', 'email', 'https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/calendar.readonly',
+    ])
+    expect(url.searchParams.get('include_granted_scopes')).toBeNull()
+    expect(new URL(authorizeUrl('microsoft', 's')).searchParams.get('scope')).not.toMatch(/Mail\./)
   })
 
   it('routes Microsoft through /common so personal accounts work', () => {
@@ -181,21 +189,32 @@ describe('authorize urls', () => {
 describe('token exchange', () => {
   const ok = (body: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) })
 
-  it('posts the code with the client credentials', async () => {
-    fetchMock.mockResolvedValueOnce(ok({ access_token: 'a', refresh_token: 'r' }))
+  it('posts the code with the credentials of the client its round trip went through', async () => {
+    fetchMock.mockResolvedValue(ok({ access_token: 'a', refresh_token: 'r' }))
     const res = await exchangeCode('google', 'the-code')
     expect(res.refresh_token).toBe('r')
-    const body = new URLSearchParams(String((fetchMock.mock.calls[0][1] as RequestInit).body))
-    expect(body.get('grant_type')).toBe('authorization_code')
-    expect(body.get('code')).toBe('the-code')
-    expect(body.get('client_secret')).toBe('gsecret')
+    const sent = (i: number) => new URLSearchParams(String((fetchMock.mock.calls[i][1] as RequestInit).body))
+    expect(sent(0).get('grant_type')).toBe('authorization_code')
+    expect(sent(0).get('code')).toBe('the-code')
+    expect(sent(0).get('client_id')).toBe('agent-gid')
+    expect(sent(0).get('client_secret')).toBe('agent-gsecret')
+
+    await exchangeCode('google', 'signin-code', 'signin')
+    expect(sent(1).get('client_id')).toBe('gid')
+    expect(sent(1).get('client_secret')).toBe('gsecret')
+  })
+
+  it("refreshes a Gmail link through the agent client, the only one whose tokens Google's MCP servers take", async () => {
+    fetchMock.mockResolvedValueOnce(ok({ access_token: 'a' }))
+    await refreshAccessToken('google', 'r')
+    expect(new URLSearchParams(String((fetchMock.mock.calls[0][1] as RequestInit).body)).get('client_id')).toBe('agent-gid')
   })
 
   it('restates scopes when refreshing against Graph, which requires them', async () => {
     fetchMock.mockResolvedValueOnce(ok({ access_token: 'a' }))
     await refreshAccessToken('microsoft', 'r')
     expect(new URLSearchParams(String((fetchMock.mock.calls[0][1] as RequestInit).body)).get('scope'))
-      .toContain('Mail.ReadWrite')
+      .toContain('Calendars.ReadWrite')
   })
 
   it('omits scopes when refreshing against Google, which rejects them', async () => {

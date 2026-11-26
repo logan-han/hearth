@@ -4,7 +4,7 @@ import { hydrateSecrets } from '@/lib/settings'
 import { gatherFamilyStats } from '@/lib/stats'
 import { Shell } from './shell'
 import { Calendar } from './calendar'
-import { NextUp, Reminders, FamilyLists, Proposals, Remembered, Lately, Goals, Drafts, Helpers, Reports } from './family-panels'
+import { NextUp, Reminders, FamilyLists, Proposals, Remembered, Lately, Goals, Helpers, Reports } from './family-panels'
 import { McpKeys } from './mcp-keys'
 import { allowedMembers } from '@/lib/db/queries'
 import { appUrl } from '@/lib/env'
@@ -34,11 +34,10 @@ export default async function HomePage({
       here="/"
       footnote={`Times are the household's, ${stats.timezone}, wherever you are reading this.`}
     >
-      {stats.proposals.length > 0 || stats.drafts.length > 0 ? (
+      {stats.proposals.length > 0 ? (
         <section>
           <h2>Waiting on a yes</h2>
-          {stats.drafts.length > 0 ? <Drafts drafts={stats.drafts} /> : null}
-          {stats.proposals.length > 0 ? <Proposals proposals={stats.proposals} /> : null}
+          <Proposals proposals={stats.proposals} />
         </section>
       ) : null}
 

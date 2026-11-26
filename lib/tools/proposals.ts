@@ -39,7 +39,7 @@ const messageOf = (source: string) => source.split('/')[0]
  * anything is asked: the one from the same source; the one from the same
  * message for the same day (the date suffix written one morning and not the
  * next); or the one with the same title on the same day that is still
- * waiting or was turned down. A sweep reading the same mail every morning,
+ * waiting or was turned down. A sweep reading the same page every morning,
  * or two clients reading the same notice, then finds the proposal there is
  * rather than making another, and a notice the family said no to is not put
  * to them again.
@@ -188,7 +188,7 @@ export function proposalTools(ctx: ToolContext) {
         const { startsAt, endsAt, allDay } = resolveSpan({ start, end, allDay: all_day })
 
         // What code can see is the same occasion is settled here, before any
-        // judgement is asked for: a second sweep over the same mail finds the
+        // judgement is asked for: a second sweep over the same source finds the
         // proposal the first one made.
         const standing = await standingProposal({ title, startsAt, source }, ctx.now)
         if (standing) {
@@ -203,8 +203,8 @@ export function proposalTools(ctx: ToolContext) {
             : { skipped: true, proposal_id: standing.id, reason: `Already proposed as #${standing.id} (${standing.status}). ${settledReason(standing)}` }
         }
 
-        // The same occasion reaches several mailboxes under different
-        // subjects, so a source id alone cannot stop a duplicate. When that
+        // The same occasion reaches the family from several places under
+        // different names, so a source id alone cannot stop a duplicate. When that
         // day already holds anything, the model judges before this goes ahead.
         if (!confirmed_distinct) {
           const known = await sameDay(localToUtc(localDateKey(startsAt)))
@@ -218,7 +218,7 @@ export function proposalTools(ctx: ToolContext) {
                 awaiting_yes: known.proposals.map((p) => ({ proposal_id: p.id, title: p.title })),
               },
               next_step:
-                'Judge whether your find is one of these under another name, as the same notice lands in several mailboxes. ' +
+                'Judge whether your find is one of these under another name, as the same notice reaches the family from several places. ' +
                 'If it is, say it is already covered instead of proposing. Only if it is genuinely a different occasion, call again with confirmed_distinct: true.',
             }
           }

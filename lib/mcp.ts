@@ -3,8 +3,8 @@
  *
  * An MCP client is the only way in besides the dashboard, and it gets every
  * tool at once: a capable client picks well from a long list. Every call runs
- * as the member whose key it carries: their mailbox, their calendar, their
- * name on what it writes.
+ * as the member whose key it carries: their calendar, their name on what it
+ * writes.
  *
  * Nothing here imports the MCP SDK. The transport lives in the route; this
  * file only turns a tool name and some input into an answer, so it can be
@@ -14,7 +14,7 @@ import { z } from 'zod'
 import { buildTools, allToolNames } from './tools'
 import type { ToolContext } from './tools/context'
 import {
-  listMemories, openQuestions, connectionsFor, allMembersWithLinks, pendingDrafts, pendingProposals, goalsIn,
+  listMemories, openQuestions, connectionsFor, allMembersWithLinks, pendingProposals, goalsIn,
   listHelpers, listRoutines, reportsFor,
 } from './db/queries'
 import { goalSummary } from './tools/goals'
@@ -25,7 +25,6 @@ import { hydrateSecrets } from './settings'
 import { formatLocal } from './cron'
 import { timezone, appUrl } from './env'
 import { describeError } from './errors'
-import { commitCursors } from './tools/cursor'
 import type { Member } from './db/schema'
 
 export const SERVER_INFO = { name: 'hearth', version: '2.0.0' }
@@ -36,17 +35,16 @@ export const CONTEXT_TOOL = 'hearth_context'
 /** What the client is told about this server before it calls anything. */
 export const INSTRUCTIONS = [
   "Hearth is one household's assistant: a shared family calendar, shared lists, the facts the",
-  "household keeps, each member's own mail and calendar, the money feed, Notion and the family",
-  'board. You are calling as one member of that family, and every change is made in their name.',
+  "household keeps, each member's own calendar, the money feed, Notion and the family board.",
+  'You are calling as one member of that family, and every change is made in their name.',
   '',
   `Call ${CONTEXT_TOOL} first. It says who you are acting as, the household clock, the family and`,
   'their linked accounts, the facts on file, and whatever is still open, with the ids the other',
   'tools take. morning_brief and money_snapshot gather the day and the money in one call each.',
   '',
-  'Nothing is posted anywhere: what you are told is for you to pass on. Nothing is sent or added',
-  "behind the household's back either. draft_email writes an email and leaves it until send_email",
-  'is called with its id after a yes, and propose_family_event puts an event to the family rather',
-  'than adding it.',
+  'Nothing is posted anywhere: what you are told is for you to pass on. Nothing is added behind',
+  "the household's back either: propose_family_event puts an event to the family rather than",
+  'adding it.',
 ].join('\n')
 
 /** The one line that adds a key to Claude Code. */
@@ -78,7 +76,7 @@ export function descriptors(): Descriptor[] {
       name: CONTEXT_TOOL,
       description:
         'Who you are acting as, the household clock, the family and their linked accounts, the facts on file, ' +
-        'your email drafts and the event proposals awaiting a yes, the questions still open, your goals, the helpers and routines, ' +
+        'the event proposals awaiting a yes, the questions still open, your goals, the helpers and routines, ' +
         'and the latest reports from your scheduled jobs. Read it before your first call; the ids the other tools take come from here.',
       inputSchema: z.object({}),
     },
@@ -109,14 +107,10 @@ export async function callTool(name: string, input: unknown, caller: Caller): Pr
     await hydrateSecrets()
     if (name === CONTEXT_TOOL) return answer(await context(member))
 
-    // What this key has seen is its own, so one client never spends what
-    // another of the member's clients, or their morning brief, has not shown.
-    const ctx: ToolContext = { member, memberName: member.name, now: new Date(), cursorScope: `key:${caller.keyId}`, via: 'mcp' }
+    const ctx: ToolContext = { member, memberName: member.name, now: new Date(), via: 'mcp' }
     const entry = registry(ctx)[name]
     if (!entry?.execute) return answer(`Hearth has no tool called ${name}.`, true)
     const result = await entry.execute(input as never, { toolCallId: `mcp-${name}`, messages: [] } as never)
-    // The client has the result in hand, so what it reported as new is seen.
-    await commitCursors(ctx.pendingCursors)
     return answer(render(result))
   } catch (err) {
     return answer(describeError(err), true)
@@ -133,16 +127,15 @@ const REPORTS_IN_CONTEXT = 5
  * Everything a client needs before its first call: who it acts as, the
  * household clock, the family and their linked accounts, what is waiting on
  * a yes, the open questions, the member's own goals, the helpers and
- * routines, the latest reports and the facts on file. Another member's
- * drafts, goals and reports are never in it.
+ * routines, the latest reports and the facts on file. Another member's goals
+ * and reports are never in it.
  */
 export async function context(member: Member, now: Date = new Date()): Promise<string> {
-  const [memories, questions, members, connections, drafts, proposals, goals, crew, routines, reports] = await Promise.all([
+  const [memories, questions, members, connections, proposals, goals, crew, routines, reports] = await Promise.all([
     listMemories(FACTS_IN_CONTEXT).catch(() => []),
     openQuestions().catch(() => []),
     allMembersWithLinks().catch(() => []),
     connectionsFor(member.id).catch(() => []),
-    pendingDrafts(member.id).catch(() => []),
     pendingProposals(now).catch(() => []),
     goalsIn({ memberId: member.id })
       .then((rows) => Promise.all(rows.map((g) => goalSummary(g, now))))
@@ -165,15 +158,11 @@ export async function context(member: Member, now: Date = new Date()): Promise<s
         family
           .map((m) => `${m.name}${m.linked.length ? ` (${m.linked.map((l) => `${l.provider}: ${l.email ?? 'linked'}${l.readOnly ? ', read only' : ''}`).join(', ')})` : ' (nothing linked)'}`)
           .join('; ') +
-        '. Mail and personal calendars are read as the caller alone; nobody else\'s is ever opened.',
+        '. Personal calendars are read as the caller alone; nobody else\'s is ever opened.',
     )
   }
   if (connections.length === 0) {
-    lines.push(`${member.name} has no linked email or calendar account yet; they can link one at ${appUrl()}/connect.`)
-  }
-  if (drafts.length) {
-    lines.push('Your email drafts awaiting a yes (send_email with the draft_id once you have it; never draft the same email again):')
-    lines.push(...drafts.map((d) => `- draft_id ${d.id}: to ${d.recipients}, "${d.subject}"`))
+    lines.push(`${member.name} has no linked calendar yet; they can link one at ${appUrl()}/connect.`)
   }
   if (proposals.length) {
     lines.push('Event proposals awaiting a yes from anyone in the family (accept_event_proposal or reject_event_proposal with the id):')

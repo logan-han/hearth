@@ -309,25 +309,6 @@ export const activity = pgTable(
   (t) => [index('activity_created_idx').on(t.createdAt), index('activity_member_idx').on(t.memberId, t.createdAt)],
 )
 
-/** Outbound email held for explicit human confirmation. Never sent silently. */
-export const emailDrafts = pgTable(
-  'email_drafts',
-  {
-    id: serial('id').primaryKey(),
-    memberId: integer('member_id')
-      .notNull()
-      .references(() => members.id, { onDelete: 'cascade' }),
-    provider: text('provider').notNull(),
-    recipients: text('recipients').notNull(),
-    cc: text('cc'),
-    subject: text('subject').notNull(),
-    body: text('body').notNull(),
-    status: text('status').notNull().default('pending'), // pending | sent | cancelled
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [index('email_drafts_member_status_idx').on(t.memberId, t.status)],
-)
-
 /** A named shared list: groceries, packing, jobs to do. */
 export const lists = pgTable(
   'lists',
@@ -429,7 +410,6 @@ export type Connection = typeof connections.$inferSelect
 export type FamilyEvent = typeof familyEvents.$inferSelect
 export type Automation = typeof automations.$inferSelect
 export type AutomationReport = typeof automationReports.$inferSelect
-export type EmailDraft = typeof emailDrafts.$inferSelect
 export type List = typeof lists.$inferSelect
 export type ListItem = typeof listItems.$inferSelect
 export type EventProposal = typeof eventProposals.$inferSelect

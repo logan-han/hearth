@@ -732,61 +732,6 @@ describe('activity', () => {
   })
 })
 
-describe('email drafts', () => {
-  const draft = async (memberId?: number) => {
-    const id = memberId ?? (await member('Rowan')).id
-    return q.createDraft({ memberId: id, provider: 'google', to: ['a@b.com'], subject: 's', body: 'b' })
-  }
-
-  it('joins recipients and starts pending', async () => {
-    const d = await draft()
-    expect(d.recipients).toBe('a@b.com')
-    expect(d.status).toBe('pending')
-    expect(d.cc).toBeNull()
-  })
-
-  it('joins several cc addresses', async () => {
-    const m = await member('Rowan')
-    const d = await q.createDraft({ memberId: m.id, provider: 'google', to: ['a@b.com', 'c@d.com'], cc: ['c@d.com', 'e@f.com'], subject: 's', body: 'b' })
-    expect(d.recipients).toBe('a@b.com, c@d.com')
-    expect(d.cc).toBe('c@d.com, e@f.com')
-  })
-
-  it('can only be sent once', async () => {
-    const d = await draft()
-    expect(await q.markDraft(d.id, 'sent')).toBe(true)
-    expect(await q.markDraft(d.id, 'sent')).toBe(false)
-  })
-
-  it('can be handed back to pending after a failed send', async () => {
-    const d = await draft()
-    await q.markDraft(d.id, 'sent')
-    expect(await q.markDraft(d.id, 'pending', 'sent')).toBe(true)
-    expect((await q.getDraft(d.id))!.status).toBe('pending')
-    expect(await q.getDraft(999)).toBeUndefined()
-  })
-
-  it("lists only the member's own pending drafts, newest first, five at most", async () => {
-    const rowan = await member('Rowan')
-    const ada = await member('Ada')
-    const cancelled = await draft(rowan.id)
-    await q.markDraft(cancelled.id, 'cancelled')
-    const mine = []
-    for (let i = 0; i < 6; i++) mine.push(await draft(rowan.id))
-    await draft(ada.id)
-    const listed = await q.pendingDrafts(rowan.id)
-    expect(listed.map((d) => d.id)).toEqual(mine.slice(1).reverse().map((d) => d.id))
-    expect((await q.pendingDrafts(ada.id))).toHaveLength(1)
-  })
-
-  it('goes with its member', async () => {
-    const rowan = await member('Rowan')
-    await draft(rowan.id)
-    await q.deleteMember(rowan.id)
-    expect(await q.pendingDrafts(rowan.id)).toEqual([])
-  })
-})
-
 describe('shared lists', () => {
   it('creates on first use and matches case-insensitively', async () => {
     const a = await q.findOrCreateList('Shopping')

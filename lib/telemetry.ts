@@ -29,7 +29,7 @@ export function telemetryConfigured(): boolean {
 
 /**
  * Traces carry prompts and replies by default, which for this app means the
- * family's messages and mail. LANGFUSE_RECORD_CONTENT=off keeps only the shape
+ * household's calendars, notices and reports. LANGFUSE_RECORD_CONTENT=off keeps only the shape
  * of each call: model, tools, tokens, timing, decisions.
  */
 export function recordContent(): boolean {

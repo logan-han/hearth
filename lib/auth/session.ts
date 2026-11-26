@@ -24,7 +24,7 @@ const same = (a: string | null | undefined, b: string) =>
  *
  * `ADMIN_EMAILS` is the bootstrap. Beyond that an address is recognised if it
  * belongs to an allowed member, either because an admin recorded it or because
- * that member linked a mailbox with it. Admin members get the admin view.
+ * that member linked a calendar with it. Admin members get the admin view.
  */
 export async function resolveRole(email: string): Promise<{ role: Role; member: Member | null } | null> {
   const normalised = email.trim().toLowerCase()

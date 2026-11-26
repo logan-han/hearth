@@ -25,9 +25,11 @@ export class ReconnectNeededError extends Error {
 
 /**
  * How a token endpoint says only the member can fix this: the grant expired
- * or was revoked, or Microsoft wants them to sign in or consent again.
+ * or was revoked, Microsoft wants them to sign in or consent again, or the
+ * refresh token was issued to another client than the one Hearth now links
+ * through (Google's unauthorized_client), which only a new link can mend.
  */
-const RECONNECT = new Set(['invalid_grant', 'interaction_required', 'consent_required', 'login_required'])
+const RECONNECT = new Set(['invalid_grant', 'interaction_required', 'consent_required', 'login_required', 'unauthorized_client'])
 
 export async function accessTokenFor(memberId: number, provider: Provider): Promise<string> {
   const key = `${memberId}:${provider}`

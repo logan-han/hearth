@@ -9,16 +9,8 @@ import type { ToolContext } from './tools/context'
 export const errorOf = (r: Record<string, unknown>): string | null => (typeof r.error === 'string' ? r.error : null)
 /** Optional integrations answer "not configured"; that is a setting, not a fault. */
 export const isUnconfigured = (err: string | null) => Boolean(err && /not configured/i.test(err))
-/** Nobody having linked a mailbox or calendar yet is a setting too; one that will not answer is a fault. */
-export const isUnlinked = (err: string | null) => Boolean(err && /no (?:email account|calendar) linked/i.test(err))
-
-/**
- * The mailboxes that answered. One that failed is reported apart, under
- * could_not_read, and its mail waits for the next brief: one mailbox timing
- * out never holds back the rest.
- */
-const answered = (r: Record<string, unknown>) =>
-  Array.isArray(r.accounts) ? { ...r, accounts: (r.accounts as Record<string, unknown>[]).filter((acct) => !errorOf(acct)) } : r
+/** Nobody having linked a calendar yet is a setting too; one that will not answer is a fault. */
+export const isUnlinked = (err: string | null) => Boolean(err && /no calendar linked/i.test(err))
 
 /** The local day an event as list_calendar shows it starts on: its date for an all-day one, its instant's day for a timed one. */
 function startDay(e: Record<string, unknown>): string | null {
@@ -33,8 +25,7 @@ function startDay(e: Record<string, unknown>): string | null {
  * starts: an account's events that began by `day` are today's, whatever began
  * earlier and runs on included; those that start on `next` are its tomorrow;
  * and the rest of the fortnight is coming. An account that answered with an
- * error is in none of them, as a mailbox that did is left out of the mail;
- * `accounts` keeps it, for the run to report.
+ * error is in none of them; `accounts` keeps it, for the run to report.
  */
 function splitCalendars(r: Record<string, unknown>, day: string, next: string) {
   const accounts = Array.isArray(r.accounts) ? (r.accounts as Record<string, unknown>[]) : []
@@ -82,14 +73,13 @@ export function assembleBrief(input: {
   tomorrowEvents: Record<string, unknown>
   comingEvents: Record<string, unknown>
   calendars: Record<string, unknown>
-  mail: Record<string, unknown>
   board: Record<string, unknown>
   weather: Record<string, unknown>
   proposals: Record<string, unknown>
   questions: readonly { id: number; question: string }[]
   reminders: readonly Reminder[]
 }): Fetched {
-  const { day, next, horizon, events, tomorrowEvents, comingEvents, calendars, mail, board, weather, proposals, questions, reminders } = input
+  const { day, next, horizon, events, tomorrowEvents, comingEvents, calendars, board, weather, proposals, questions, reminders } = input
   const problems: string[] = []
   const eventsErr = errorOf(events)
   if (eventsErr) problems.push(`list_family_events: ${eventsErr}`)
@@ -103,15 +93,6 @@ export function assembleBrief(input: {
   for (const acct of days.accounts) {
     const e = errorOf(acct)
     if (e) problems.push(`list_calendar (${String(acct.calendar ?? acct.provider)}): ${e}`)
-  }
-  const mailErr = errorOf(mail)
-  if (mailErr && !isUnlinked(mailErr)) problems.push(`new_mail: ${mailErr}`)
-  const accounts = Array.isArray(mail.accounts) ? (mail.accounts as Record<string, unknown>[]) : []
-  let arrived = 0
-  for (const acct of accounts) {
-    const e = errorOf(acct)
-    if (e) problems.push(`new_mail (${String(acct.mailbox)}): ${e}`)
-    if (Array.isArray(acct.messages)) arrived += acct.messages.length
   }
   for (const [name, r] of [['jira_board_summary', board], ['weather', weather]] as const) {
     const e = errorOf(r)
@@ -147,7 +128,6 @@ export function assembleBrief(input: {
       ...(days.tomorrow.length ? { calendars: days.tomorrow } : {}),
     }
   }
-  if (!mailErr) data.mail = answered(mail)
   // The board's due dates within the fortnight are under coming, so its own list of next dues is left out here.
   if (!errorOf(board)) data.board = { ...board, due_next: undefined }
   if (todaysReminders.length) data.reminders = todaysReminders
@@ -164,7 +144,7 @@ export function assembleBrief(input: {
   if (!errorOf(weather)) data.weather = weather
   if (questions.length) data.questions = questions.map((qn) => ({ id: qn.id, question: qn.question }))
   // A day with nothing on any calendar, nothing coming up in the fortnight,
-  // no new mail, nothing due and nothing to ask is a quiet one, and says so.
+  // nothing due and nothing to ask is a quiet one, and says so.
   // The weather, tomorrow, a reminder and a proposal Home already lists are
   // context for a brief, not news.
   return {
@@ -172,7 +152,6 @@ export function assembleBrief(input: {
     empty:
       todays.length === 0 &&
       days.onToday === 0 &&
-      arrived === 0 &&
       overdue.length === 0 &&
       dueToday.length === 0 &&
       questions.length === 0 &&
@@ -209,10 +188,10 @@ type Run = (name: string, args: Record<string, unknown>) => Promise<Record<strin
 
 /**
  * Today at a glance for one member: the family calendar and their own, what
- * starts tomorrow and what is coming over the fortnight, the mail since their
- * last brief (on the brief's own markers), the board, their reminders, the
- * proposals waiting on a yes, the weather, and the questions still open. The
- * questions it carries count as asked, so Home holds them from then on.
+ * starts tomorrow and what is coming over the fortnight, the board, their
+ * reminders, the proposals waiting on a yes, the weather, and the questions
+ * still open. The questions it carries count as asked, so Home holds them from
+ * then on.
  */
 export async function gatherBrief(ctx: ToolContext, run: Run): Promise<Fetched> {
   const day = localDateKey(ctx.now)
@@ -220,7 +199,7 @@ export async function gatherBrief(ctx: ToolContext, run: Run): Promise<Fetched> 
   const after = dayAfter(next)
   const horizon = daysAfter(day, LOOK_AHEAD_DAYS)
   const memberId = ctx.member?.id
-  const [events, tomorrowEvents, comingEvents, calendars, mail, board, weather, questions, proposals, reminders] = await Promise.all([
+  const [events, tomorrowEvents, comingEvents, calendars, board, weather, questions, proposals, reminders] = await Promise.all([
     // The whole day, and anything on during it: day three of a camp is news too.
     run('list_family_events', { from: day, to: day, include_cancelled: false }),
     run('list_family_events', { from: next, to: next, include_cancelled: false }),
@@ -228,8 +207,6 @@ export async function gatherBrief(ctx: ToolContext, run: Run): Promise<Fetched> 
     run('list_family_events', { from: after, to: horizon, include_cancelled: false }),
     // Today to the end of the fortnight in one look, split by day in assembleBrief.
     run('list_calendar', { from: day, to: horizon }),
-    // A day's mail, not an hour's. What does not fit is counted rather than dropped.
-    run('new_mail', { limit: 20 }),
     run('jira_board_summary', {}),
     run('weather', {}),
     unaskedQuestions().catch(() => []),
@@ -237,7 +214,7 @@ export async function gatherBrief(ctx: ToolContext, run: Run): Promise<Fetched> 
     run('list_event_proposals', {}).catch((): Record<string, unknown> => ({})),
     memberId ? remindersBetween(memberId, ctx.now, horizon).catch((): Reminder[] => []) : Promise.resolve([] as Reminder[]),
   ])
-  const brief = assembleBrief({ day, next, horizon, events, tomorrowEvents, comingEvents, calendars, mail, board, weather, questions, proposals, reminders })
+  const brief = assembleBrief({ day, next, horizon, events, tomorrowEvents, comingEvents, calendars, board, weather, questions, proposals, reminders })
   if (brief.asked?.length) await markQuestionsAsked(brief.asked)
   return brief
 }

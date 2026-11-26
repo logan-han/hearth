@@ -10,7 +10,7 @@ export const dynamic = 'force-dynamic'
 type Search = { linked?: string }
 
 /**
- * Where a signed-in member links the accounts Hearth may read for them, makes
+ * Where a signed-in member links the calendars Hearth may read for them, makes
  * one read-only or unlinks it, and finds the family calendar's address. A
  * link acts for whoever is signed in, never for whoever a link was sent to.
  */
@@ -31,8 +31,8 @@ export default async function Connect({ searchParams }: { searchParams: Promise<
       {linked ? <span className="badge">{linked} linked ✓</span> : null}
       <h1>Hello, {member.name}</h1>
       <p className="lede">
-        Link the accounts Hearth may read on your behalf. Your MCP clients read your mail and calendar through
-        them, and nobody else&rsquo;s client ever does.
+        Link the calendars Hearth may read on your behalf. Your MCP clients read your calendar through them,
+        and nobody else&rsquo;s client ever does.
       </p>
 
       <div className="card">
@@ -51,8 +51,8 @@ export default async function Connect({ searchParams }: { searchParams: Promise<
         })}
         <p className="note">
           Google will warn that this app is unverified. It is a private family deployment, so that warning is
-          expected: choose <em>Advanced → continue</em>. Read only means Hearth reads the account and never drafts,
-          sends or adds events through it.
+          expected: choose <em>Advanced → continue</em>. Read only means Hearth reads the calendar and never adds
+          events to it.
         </p>
       </div>
 
@@ -70,13 +70,13 @@ export default async function Connect({ searchParams }: { searchParams: Promise<
         <code className="url">{`${appUrl()}/api/mcp`}</code>
         <p className="note">
           Hearth&rsquo;s own tools, over the Model Context Protocol: the family calendar and lists, what it
-          remembers, and your mail and calendar. Make a key for each client on <a href="/">Home</a>, under Claude
+          remembers, and your calendar. Make a key for each client on <a href="/">Home</a>, under Claude
           and other MCP clients, and revoke it there when you are done with it. A client that signs in with OAuth
           asks you to approve it instead.
         </p>
       </div>
 
-      <footer>Refresh tokens are encrypted at rest. Hearth never sends email without your yes.</footer>
+      <footer>Refresh tokens are encrypted at rest.</footer>
     </main>
   )
 }

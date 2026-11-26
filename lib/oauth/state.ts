@@ -7,7 +7,7 @@ const secret = () => signingSecret('oauth-state')
 
 /**
  * `purpose` separates the two things this round trip is used for: signing in
- * to the dashboard, and a signed-in member linking a mailbox. Both go through
+ * to the dashboard, and a signed-in member linking a calendar. Both go through
  * the same provider callback so the OAuth consoles need only one redirect URI
  * registered. A sign-in may carry `next`, the page to land on afterwards (an
  * MCP client's approval page, say); a link carries the member it is for.

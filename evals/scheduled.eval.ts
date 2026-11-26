@@ -5,49 +5,13 @@ import { localDateKey, dayAfter, localToUtc, formatLocal, formatLocalDate, clock
 import type { ToolName } from '@/lib/tools'
 
 const calls = vi.hoisted(() => [] as { tool: string; input: unknown }[])
-const { STUBS, BODIES, TRIAGE, DAYS } = vi.hoisted(() => {
-  const BODIES: Record<string, object> = {
-    m1: {
-      id: 'm1', from: 'office@riverbendcollege.example', subject: 'Athletics carnival', date: '2026-09-01T08:10:00+10:00',
-      body: 'Dear families, the athletics carnival is on Thursday 15 October 2026 from 9am to 12pm at the oval. Students wear house colours. No RSVP needed.',
-    },
-    m3: {
-      id: 'm3', from: 'noreply@riverbendcollege.example', subject: "Parents' association trivia night: tickets", date: '2026-09-16T15:02:00+10:00',
-      body: "Dear families, the parents' association trivia night is on Friday 23 October 2026 from 7pm in the college hall. Tickets are $20 each and include supper. Book by Friday 16 October through the portal.",
-    },
-  }
-  // Dated against the clock the eval runs on: the collection was yesterday evening, the signature is wanted next week.
-  const longDay = (d: Date) =>
-    new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Melbourne', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(d)
-  const yesterday = new Date(Date.now() - 86_400_000)
-  const nextWeek = new Date(Date.now() + 7 * 86_400_000)
-  const TRIAGE = [
-    {
-      id: 'm20', from: 'Sign Desk <no-reply@signdesk.example>', subject: 'Signature requested on "Lease renewal - 12 Elm Street"',
-      snippet: `Sam Fixture has requested your signature on "Lease renewal - 12 Elm Street". Please review and sign by ${longDay(nextWeek)}.`,
-      date: yesterday.toISOString(),
-    },
-    {
-      id: 'm21', from: 'Northbank Broadband <noreply@northbankbroadband.example>', subject: 'Your internet connection is now active',
-      snippet: 'Good news: the connection at 12 Elm Street is active and your plan has started. There is nothing you need to do.',
-      date: yesterday.toISOString(),
-    },
-    {
-      id: 'm22', from: 'Surplus Bites <orders@surplusbites.example>', subject: 'Your order is confirmed',
-      snippet: `Your Mystery Box from Corner Bakery Hillside is ready for collection on ${longDay(yesterday)} between 6:00 pm and 6:30 pm at 18 Station Street, Hillside.`,
-      date: yesterday.toISOString(),
-    },
-  ]
-  for (const m of TRIAGE) BODIES[m.id] = { ...m, body: m.snippet }
-  const DAYS = { stale: longDay(yesterday), due: longDay(nextWeek) }
+const { STUBS } = vi.hoisted(() => {
   const STUBS = {
     recall: () => ({ memories: [{ id: 3, fact: 'Juno goes to Riverbend College' }] }),
     list_family_events: () => ({ timezone: 'Australia/Melbourne', events: [] }),
-    list_email: () => ({ accounts: [{ mailbox: "Rowan's Gmail", provider: 'google', messages: [] }] }),
-    read_email: ({ id }: { id?: string } = {}) => BODIES[id ?? 'm1'] ?? { error: `No message ${id}.` },
     propose_family_event: (input: unknown) => ({ proposal_id: 7, proposed: input }),
   }
-  return { STUBS, BODIES, TRIAGE, DAYS }
+  return { STUBS }
 })
 vi.mock('@/lib/tools', async (orig) => {
   const actual = await orig<typeof import('@/lib/tools')>()
@@ -329,278 +293,35 @@ describe.skipIf(!liveChainConfigured())('transaction reports, the checks', () =>
   })
 })
 
-/* ------------------------------------------------------- the morning mail */
+/* ------------------------------------------------------ the morning brief */
 
 /**
  * A morning summary of the day, as a member would schedule it ("every
  * morning at 7, my day"), worded as the household's own brief once was. It
- * reads its author's own mailbox and calendar, so nothing in it needs saying
- * whose it is.
+ * reads its author's own calendar, so nothing in it needs saying whose it is.
  */
 const BRIEF_INSTRUCTION = [
-  "Today's calendars (the family calendar under events, and your own under calendars), what starts tomorrow, what is coming up over the fortnight (under coming), the mail that has arrived since the last brief, the household board, the reminders set for today, the proposals waiting on a yes and the weather are under DATA. Write one short brief for the day in named parts, each a **bold** line with its bullets under it; leave out a part with nothing in it.",
+  "Today's calendars (the family calendar under events, and your own under calendars), what starts tomorrow, what is coming up over the fortnight (under coming), the household board, the reminders set for today, the proposals waiting on a yes and the weather are under DATA. Write one short brief for the day in named parts, each a **bold** line with its bullets under it; leave out a part with nothing in it.",
   '**Today**: what is on, from the family calendar and from each calendar under calendars, with its time and place as given, and a flag only where the data supports one: an early start, rain in the forecast.',
   '**Tomorrow**: what starts tomorrow, with its time as given, so the household can get ready tonight.',
   '**Coming up**: the items under coming, up to the date given as through, one bullet each in date order: its day first, then its time and place as given, and for a board item its due date. Reminders are listed with their day and time. Say nothing about a date after through.',
   'An event listed more than once, on one calendar or on several, is one bullet.',
-  'Every item is yours or the family\'s, so none needs a label: never name the mailbox, the calendar, the app or the provider it came from.',
-  'Mail: first set aside what gets no bullet: newsletters and promotions, the mail with nothing in it to attend, book, pay or reply to; mail whose moment has passed by NOW, however recently it arrived: a collection, a booking or an event timed earlier than NOW, an order already delivered; and a request that is done, which is one a later email from the same sender answers: a thank-you for the response to that form, a receipt for that payment, a confirmation of that booking or reply. Look for that later email for every request before sorting, whichever of the two the list shows first; a done request gets no To do, only a Heads up line that it was done, if that. Then sort the rest into two parts.',
-  '**To do**: mail asking the household for something still open, with no later email saying it was done: a payment, a signature, a reply, a form, a booking to make, an appointment or a deadline still ahead, whoever sent it and however many people it went to.',
-  '**Heads up**: mail that only tells the household something worth knowing: an order or a connection confirmed, a delivery on its way, a change to an account or a service.',
-  'Mail marked copied_in was written to the people under its to, with the household only copied in: whatever it asks, it asks of them, never of the household, so it is a Heads up at most.',
-  'One bullet per email, in your own words: who sent it, whom it was to when it is marked copied_in, and what it says or asks, with every date, time, amount and place exactly as given. Never paste the subject line or put it in quotes. Open an email with read_email when its snippet is not enough. Propose any calendar-worthy date still ahead with propose_family_event.',
-  'A mailbox with more_not_shown had more new mail than fits: end its mail with one line saying how many more arrived in it (with "at least" when more_not_shown_is_at_least is set), so nobody thinks they have seen it all.',
+  'Every item is yours or the family\'s, so none needs a label: never name the calendar, the app or the provider it came from.',
   'A calendar marked truncated had more events in its range than fit: end its part with one line saying the rest is not shown.',
   '**Overdue**: anything overdue on the board, as given. **Due today**: anything on the board due today, as given.',
   '**Later today**: the reminders set to go off today, each with its time as given.',
   '**Waiting on a yes**: the proposals, as given; a yes from an MCP client or on Home puts one on the family calendar.',
   'If DATA lists questions, end with "Not sure about:" and each question on its own line, worded as given, and say that anyone can answer from their MCP client or on Home. Nothing under DATA answers them, so do not guess.',
 ].join(' ')
-const BRIEF_TOOLS: ToolName[] = ['recall', 'read_email', 'propose_family_event', 'list_family_events']
+const BRIEF_TOOLS: ToolName[] = ['recall', 'propose_family_event', 'list_family_events']
 
-const PROMO = { id: 'm2', from: 'deals@bigretailer.example', subject: '48 hours only: 30% off everything', snippet: 'Shop the sale', date: '2026-09-16T07:00:00+10:00' }
 // The tick heads every piece of evidence with the household's clock, so the checks can tell today from tomorrow.
 const clock = clockLine(new Date())
-// As new_mail hands mail over: the member's own mailbox, by its name.
-const mailbox = (messages: object[]) => ({ accounts: [{ mailbox: "Rowan's Gmail", provider: 'google', first_check: false, messages }] })
-
-describe.skipIf(!liveChainConfigured())('morning brief, the mail half', () => {
-  it('proposes the date it read, and does not invent one', async () => {
-    calls.length = 0
-    const data = plainData({
-      events: { events: [] },
-      mail: mailbox([
-        { id: 'm1', from: 'office@riverbendcollege.example', subject: 'Athletics carnival', snippet: 'Dear families, the athletics carnival is on Thursday 15 October...', date: '2026-09-01T08:10:00+10:00' },
-        { ...PROMO, date: '2026-09-01T07:00:00+10:00' },
-      ]),
-    })
-    const r = await run('Morning brief', BRIEF_INSTRUCTION, data, BRIEF_TOOLS)
-    const proposals = called(calls, 'propose_family_event')
-    const proposedRight = proposals.some((p) => {
-      const input = p.input as { title?: string; start?: string }
-      return /athletics|carnival/i.test(input.title ?? '') && (input.start ?? '').startsWith('2026-10-15')
-    })
-    const hard = proposedRight && noLeak(r.text) && !/30%|sale/i.test(r.text)
-    const g = await judgeGroundedness({ answer: r.text, context: `${data}\n${plainData(BODIES.m1)}` })
-    record({ case: 'inbox: school notice proposed, promo ignored', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
-    expect(proposedRight).toBe(true)
-    expect(r.text).not.toMatch(/30%|sale/i)
-    expect(noLeak(r.text)).toBe(true)
-    if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
-  })
-})
-
-/*
- * A brief was once held back at 0.80 because the decision took a bulk
- * sender's ticket email for a promotion and vetoed the whole report. The
- * decision judges grounding, not selection, and the writer's instruction says
- * what a newsletter is; these cases hold both ends of that.
- */
-const TICKETS = {
-  id: 'm3', from: 'noreply@riverbendcollege.example', subject: "Parents' association trivia night: tickets",
-  snippet: "Dear families, the parents' association trivia night is on Friday 23 October 2026 from 7pm in the college hall. Tickets are $20 each. Book by Friday 16 October.",
-  date: '2026-09-16T15:02:00+10:00',
-}
-const briefData = plainData({
-  events: { timezone: 'Australia/Melbourne', events: [{ id: 41, title: 'Last day of term', start_local: 'Thu 17 Sep 2026 00:00', end_local: 'Fri 18 Sep 2026 00:00', all_day: true, location: null }] },
-  mail: mailbox([TICKETS, PROMO]),
-})
-const briefDraft = [
-  '**Morning brief**',
-  '**Today**',
-  '- Last day of term, all day.',
-  '**To do**',
-  "- Riverbend College: the parents' association trivia night is Friday 23 October 2026 from 7pm in the college hall. Tickets $20 each; book by Friday 16 October.",
-].join('\n')
-const briefEvidence = evidenceFor(BRIEF_INSTRUCTION, briefData, clock)
-
-describe.skipIf(!liveChainConfigured())('morning brief, the checks', () => {
-  it('keeps a ticket email from a bulk sender and drops the promotion', async () => {
-    calls.length = 0
-    const r = await run('Morning brief', BRIEF_INSTRUCTION, briefData, BRIEF_TOOLS)
-    const kept = /trivia|tickets?/i.test(r.text)
-    const dropped = !/30%|off everything|bigretailer/i.test(r.text)
-    const hard = kept && dropped && noLeak(r.text)
-    const g = await judgeGroundedness({ answer: r.text, context: `${briefData}\n${plainData(BODIES.m3)}` })
-    record({ case: 'brief: ticket email kept, promo dropped', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: r.text.slice(0, 80) })
-    expect(kept).toBe(true)
-    expect(dropped).toBe(true)
-    expect(noLeak(r.text)).toBe(true)
-    if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
-  })
-
-  it('does not hold a grounded brief back over an item it could read as a promotion', async () => {
-    const d = await decideWatcherPost({ label: 'Morning brief', draft: briefDraft, evidence: briefEvidence })
-    const hard = d.decision === 'post'
-    record({ case: 'decision: ticket item is no reason to hold', hard: hard ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}${d.reason ? ` ${d.reason}` : ''}` })
-    expect(d.decision).toBe('post')
-  })
-
-  it('still holds the same brief back when a figure is not in the evidence', async () => {
-    const d = await decideWatcherPost({ label: 'Morning brief', draft: briefDraft.replace('$20', '$30'), evidence: briefEvidence })
-    const held = d.decision === 'skip'
-    record({ case: 'decision: invented price still holds', hard: held ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}${d.reason ? ` ${d.reason}` : ''}` })
-    expect(held).toBe(true)
-  })
-
-  // A brief was held back at 1.00 because the writer kept a collection whose
-  // time had passed and the decision enforced the instruction's rule against
-  // it. The item was the writer's slip and everything it said was in the
-  // evidence: that is a report kept, stale bullet and all, never a lost brief.
-  it('does not hold a grounded brief back over a collection whose time has passed', async () => {
-    const data = plainData({ events: { timezone: 'Australia/Melbourne', events: [] }, mail: mailbox(TRIAGE) })
-    const draft = [
-      '**To do**',
-      `- Sign Desk asks for a signature on the lease renewal for 12 Elm Street by ${DAYS.due}.`,
-      '**Heads up**',
-      '- Northbank Broadband says the connection at 12 Elm Street is active and the plan has started.',
-      `- Surplus Bites says the Mystery Box from Corner Bakery Hillside is ready for collection on ${DAYS.stale} between 6:00 pm and 6:30 pm at 18 Station Street, Hillside.`,
-    ].join('\n')
-    const d = await decideWatcherPost({ label: 'Morning brief', draft, evidence: evidenceFor(BRIEF_INSTRUCTION, data, clock) })
-    const hard = d.decision === 'post'
-    record({ case: 'decision: a stale collection is no reason to hold', hard: hard ? 'pass' : 'fail', model: d.model, note: `${d.decision}@${d.confidence}${d.reason ? ` ${d.reason}` : ''}` })
-    expect(d.decision).toBe('post')
-  })
-})
-
-/*
- * A brief was held back whole, at 0.95, over one To do: a school's online
- * form, which the mailbox also held the school's thanks for, sent three hours
- * after the form and before the brief. The claim check passed the statement
- * (the form email says it); the judge, with the thanks beside it, called it
- * not in the evidence. Two things changed: the writer is told that a request
- * a later email says is done gets no bullet, and when the judge faults one
- * statement of a checked draft the tick cuts that and judges the rest again.
- * These hold both.
- */
-const FORM = {
-  id: 'm40', from: 'Riverbend College <forms@riverbendcollege.example>', subject: 'Slip from Riverbend College for Year 1 Swimming Program',
-  snippet: `Year 1 Swimming Program\n\nDear Rowan,\n\nRiverbend College has sent you a new online form for Juno.\n\nWe need your response by ${DAYS.due}. Please click this link to respond.`,
-  date: new Date(Date.now() - 86_400_000 - 4 * 3600_000).toISOString(),
-}
-const FORM_DONE = {
-  id: 'm41', from: 'Riverbend College <forms@riverbendcollege.example>', subject: "Thank you for your response 'Year 1 Swimming Program'",
-  snippet: 'Year 1 Swimming Program\n\nDear Rowan,\n\nThank you for your reply for Juno.\n\nYou can click this link at any time to view the form you submitted.',
-  date: new Date(Date.now() - 86_400_000 - 3600_000).toISOString(),
-}
-const answeredData = plainData({ events: { timezone: 'Australia/Melbourne', events: [] }, mail: mailbox([FORM_DONE, TRIAGE[1], FORM]) })
-const answeredEvidence = evidenceFor(BRIEF_INSTRUCTION, answeredData, clock)
-const staleDraft = [
-  '**To do**',
-  `- Riverbend College asks for a response to the Year 1 Swimming Program online form for Juno by ${DAYS.due}.`,
-  '**Heads up**',
-  '- Northbank Broadband says the connection at 12 Elm Street is active and the plan has started.',
-].join('\n')
-
-describe.skipIf(!liveChainConfigured())('morning brief, a request answered since', () => {
-  it('gives no To do to a form a later email thanks the household for submitting', async () => {
-    calls.length = 0
-    const r = await run('Morning brief', BRIEF_INSTRUCTION, answeredData, BRIEF_TOOLS)
-    const text = r.text
-    if (process.env.EVAL_PRINT) console.log(`\n----- answered-form brief -----\n${text}\n-----`)
-    const formNotAsked = !/swimming|form/i.test(part(parts(text), /^to[ -]?do/))
-    const broadbandKept = /broadband|connection|internet/i.test(text)
-    const hard = formNotAsked && broadbandKept && noLeak(text)
-    const g = await judgeGroundedness({ answer: text, context: answeredData })
-    record({ case: 'brief: answered form gets no To do', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: text.slice(0, 80) })
-    expect(formNotAsked).toBe(true)
-    expect(broadbandKept).toBe(true)
-    expect(noLeak(text)).toBe(true)
-    if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
-  })
-
-  it('keeps the rest of a checked brief when the judge faults the stale To do, rather than holding it all', async () => {
-    const label = 'Morning brief'
-    const review = await reviewDraft({ label, draft: staleDraft, evidence: answeredEvidence })
-    const draft = review.message ?? staleDraft
-    const verified = review.claims.length > 0 && review.unsupported.length === 0
-    const first = await decideWatcherPost({ label, draft, evidence: answeredEvidence, verified })
-    let note = `check: ${review.unsupported.length}/${review.claims.length} cut | first ${first.decision}@${first.confidence}${first.notInEvidence ? ` naming: ${first.notInEvidence}` : ''}`
-    let kept: string | null = first.decision === 'post' ? draft : null
-    let rest: string | null = null
-    if (first.decision === 'skip' && first.notInEvidence) {
-      // What the tick does with that answer.
-      rest = await cutFromDraft({ label, draft, unsupported: [first.notInEvidence] })
-      const second = rest ? await decideWatcherPost({ label, draft: rest, evidence: answeredEvidence, verified: false }) : null
-      note += ` | cut: ${rest ? 'rest kept' : 'nothing left'}${second ? ` | second ${second.decision}@${second.confidence}${second.reason ? ` ${second.reason}` : ''}` : ''}`
-      kept = second?.decision === 'post' && rest ? rest : null
-    }
-    const hard = kept !== null && /broadband|connection/i.test(kept) && (rest === null || !/swimming/i.test(rest))
-    record({ case: 'decision: stale To do cut, the rest kept', hard: hard ? 'pass' : 'fail', model: first.model, note })
-    expect(kept).not.toBeNull()
-    expect(kept).toMatch(/broadband|connection/i)
-    if (rest !== null) expect(rest).not.toMatch(/swimming/i)
-  })
-})
-
-/*
- * A brief once wrote every email as `Sender ("Subject"): summary`, with the
- * escapes JSON had put round a quoted subject still in it, and gave an order
- * collected the evening before the same weight as a signature still wanted.
- * The instruction sorts mail into what is still asked of the household and
- * what is only worth knowing, drops what has already happened, and never
- * quotes a subject line; DATA arrives as plain lines with nothing to escape.
- */
-describe.skipIf(!liveChainConfigured())('morning brief, the mail triage', () => {
-  it('sorts a signature wanted from a notice, drops a collection already past, and quotes no subject line', async () => {
-    calls.length = 0
-    const data = plainData({ events: { timezone: 'Australia/Melbourne', events: [] }, mail: mailbox([...TRIAGE, PROMO]) })
-    const r = await run('Morning brief', BRIEF_INSTRUCTION, data, BRIEF_TOOLS)
-    const text = r.text
-    const toDo = text.search(/\*\*\s*to[ -]?do\b/i)
-    const headsUp = text.search(/\*\*\s*heads[ -]?up\b/i)
-    const sorted =
-      toDo >= 0 && headsUp > toDo &&
-      /lease|signature|sign\b/i.test(text.slice(toDo, headsUp)) &&
-      /internet|connection|broadband/i.test(text.slice(headsUp)) &&
-      !/lease|signature/i.test(text.slice(headsUp))
-    const pastDropped = !/mystery box|corner bakery|surplus bites|collection/i.test(text)
-    const promoDropped = !/30%|off everything/i.test(text)
-    const noQuotedSubject = !text.includes('\\"') && !/\("[^"\n]*"\)/.test(text)
-    const hard = sorted && pastDropped && promoDropped && noQuotedSubject && noLeak(text)
-    const g = await judgeGroundedness({ answer: text, context: data })
-    record({ case: 'brief: to do apart from heads up, past order dropped, no quoted subject', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: text.slice(0, 80) })
-    expect(sorted).toBe(true)
-    expect(pastDropped).toBe(true)
-    expect(promoDropped).toBe(true)
-    expect(noQuotedSubject).toBe(true)
-    expect(noLeak(text)).toBe(true)
-    if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
-  })
-
-  // A therapist wrote to the class teacher asking to come in, with a parent
-  // copied in, and a brief that was never handed the recipients told the
-  // household it had been asked to come.
-  it('tells mail to someone else, with the household copied in, as theirs to answer, and says whom it was to', async () => {
-    calls.length = 0
-    const copied = {
-      id: 'm23', from: 'Dana Fixture <dana@hillsidetherapy.example>', to: 'Ms Lee <lee@riverbendcollege.example>', cc: 'Rowan <rowan@hearth.example>', copied_in: true,
-      subject: 'Re: Juno OT notes',
-      snippet: `Hi again, Ms Lee, Would it be possible for me to come in from 11:25 am to 12:05 pm on ${DAYS.due}? Happy to adjust the time as needed. Kind regards, Dana`,
-      date: new Date(Date.now() - 86_400_000).toISOString(),
-    }
-    const data = plainData({ events: { timezone: 'Australia/Melbourne', events: [] }, mail: mailbox([copied]) })
-    const r = await run('Morning brief', BRIEF_INSTRUCTION, data, BRIEF_TOOLS)
-    const text = r.text
-    const toDo = part(parts(text), /^to[ -]?do/)
-    const notToDo = !/dana|11:25|come in/i.test(toDo)
-    const namesWhom = /\blee\b/i.test(text)
-    const notAsked = !/(asked|asks|asking|invited|invites|wants|would like) (rowan|you|the household|the family)\b/i.test(text)
-    const hard = notToDo && namesWhom && notAsked && noLeak(text)
-    const g = await judgeGroundedness({ answer: text, context: data })
-    record({ case: 'brief: copied-in mail is not the household\'s to do', hard: hard ? 'pass' : 'fail', groundedness: g.score, model: r.model, note: text.slice(0, 80) })
-    expect(notToDo).toBe(true)
-    expect(namesWhom).toBe(true)
-    expect(notAsked).toBe(true)
-    expect(noLeak(text)).toBe(true)
-    if (strict()) expect(g.score).toBeGreaterThanOrEqual(0.9)
-  })
-})
 
 /* --------------------------------------------------------- the day ahead */
 
 /*
- * A brief that read as a mail digest missed the day: the family calendar is
+ * A brief that read as a digest of what arrived missed the day: the family calendar is
  * nearly always empty, and the member's own calendar was not read. It now
  * carries the member's own calendar for today, what starts tomorrow, the
  * board's due-today items, the reminders set for later in the day and the
@@ -639,7 +360,6 @@ const DAY = {
       },
     ],
   },
-  mail: mailbox([]),
   board: { project: 'HTL', open: 2, by_status: [{ status: 'To Do', count: 2 }], overdue: [], due_today: [{ key: 'HTL-351', summary: 'Pay the excursion', due: today }] },
   reminders: [{ label: 'bins out', at: '7:00 pm' }],
   proposals: [{ id: 3, title: 'Athletics carnival', start_local: formatLocalDate(localToUtc(weekAhead)), all_day: true, location: 'the oval' }],
@@ -729,8 +449,7 @@ describe.skipIf(!liveChainConfigured())('morning brief, the day half', () => {
           ],
         }],
       },
-      mail: mailbox([]),
-    })
+        })
     const r = await run('Morning brief', BRIEF_INSTRUCTION, data, BRIEF_TOOLS)
     const text = r.text
     if (process.env.EVAL_PRINT) console.log(`\n----- doubled-event brief -----\n${text}\n-----`)

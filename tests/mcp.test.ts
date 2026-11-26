@@ -5,13 +5,16 @@ import * as q from '@/lib/db/queries'
 import type { Member } from '@/lib/db/schema'
 import { hashToken, mcpKeyHolder, mintMcpKey, randomToken } from '@/lib/crypto'
 
-/** Linked mailboxes, none unless a test adds one; whose they were asked for is kept. */
-const mailboxes = vi.hoisted(() => ({ list: [] as { provider: string; listMail: () => Promise<unknown[]> }[], askedFor: [] as number[] }))
+/** Linked calendars, none unless a test adds one; whose they were asked for is kept. */
+const calendars = vi.hoisted(() => ({
+  list: [] as { provider: string; listEvents: () => Promise<{ events: unknown[]; more: boolean }> }[],
+  askedFor: [] as number[],
+}))
 vi.mock('@/lib/providers', async (orig) => ({
   ...(await orig<typeof import('@/lib/providers')>()),
   clientsFor: async (memberId: number) => {
-    mailboxes.askedFor.push(memberId)
-    return mailboxes.list
+    calendars.askedFor.push(memberId)
+    return calendars.list
   },
 }))
 
@@ -41,8 +44,8 @@ beforeEach(async () => {
   client = fresh.client
   realDb = fresh.db
   member = await add('Rowan')
-  mailboxes.list = []
-  mailboxes.askedFor = []
+  calendars.list = []
+  calendars.askedFor = []
 })
 afterEach(async () => closeDb(client))
 
@@ -73,7 +76,7 @@ describe('the tools an MCP client is offered', () => {
   it('offers the whole set at once', () => {
     expect(names()).toEqual(
       expect.arrayContaining([
-        'web_search', 'add_family_event', 'send_email', 'jira_create_issue', 'create_automation',
+        'web_search', 'add_family_event', 'create_calendar_event', 'jira_create_issue', 'create_automation',
         'morning_brief', 'money_snapshot', 'list_reports', 'accept_event_proposal',
       ]),
     )
@@ -124,25 +127,15 @@ describe('calling a tool', () => {
     expect(await q.recentActivity({ memberId: other.id })).toEqual([])
   })
 
-  it('spends what it reported as new once the call returns, on markers of its key alone', async () => {
-    const date = new Date(Date.now() - 3600_000).toISOString()
-    mailboxes.list = [{ provider: 'google', listMail: async () => [{ id: 'm1', from: 'school', to: 'me', subject: 'S', snippet: '…', date, unread: true }] }]
-    const first = JSON.parse(text(await callTool('new_mail', { limit: 10 }, as(member, 7))))
-    expect(first.accounts[0].messages).toHaveLength(1)
-    const again = JSON.parse(text(await callTool('new_mail', { limit: 10 }, as(member, 7))))
-    expect(again.accounts[0].messages).toEqual([])
-    expect(await q.getSetting(`mail_cursor:key:7:${member.id}:google`)).not.toBeNull()
-    // Another of the member's clients, and their morning brief, still have it to see.
-    const other = JSON.parse(text(await callTool('new_mail', { limit: 10 }, as(member, 8))))
-    expect(other.accounts[0].messages).toHaveLength(1)
-    expect(await q.getSetting(`mail_cursor:brief:${member.id}:google`)).toBeNull()
+  it("reads only the key holder's own calendar", async () => {
+    await add('Ada')
+    calendars.list = [{ provider: 'google', listEvents: async () => ({ events: [], more: false }) }]
+    await callTool('list_calendar', { from: '2026-09-01', to: '2026-09-01' }, as(member))
+    expect(calendars.askedFor).toEqual([member.id])
   })
 
-  it("reads only the key holder's own mailbox", async () => {
-    await add('Ada')
-    mailboxes.list = [{ provider: 'google', listMail: async () => [] }]
-    await callTool('new_mail', { limit: 10 }, as(member))
-    expect(mailboxes.askedFor).toEqual([member.id])
+  it('offers no mail tool, since Hearth reads and sends no mail', () => {
+    expect(descriptors().map((d) => d.name).filter((n) => /mail|draft|attachment/.test(n))).toEqual([])
   })
 
   it('answers a name it does not have rather than failing the call', async () => {
@@ -208,15 +201,6 @@ describe('the context a client reads first', () => {
     expect(await read()).toContain('they can link one at https://hearth.example/connect')
     await q.saveConnection({ memberId: member.id, provider: 'google', email: 'rowan@gmail.example', refreshToken: 'r', scopes: null })
     expect(await read()).not.toContain('can link one at')
-  })
-
-  it("carries the caller's own drafts and never another member's", async () => {
-    const sam = await add('Sam')
-    const mine = await q.createDraft({ memberId: member.id, provider: 'google', to: ['school@example.com'], subject: 'Absence', body: 'b' })
-    await q.createDraft({ memberId: sam.id, provider: 'google', to: ['bank@example.com'], subject: 'Loan', body: 'b' })
-    const result = await read()
-    expect(result).toContain(`draft_id ${mine.id}: to school@example.com, "Absence"`)
-    expect(result).not.toContain('Loan')
   })
 
   it('carries every proposal still waiting, whoever it was found for', async () => {

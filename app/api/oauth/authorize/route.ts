@@ -36,7 +36,7 @@ export async function GET(req: Request) {
   const token = await consentToken(checked.ok, member.id)
   return page(
     'Connect a client to Hearth',
-    `<p><b>${escapeHtml(name)}</b> wants to act as <b>${escapeHtml(member.name)}</b> in Hearth: your mail and calendar, the family calendar and lists, what the household remembers, the money feed, Notion and the board, with your name on whatever it changes.</p>
+    `<p><b>${escapeHtml(name)}</b> wants to act as <b>${escapeHtml(member.name)}</b> in Hearth: your calendar, the family calendar and lists, what the household remembers, the money feed, Notion and the board, with your name on whatever it changes.</p>
 <p>It will send you back to <b class="mono">${escapeHtml(returnsTo)}</b>. Say yes only if you started connecting this client yourself just now; anyone can ask under any name.</p>
 <p>It gets a key of its own, listed on Home under Claude and other MCP clients, where you can revoke it at any time.</p>
 <form method="post" action="/api/oauth/authorize">

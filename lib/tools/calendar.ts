@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { clientFor, clientsFor, MAX_EVENTS } from '../providers'
 import type { CalendarEvent } from '../providers/types'
 import { listFamilyEvents, connectionsFor } from '../db/queries'
-import { readOnlyRefusal, providerEnum, describeAccountError, nothingLinked } from './mail'
+import { readOnlyRefusal, providerEnum, describeAccountError, nothingLinked } from './accounts'
 import { providerConfig, type Provider } from '../oauth/providers'
 import { localToUtc, formatLocal, formatLocalDate, formatLocalTime, resolveSpan, rangeEnd, lastDay, localDateKey, daysAfter, dayAfter } from '../cron'
 import { freeSpans, nextQuarter, type Span } from '../free-time'
@@ -12,7 +12,7 @@ import type { ToolContext } from './context'
 import { requireMember, writeFailure } from './context'
 import { ALL_DAY_END, LOCAL_DATETIME } from './familycal'
 
-/** A calendar as the family names it, owner first, the way a mailbox is named. */
+/** A calendar as the family names it, owner first. */
 const calendarName = (owner: string, provider: Provider) => `${owner}'s ${providerConfig(provider).calendar}`
 
 export function calendarTools(ctx: ToolContext) {
@@ -32,7 +32,7 @@ export function calendarTools(ctx: ToolContext) {
         // A date alone as `to` is the whole of that day, not its first minute.
         const end = rangeEnd(to)
         const clients = provider ? [clientFor(member.id, provider)] : await clientsFor(member.id)
-        if (clients.length === 0) return { error: nothingLinked('calendar') }
+        if (clients.length === 0) return { error: nothingLinked() }
         const accounts: object[] = []
         for (const c of clients) {
           try {
@@ -116,7 +116,7 @@ export function calendarTools(ctx: ToolContext) {
             else busy.push({ start: e.startsAt, end: e.endsAt })
           }
         }
-        if (checked.length === 0) return { error: nothingLinked('calendar') }
+        if (checked.length === 0) return { error: nothingLinked() }
 
         // Each day's searchable hours, from now on, no further than the listings were read.
         const soonest = nextQuarter(ctx.now)
@@ -170,7 +170,7 @@ export function calendarTools(ctx: ToolContext) {
         const readOnly = new Set((await connectionsFor(member.id)).filter((c) => c.readOnly).map((c) => c.provider))
         if (provider && readOnly.has(provider)) return { error: readOnlyRefusal(provider) }
         const linked = provider ? [clientFor(member.id, provider)] : await clientsFor(member.id)
-        if (linked.length === 0) return { error: nothingLinked('calendar') }
+        if (linked.length === 0) return { error: nothingLinked() }
         const clients = linked.filter((c) => !readOnly.has(c.provider))
         if (clients.length === 0) return { error: readOnlyRefusal(linked[0].provider) }
 

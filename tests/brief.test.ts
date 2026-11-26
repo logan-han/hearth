@@ -3,13 +3,11 @@ import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import * as q from '@/lib/db/queries'
 import type { ToolContext } from '@/lib/tools/context'
-import { commitCursors } from '@/lib/tools/cursor'
 import { localDateKey, dayAfter, daysAfter, localToUtc } from '@/lib/cron'
 
-// The mailbox and calendar behind the brief, answering with whatever a test sets.
-const listMail = vi.fn()
+// The calendar behind the brief, answering with whatever a test sets.
 const listEvents = vi.fn()
-const stub = (provider: string) => ({ provider, listMail, listEvents })
+const stub = (provider: string) => ({ provider, listEvents })
 const linked = vi.fn(async (_id: number) => [stub('google')])
 vi.mock('@/lib/providers', async (orig) => ({
   ...(await orig<typeof import('@/lib/providers')>()),
@@ -28,7 +26,6 @@ vi.mock('@/lib/providers/pocketsmith', async (orig) => ({ ...(await orig<typeof 
 
 const { assembleBrief, gatherBrief, gatherSnapshot, remindersBetween, errorOf, isUnconfigured, isUnlinked, LOOK_AHEAD_DAYS } = await import('@/lib/brief')
 const { briefTools, BRIEF_GUIDE, SNAPSHOT_GUIDE } = await import('@/lib/tools/brief')
-const { mailTools } = await import('@/lib/tools/mail')
 
 type BriefInput = Parameters<typeof assembleBrief>[0]
 
@@ -42,7 +39,6 @@ function fetched(over: Partial<BriefInput> = {}): BriefInput {
     tomorrowEvents: { events: [] },
     comingEvents: { events: [] },
     calendars: { accounts: [] },
-    mail: { accounts: [] },
     board: { overdue: [], due_today: [], due_next: [] },
     weather: { summary: 'Fine' },
     proposals: { proposals: [] },
@@ -92,26 +88,11 @@ describe('assembleBrief', () => {
     expect(brief.empty).toBe(false)
   })
 
-  it('names a mailbox that failed in problems and hands on only those that answered', () => {
-    const mail = {
-      accounts: [
-        { mailbox: "Rowan's Outlook", provider: 'microsoft', error: 'timed out' },
-        { mailbox: "Rowan's Gmail", provider: 'google', messages: [{ subject: 'Excursion form' }] },
-      ],
-    }
-    const brief = assembleBrief(fetched({ mail }))
-    expect(brief.problems).toEqual(["new_mail (Rowan's Outlook): timed out"])
-    expect(brief.data.mail).toEqual({ accounts: [{ mailbox: "Rowan's Gmail", provider: 'google', messages: [{ subject: 'Excursion form' }] }] })
-    expect(brief.empty).toBe(false)
-  })
-
-  it('takes no mailbox linked as a setting, and one that will not answer at all as a fault', () => {
-    expect(assembleBrief(fetched({ mail: { error: "No email account linked. Link one on Hearth's Connect page: x." } })).problems).toEqual([])
-    const down = assembleBrief(fetched({ mail: { error: 'Gmail said 500' } }))
-    expect(down.problems).toEqual(['new_mail: Gmail said 500'])
-    expect(down.data).not.toHaveProperty('mail')
-    // A shape with no accounts is handed on as it came.
-    expect(assembleBrief(fetched({ mail: { odd: true } })).data.mail).toEqual({ odd: true })
+  it('takes no calendar linked as a setting, and one that will not answer at all as a fault', () => {
+    expect(assembleBrief(fetched({ calendars: { error: "No calendar linked. Link one on Hearth's Connect page: x." } })).problems).toEqual([])
+    const down = assembleBrief(fetched({ calendars: { error: 'Graph said 500' } }))
+    expect(down.problems).toEqual(['list_calendar: Graph said 500'])
+    expect(down.data).not.toHaveProperty('calendars')
   })
 
   it('splits the calendars by when each event starts: today, tomorrow and the fortnight', () => {
@@ -169,7 +150,7 @@ describe('assembleBrief', () => {
     expect(isUnconfigured('PocketSmith is not configured.')).toBe(true)
     expect(isUnconfigured(null)).toBe(false)
     expect(isUnlinked('No calendar linked. Link one on the dashboard.')).toBe(true)
-    expect(isUnlinked('No email account linked.')).toBe(true)
+    expect(isUnlinked('No email account linked.')).toBe(false)
     expect(isUnlinked('timed out')).toBe(false)
     expect(isUnlinked(null)).toBe(false)
   })
@@ -191,14 +172,13 @@ describe('gathering on demand', () => {
     ps.pocketsmithConfigured.mockReturnValue(false)
     client = (await freshDb()).client
     const member = await q.saveMember({ name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false })
-    ctx = { member, memberName: 'Rowan', now, via: 'mcp', cursorScope: 'key:1' }
-    listMail.mockResolvedValue([])
+    ctx = { member, memberName: 'Rowan', now, via: 'mcp' }
     listEvents.mockResolvedValue({ events: [], more: false })
   })
   afterEach(async () => closeDb(client))
 
   describe('gatherBrief', () => {
-    it('asks for the day, tomorrow and the fortnight, a day of mail, the board, the weather and the proposals', async () => {
+    it('asks for the day, tomorrow and the fortnight, the board, the weather and the proposals', async () => {
       const asked: [string, unknown][] = []
       const run = async (name: string, args: Record<string, unknown>) => {
         asked.push([name, args])
@@ -210,7 +190,6 @@ describe('gathering on demand', () => {
         ['list_family_events', { from: dayAfter(day), to: dayAfter(day), include_cancelled: false }],
         ['list_family_events', { from: dayAfter(dayAfter(day)), to: horizon, include_cancelled: false }],
         ['list_calendar', { from: day, to: horizon }],
-        ['new_mail', { limit: 20 }],
         ['jira_board_summary', {}],
         ['weather', {}],
         ['list_event_proposals', {}],
@@ -304,37 +283,17 @@ describe('gathering on demand', () => {
   describe('morning_brief', () => {
     const call = (c: ToolContext, name: 'morning_brief' | 'money_snapshot') =>
       ((briefTools(c) as Record<string, { execute: unknown }>)[name].execute as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)({}, {})
-    const message = (id: string, hoursAgo: number) => ({
-      id, from: 'office@school.example', to: 'rowan@hearth.example', cc: '', subject: 'Excursion form',
-      snippet: 'Please sign by Friday.', date: new Date(now.getTime() - hoursAgo * 3_600_000).toISOString(), unread: true,
-    })
-
-    it('reads the mail on markers of its own, handing their moves to the call, so a client and the brief never spend each other\'s mail', async () => {
-      listMail.mockResolvedValue([message('m1', 1)])
+    it('hands the day back with the household clock and how to read it, and says when there is nothing new', async () => {
       const r = await call(ctx, 'morning_brief')
-      expect((r.mail as { accounts: { messages: { id: string }[] }[] }).accounts[0].messages.map((m) => m.id)).toEqual(['m1'])
       expect(r.now).toMatch(/^NOW: /)
       expect(r.how_to_read).toBe(BRIEF_GUIDE)
-      expect(r).not.toHaveProperty('nothing_new')
-      // Nothing is spent until the call is answered: the moves wait on the caller's context.
-      expect(ctx.pendingCursors?.map((p) => p.key)).toEqual([`mail_cursor:brief:${ctx.member!.id}:google`])
-      expect(await q.getSetting(`mail_cursor:brief:${ctx.member!.id}:google`)).toBeNull()
-      await commitCursors(ctx.pendingCursors)
-
-      // The brief has had it.
-      const again: ToolContext = { ...ctx, pendingCursors: undefined }
-      const second = await call(again, 'morning_brief')
-      expect((second.mail as { accounts: { messages: unknown[] }[] }).accounts[0].messages).toEqual([])
-      expect(second.nothing_new).toContain('Nothing on any calendar today')
-      // The client's own markers have not been touched.
-      const own: ToolContext = { ...ctx, pendingCursors: undefined }
-      const fresh = await (mailTools(own).new_mail.execute as unknown as (a: unknown, o: unknown) => Promise<Record<string, unknown>>)({ limit: 10 }, {})
-      expect((fresh.accounts as { messages: { id: string }[] }[])[0].messages.map((m) => m.id)).toEqual(['m1'])
+      expect(r.nothing_new).toContain('Nothing on any calendar today')
+      expect(r).not.toHaveProperty('mail')
     })
 
     it('says what it could not read, beside the rest', async () => {
       listEvents.mockRejectedValue(new Error('Graph said 503'))
-      const r = await call({ ...ctx, pendingCursors: undefined }, 'morning_brief')
+      const r = await call(ctx, 'morning_brief')
       expect(r.could_not_read).toEqual(["list_calendar (Rowan's Google Calendar): Graph said 503"])
       expect(r.how_to_read).toBe(BRIEF_GUIDE)
     })
@@ -343,10 +302,11 @@ describe('gathering on demand', () => {
       await expect(call({ ...ctx, member: null }, 'morning_brief')).rejects.toThrow(/family member/)
     })
 
-    it('tells a caller how to give it, proposing dates by source so a second sweep finds the first', () => {
-      expect(BRIEF_GUIDE).toContain('propose_family_event, passing the message id as source')
-      expect(BRIEF_GUIDE).toContain('a date already proposed comes back as that proposal rather than a second one')
+    it('tells a caller how to give it, in parts, with nothing posted anywhere', () => {
+      expect(BRIEF_GUIDE).toContain('Give it in named parts')
+      expect(BRIEF_GUIDE).toContain('A calendar marked truncated had more events than fit')
       expect(BRIEF_GUIDE).toContain('Nothing here was posted anywhere')
+      expect(BRIEF_GUIDE).not.toMatch(/mail/i)
     })
   })
 

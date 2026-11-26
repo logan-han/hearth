@@ -96,8 +96,8 @@ export function automationTools(ctx: ToolContext) {
         'Examples: "every Monday 7pm remind us to put the bins out" -> cron "0 19 * * 1"; ' +
         '"weekday mornings at 7am summarise today" -> "0 7 * * 1-5"; ' +
         '"remind me tomorrow at 5pm to call the plumber" -> at "<tomorrow>T17:00", repeat once; ' +
-        '"let me know when the school emails the camp dates" -> cron "0 8-20 * * *", repeat until, ' +
-        'instruction "Look for new mail from the school with the camp dates; report them when they arrive, otherwise SKIP".',
+        '"let me know when the school puts up the camp dates" -> cron "0 8-20 * * *", repeat until, ' +
+        'instruction "Read the school\'s news page for the camp dates; report them once they are there, otherwise SKIP".',
       inputSchema: z.object({
         label: z.string().describe('Short name, e.g. "bin night"'),
         cron: z

@@ -65,7 +65,7 @@ export function McpKeys({ initial, endpoint, member }: { initial: Key[]; endpoin
     <div className="panel">
       <p className="group-note">
         Hearth&rsquo;s tools for Claude Code, Claude Desktop or any client that speaks MCP, at{' '}
-        <span className="mono">{endpoint}</span>. A key acts as you: your mail, your calendar, your name on what it changes. Make
+        <span className="mono">{endpoint}</span>. A key acts as you: your calendar, your name on what it changes. Make
         one per client, so each can be revoked on its own. Clients that sign in with OAuth need no key; they ask you here to
         approve them, and appear in this list once you do.
       </p>

@@ -18,19 +18,12 @@ import {
   closeGoal,
   getGoalStep,
   setGoalStepDone,
-  getDraft,
-  markDraft,
-  connectionsFor,
   getHelper,
   deleteHelper,
   setConnectionReadOnly,
   deleteConnection,
 } from '@/lib/db/queries'
-import { clientFor } from '@/lib/providers'
-import { UnconfirmedError } from '@/lib/deadline'
-import { describeAccountError, readOnlyRefusal } from '@/lib/tools/mail'
 import { noteActivity } from '@/lib/activity'
-import type { Provider } from '@/lib/oauth/providers'
 import { resumeAt } from '@/lib/tools/automation'
 import { hydrateSecrets } from '@/lib/settings'
 import { acceptProposal } from '@/lib/tools/proposals'
@@ -38,7 +31,7 @@ import { acceptProposal } from '@/lib/tools/proposals'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-/** A goal, a draft and a reminder are their member's alone. */
+/** A goal and a reminder are their member's alone. */
 const own = (row: { memberId: number | null }, viewer: number | null) => viewer !== null && row.memberId === viewer
 
 /**
@@ -59,7 +52,7 @@ export async function GET(req: Request) {
  * Mutations from Home and Connect. Gated on being a recognised member, not an
  * admin: everything here is something a member can already do from their MCP
  * client, so the web is just a second pair of hands. What is a member's own
- * (a goal, a draft, a reminder, a linked account) is theirs alone to change.
+ * (a goal, a reminder, a linked account) is theirs alone to change.
  */
 export async function POST(req: Request) {
   const session = await requireMember()
@@ -166,42 +159,6 @@ export async function POST(req: Request) {
       // Nothing left to check in on.
       if (goal.automationId) await deleteAutomation(goal.automationId)
       return NextResponse.json({ ok: true, closed: goal.title, status: body.status })
-    }
-
-    case 'send_draft':
-    case 'discard_draft': {
-      // A draft is its writer's alone to send or throw away: it goes from their mailbox, in their name.
-      const draft = await getDraft(id)
-      if (!draft || draft.memberId !== session.memberId) return NextResponse.json({ error: `No draft ${id} of yours.` }, { status: 404 })
-      if (body.action === 'discard_draft') {
-        if (!(await markDraft(id, 'cancelled'))) return NextResponse.json({ error: `That draft is already ${draft.status}.` }, { status: 409 })
-        await noteActivity({ memberId: draft.memberId, via: 'web', tool: 'cancel_draft', input: { draft_id: id }, result: {} })
-        return NextResponse.json({ ok: true, discarded: draft.subject })
-      }
-      // Linked read-only since the draft was written, the account sends nothing, click or no click.
-      if ((await connectionsFor(draft.memberId)).some((c) => c.provider === draft.provider && c.readOnly)) {
-        return NextResponse.json({ error: readOnlyRefusal(draft.provider as Provider) }, { status: 409 })
-      }
-      // The click is the yes. Claimed first, as send_email does, so two clicks cannot send it twice.
-      if (!(await markDraft(id, 'sent'))) return NextResponse.json({ error: `That draft is already ${draft.status}.` }, { status: 409 })
-      const to = draft.recipients.split(',').map((s) => s.trim()).filter(Boolean)
-      try {
-        await clientFor(draft.memberId, draft.provider as Provider).sendMail({
-          to,
-          cc: draft.cc?.split(',').map((s) => s.trim()).filter(Boolean),
-          subject: draft.subject,
-          body: draft.body,
-        })
-      } catch (err) {
-        // One that ran out of time may have gone, and stays claimed so it is not sent again.
-        if (err instanceof UnconfirmedError) {
-          return NextResponse.json({ error: 'The send took too long to be confirmed, so it may or may not have gone. Check your Sent folder.' }, { status: 504 })
-        }
-        await markDraft(id, 'pending', 'sent')
-        return NextResponse.json({ error: describeAccountError(err) }, { status: 502 })
-      }
-      await noteActivity({ memberId: draft.memberId, via: 'web', tool: 'send_email', input: { draft_id: id }, result: { to: draft.recipients, subject: draft.subject } })
-      return NextResponse.json({ ok: true, sent: draft.subject })
     }
 
     case 'remove_helper': {

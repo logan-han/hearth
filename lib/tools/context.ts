@@ -1,6 +1,5 @@
 import type { Member, Helper } from '../db/schema'
 import type { ActivityVia } from '../activity'
-import type { StagedCursor } from './cursor'
 import { UnconfirmedError } from '../deadline'
 import { describeError } from '../errors'
 import { appUrl } from '../env'
@@ -12,7 +11,7 @@ export type ToolContext = {
   now: Date
   /**
    * Set once anything from outside the household has been read in this run:
-   * mail, a web page, a search, Notion, the board, a calendar invite. Once it
+   * a web page, a search, Notion, the board, a calendar invite. Once it
    * is, read_url opens only a link that was there to be read (see `seen`).
    */
   readUntrusted?: boolean
@@ -39,14 +38,6 @@ export type ToolContext = {
   wrote?: string[]
   /** The writes in `wrote` that may or may not have happened, which a report after a failure does not say were done. */
   unconfirmed?: string[]
-  /** Cursor moves waiting on this run's result reaching someone; see StagedCursor. */
-  pendingCursors?: StagedCursor[]
-  /**
-   * Whose "what's new" markers this run reads and moves: one MCP key's, one
-   * scheduled job's, or the member's morning brief. Two readers never share
-   * markers, so one never spends what the other has not been shown.
-   */
-  cursorScope?: string
   /** How this run came to be, for the member's record of what was changed. */
   via?: ActivityVia
   /** The helper this run works as, when the job was handed to one; what it schedules is its own. */

@@ -9,7 +9,6 @@ import { z } from 'zod'
 import { withModelFallback, structuredChain, modelChain, EndOnFailure, type ModelSlot } from './model'
 import { buildTools, CUSTOM_AUTOMATION_TOOLS, type ToolName } from './tools'
 import type { ToolContext } from './tools/context'
-import type { StagedCursor } from './tools/cursor'
 import { listMemories } from './db/queries'
 import type { Member, Helper } from './db/schema'
 import { timezone, language, units, reasoningLevel, assistantName } from './env'
@@ -45,8 +44,6 @@ export type AgentInput = {
   deadline?: number
   /** The helper this run works as: its role in the prompt. */
   helper?: Helper | null
-  /** Whose "what's new" markers the tools read and move; see ToolContext.cursorScope. */
-  cursorScope?: string
 }
 
 export type AgentResult = {
@@ -56,8 +53,6 @@ export type AgentResult = {
   evidence?: string
   /** The Known household facts the model wrote with, so the checks judge against the same sources. */
   facts?: string
-  /** Cursor moves the run's tools staged, for the caller to commit once the result has reached someone. */
-  cursors?: StagedCursor[]
   /** Writes this run made that would double if done again; what they acted on must not be offered twice. */
   wrote?: string[]
   /** The writes in `wrote` that ran out of time and may or may not have happened; see ToolContext.unconfirmed. */
@@ -65,15 +60,6 @@ export type AgentResult = {
   /** The output allowance cut the report short, and it lost its unfinished end. */
   cutShort?: boolean
 }
-
-/**
- * What an unattended run's failed slot had looked at, kept against the error
- * it threw: the caller holds nothing else to say which new items a run that
- * keeps failing is stuck on.
- */
-const failedLooks = new WeakMap<object, StagedCursor[]>()
-export const looksBefore = (err: unknown): StagedCursor[] =>
-  (err && typeof err === 'object' ? failedLooks.get(err) : undefined) ?? []
 
 /** Memories are cheap to store and expensive to read; a run sees the newest few dozen. */
 const MEMORY_LIMIT = 50
@@ -99,7 +85,7 @@ const LAST_SLOT_ALLOWANCE = 4000
 
 /**
  * The Known household facts, for a run to write with: a standing instruction
- * remembered earlier (one sender's mail to leave out) can only steer a report
+ * remembered earlier (one source to leave out) can only steer a report
  * written with it in view.
  */
 export async function knownFacts(): Promise<string> {
@@ -136,9 +122,9 @@ function runPrompt(tz: string): string[] {
   return [
     'This is a scheduled job, not a conversation. Whatever you write is kept as a report for the family member who set it up, and read later.',
     'WRITE using only the tool results you fetch, the Known household facts under Context and the instruction you were given. Do not rely on outside knowledge.',
-    'HOUSE RULES: a Known household fact under Context can be a standing instruction about these reports: mail from one sender or on one subject to leave out, or something always to include. Follow it even where the instruction you were given would include the item, and do not say that you did.',
+    'HOUSE RULES: a Known household fact under Context can be a standing instruction about these reports: a source or a subject to leave out, or something always to include. Follow it even where the instruction you were given would include the item, and do not say that you did.',
     'REPORT: for a routine check, one to three short lines a housemate would find useful, the key figure in **bold**. When the instruction asks for a summary in several parts, open with a **bold** title line and give each part a **bold** heading line with its bullets under it. Names, amounts and dates exactly as given.',
-    'PURPOSE: say what a payment or message is for only when a tool result, a Known fact, a calendar event or a fetched email names it, and say which. Where the instruction asks for a purpose on every line, write "purpose not recorded" for one nothing names; where it does not, say nothing about purpose.',
+    'PURPOSE: say what a payment or message is for only when a tool result, a Known fact or a calendar event names it, and say which. Where the instruction asks for a purpose on every line, write "purpose not recorded" for one nothing names; where it does not, say nothing about purpose.',
     'NOTHING TO SAY: when nothing is worth reporting, reply with exactly SKIP.',
     'PROBLEMS: if a tool fails, write PROBLEM: and one line of diagnosis, then SKIP on its own line. That reaches the member as a problem report, not as the report itself.',
     `FORMAT: Markdown: **bold**, *italic*, \`code\`, - bullets. No tables, no headings beyond **bold** lines, no preamble, no handover line, no commentary about tools. Write in ${language()} with ${units()} units, times in ${tz}.`,
@@ -213,9 +199,9 @@ export function cleanReply(raw: string, opts: { working?: boolean } = {}): { tex
 }
 
 /**
- * About ten thousand tokens. A run's longest reads (a few emails at 6,000
- * characters, a page at 9,000) fit whole, and the chain's claim check sends
- * the evidence once for every statement it checks.
+ * About ten thousand tokens. A run's longest reads (a few pages at 9,000
+ * characters each) fit whole, and the chain's claim check sends the evidence
+ * once for every statement it checks.
  */
 const EVIDENCE_TOTAL_CHARS = 40_000
 const CUT_MARK = ' …[cut short]'
@@ -263,7 +249,6 @@ const DONE: Partial<Record<ToolName, string>> = {
   create_automation: 'set up a reminder',
   create_calendar_event: 'added an event to your calendar',
   jira_comment: 'commented on a board ticket',
-  jira_attach_email_file: 'attached a file to a board ticket',
   notion_append_to_page: 'added to a Notion page',
 }
 
@@ -313,7 +298,6 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     now,
     via: 'watcher',
     helper: input.helper ?? null,
-    ...(input.cursorScope ? { cursorScope: input.cursorScope } : {}),
   }
 
   const context = await knownFacts()
@@ -327,7 +311,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const allowanceFor = (slot: ModelSlot) => (slot === chain.at(-1) ? Math.max(2 * allowance, LAST_SLOT_ALLOWANCE) : allowance)
   // The first long report the cap cut off, trimmed, for when no later model
   // answers at all: a report short of its end beats none.
-  let shortPost: { text: string; model: string; evidence: string | undefined; cutShort: boolean; looks: StagedCursor[] } | undefined
+  let shortPost: { text: string; model: string; evidence: string | undefined; cutShort: boolean } | undefined
   const result = await withModelFallback(async (slot: ModelSlot) =>
     traced(
       {
@@ -355,9 +339,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         // Whatever this slot changes stays changed if it then fails. Starting
         // the run over on the next slot would do it all again: the same list
         // items twice, a second reminder. So once anything is written, a
-        // failure ends the run here, saying what was done. A slot that fails
-        // has shown its looks at new mail to nobody.
-        const stagedBefore = ctx.pendingCursors?.length ?? 0
+        // failure ends the run here, saying what was done.
         try {
           const r = await call()
           let cleaned = cleanReply(r.text, { working: true })
@@ -383,7 +365,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
             if (slot !== chain.at(-1) && !ctx.wrote?.length) {
               if (!shortPost && whole.length >= TRUNCATED_REPLY_CHARS) {
                 const evidence = collectEvidence(r.steps ?? [])
-                shortPost = { text: whole, model: slot.name, evidence, cutShort: true, looks: ctx.pendingCursors?.slice(stagedBefore) ?? [] }
+                shortPost = { text: whole, model: slot.name, evidence, cutShort: true }
               }
               throw new Error(`${slot.name} ran out of output tokens after ${cleaned.text.length} characters of report`)
             }
@@ -402,14 +384,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           }
           return { text: cleaned.text, model: slot.name, evidence: collectEvidence(r.steps ?? []), cutShort }
         } catch (err) {
-          // A failed slot's looks were shown to nobody, unless the run wrote on
-          // the strength of them: then they are spent with it, or the next run
-          // would find the same mail and write it all again.
-          if (err && typeof err === 'object') failedLooks.set(err, ctx.pendingCursors?.slice(stagedBefore) ?? [])
-          if (!ctx.wrote?.length) {
-            ctx.pendingCursors?.splice(stagedBefore)
-            throw err
-          }
+          if (!ctx.wrote?.length) throw err
           console.error(`[agent] ${slot.name} failed after changing something, so no other slot gets the run:`, describeError(err))
           // The run reports nothing but the problem, and the member hears why.
           const done = doneSoFar(ctx.wrote, ctx.unconfirmed) || 'changed something'
@@ -429,17 +404,13 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     if (!shortPost) throw err
     // Every later model failed outright; the one that ran long had its say.
     console.warn(`[agent] no later model answered (${describeError(err)}); keeping ${shortPost.model}'s report, cut short`)
-    const { looks, ...post } = shortPost
-    ;(ctx.pendingCursors ??= []).push(...looks)
-    return post
+    return shortPost
   })
 
   return {
     text: result.text,
     model: result.model,
     ...(result.evidence !== undefined ? { evidence: result.evidence } : {}),
-    // Only a report the model wrote says what was new.
-    ...(result.text && ctx.pendingCursors?.length ? { cursors: ctx.pendingCursors } : {}),
     ...(ctx.wrote?.length ? { wrote: ctx.wrote } : {}),
     ...(ctx.unconfirmed?.length ? { unconfirmed: ctx.unconfirmed } : {}),
     ...(result.cutShort ? { cutShort: true } : {}),

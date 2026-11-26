@@ -50,12 +50,9 @@ describe('what System and Settings show an admin', () => {
     await q.addMemory('bin night is Monday', null)
     await q.deleteMemory((await q.addMemory('gone', null)).id)
     await q.addProposal({ title: 'Working bee', startsAt: soon, endsAt: new Date(soon.getTime() + HOUR) })
-    const draft = { memberId: rowan.id, provider: 'google', to: ['a@b.com'], subject: 's', body: 'b' }
-    await q.createDraft(draft)
-    await q.markDraft((await q.createDraft(draft)).id, 'sent')
 
     const stats = await gatherStats()
-    expect(stats.totals).toEqual({ members: 2, admins: 1, connections: 1, keys: 2, events: 1, memories: 1, proposals: 1, drafts: 1, sent: 1 })
+    expect(stats.totals).toEqual({ members: 2, admins: 1, connections: 1, keys: 2, events: 1, memories: 1, proposals: 1 })
     expect(stats.timezone).toBe('Australia/Melbourne')
   })
 

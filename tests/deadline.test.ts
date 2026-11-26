@@ -33,6 +33,8 @@ beforeEach(() => {
     OPENWEATHER_API_KEY: 'owm',
     GOOGLE_CLIENT_ID: 'gid',
     GOOGLE_CLIENT_SECRET: 'gsecret',
+    GOOGLE_AGENT_CLIENT_ID: 'agent-gid',
+    GOOGLE_AGENT_CLIENT_SECRET: 'agent-gsecret',
     TAVILY_API_KEY: 'tvly',
   })
 })
@@ -50,10 +52,9 @@ describe('deadline', () => {
   })
 
   const requests: [string, () => Promise<unknown>][] = [
-    ['Gmail', () => googleClient(1).listMail({})],
-    ['Microsoft Graph', () => microsoftClient(1).listMail({})],
+    ['Google Calendar', () => googleClient(1).listEvents(new Date(0), new Date(86_400_000))],
+    ['Microsoft Graph', () => microsoftClient(1).listEvents(new Date(0), new Date(86_400_000))],
     ['Jira', () => jira.searchIssues('project = HTL')],
-    ['a Jira upload', () => jira.attachFile('HTL-1', { filename: 'a.txt', mimeType: 'text/plain', bytes: new Uint8Array(1) })],
     ['Notion', () => notion.search({ query: 'rates' })],
     ['PocketSmith', () => pocketsmith.listAccounts()],
     ['OpenWeatherMap', () => weather.geocode('Melbourne')],
@@ -72,17 +73,13 @@ describe('deadline', () => {
 
 describe('a write that runs out of time', () => {
   const timedOut = () => new DOMException('The operation was aborted due to timeout', 'TimeoutError')
-  const draft = { to: ['a@b.com'], subject: 's', body: 'b' }
   const event = { title: 'Dentist', start: new Date('2026-10-01T00:00:00Z'), end: new Date('2026-10-01T01:00:00Z') }
 
   const writes: [string, () => Promise<unknown>][] = [
-    ['a Gmail send', () => googleClient(1).sendMail(draft)],
-    ['a Graph send', () => microsoftClient(1).sendMail(draft)],
     ['a Google event', () => googleClient(1).createEvent(event)],
     ['a Graph event', () => microsoftClient(1).createEvent(event)],
     ['a new Jira issue', () => jira.createIssue({ projectKey: 'HTL', summary: 'Rates' })],
     ['a Jira comment', () => jira.addComment('HTL-1', 'Paid')],
-    ['a Jira upload', () => jira.attachFile('HTL-1', { filename: 'a.txt', mimeType: 'text/plain', bytes: new Uint8Array(1) })],
     ['a Notion append', () => notion.appendToPage('p1', 'milk')],
   ]
 
@@ -93,7 +90,7 @@ describe('a write that runs out of time', () => {
 
   it('stays a plain timeout when it is the token that ran out, before anything was sent', async () => {
     vi.mocked(accessTokenFor).mockRejectedValueOnce(timedOut()).mockRejectedValueOnce(timedOut())
-    for (const write of [() => googleClient(1).sendMail(draft), () => microsoftClient(1).createEvent(event)]) {
+    for (const write of [() => googleClient(1).createEvent(event), () => microsoftClient(1).createEvent(event)]) {
       const err = await write().catch((e: unknown) => e)
       expect(err).not.toBeInstanceOf(UnconfirmedError)
       expect((err as Error).name).toBe('TimeoutError')

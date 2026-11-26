@@ -1,14 +1,12 @@
 import { NextResponse } from 'next/server'
-import { APICallError, RetryError } from 'ai'
 import { Receiver } from '@upstash/qstash'
 import {
   dueAutomations, claimAutomation, getSetting, retireStaleProposals, recordTick, setAutomationEnabled,
-  deleteAutomation, pruneActivity, pruneReports, getHelper, memberById, addReport, setSetting, type ReportStatus,
+  deleteAutomation, pruneActivity, pruneReports, getHelper, memberById, addReport, type ReportStatus,
 } from '@/lib/db/queries'
 import { nextRun, formatLocal, clockLine } from '@/lib/cron'
 import { retryTickAt } from '@/lib/scheduler'
-import { runAgent, decideWatcherPost, reviewDraft, cutFromDraft, looksBefore, scheduledInstruction, TURN_BUDGET_MS, type AgentResult } from '@/lib/agent'
-import { commitCursors, type StagedCursor } from '@/lib/tools/cursor'
+import { runAgent, decideWatcherPost, reviewDraft, cutFromDraft, scheduledInstruction, TURN_BUDGET_MS, type AgentResult } from '@/lib/agent'
 import { hydrateSecrets, recheckSecrets } from '@/lib/settings'
 import { flushTelemetry, traced, traceRun, noteRun } from '@/lib/telemetry'
 import { pruneModelEvents } from '@/lib/model-events'
@@ -95,22 +93,17 @@ const DECISION_RESERVE_MS = 30_000
 async function runCustom(a: Automation, member: Member, deadline: number): Promise<Delivered> {
   const helper = a.helperId ? await getHelper(a.helperId).catch((): Helper | undefined => undefined) : undefined
   noteRun({ input: `INSTRUCTION:\n${a.instruction}`, ...(helper ? { metadata: { helper: helper.name } } : {}) })
-  const result = await counted(a, member, looksBefore, () => runAgent({
-    // Its author's words, run as its author: their mailbox alone.
+  const result = await runAgent({
+    // Its author's words, run as its author: their own calendar alone.
     member,
     memberName: member.name,
     helper,
-    // Its own markers for what is new: a watch that looks at mail hourly
-    // would otherwise spend what the morning brief and the member's own
-    // clients are there to show.
-    cursorScope: `auto:${a.id}`,
     text: scheduledInstruction(a, member.name),
     deadline: deadline - REVIEW_RESERVE_MS,
-  }))
-  const staged = () => result.cursors ?? []
+  })
   const evidence = `${clockLine(new Date())}\n\nINSTRUCTION:\n${a.instruction}\n\n${factsGiven(result)}TOOL RESULTS:\n${result.evidence || '(none)'}`
   noteRun({ input: evidence, metadata: { writer: result.model } })
-  return counted(a, member, staged, () => deliver(a, member, result, evidence, () => spentClean(a, staged()), deadline, helper))
+  return deliver(a, member, result, evidence, deadline, helper)
 }
 
 /**
@@ -137,68 +130,9 @@ async function retire(a: Automation, why: string): Promise<void> {
 }
 
 /**
- * Run one step of an automation, counting it against the stuck guard when it
- * leaves what the run read unspent: a throw, or deliver() reporting a PROBLEM.
- * A failure of the model chain or the network passes, and says nothing about
- * the items, so it is not counted. The guard's own failure never hides the run's.
- */
-async function counted<T>(
-  a: Automation,
-  member: Member,
-  staged: (err?: unknown) => StagedCursor[],
-  step: () => Promise<T>,
-): Promise<T> {
-  let out: T
-  try {
-    out = await step()
-  } catch (err) {
-    if (!passing(err)) await unspent(a, member, staged(err), describeError(err)).catch((e) => console.error('[tick] stuck guard failed:', e))
-    throw err
-  }
-  if (out === 'problem') {
-    await unspent(a, member, staged(), 'the run reported a problem').catch((e) => console.error('[tick] stuck guard failed:', e))
-  }
-  return out
-}
-
-/**
- * How a failure that says nothing about the items reads: a service down,
- * rate limited, out of credit, unreachable or refusing its key. Numbers
- * stand alone, so a token count in a "too long" message is not a 5xx.
- */
-const PASSING_WORDS =
-  /\b(?:401|403|429|5\d\d)\b|rate.?limit|quota|too many requests|timed? ?out|\btimeout\b|unavailable|overloaded|ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|cannot connect|network error|no llm configured|not configured|unreachable|unauthori[sz]ed|api key|insufficient credits|provider returned error|expired or been revoked/i
-
-/**
- * A failure of the model chain, a service or the network, which passes or
- * needs fixing, not skipping. What is left (a request the provider rejects as
- * it stands) is about what was sent, and counts. Judged on the error itself
- * where it says, and on its words only where it does not.
- */
-function passing(err: unknown): boolean {
-  if (RetryError.isInstance(err)) return passing(err.lastError)
-  if (APICallError.isInstance(err)) {
-    if (err.isRetryable || err.statusCode === undefined || ![400, 413, 422].includes(err.statusCode)) return true
-    // A 400 can still be the key (Gemini answers a bad one that way).
-    return PASSING_WORDS.test(err.message)
-  }
-  if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) return true
-  return PASSING_WORDS.test(describeError(err))
-}
-
-/**
- * A PROBLEM line is the model's own words, and a status or a timeout there is
- * as likely the item's (a link in the mail that answered 403, an attachment
- * that took too long) as a service's. Only words that can only be a service
- * down, unset or with its link lapsed let one pass.
- */
-const SERVICE_PROBLEM =
-  /rate.?limit|quota|too many requests|service unavailable|temporarily unavailable|overloaded|ECONNREFUSED|ECONNRESET|EAI_AGAIN|cannot connect|not configured|not connected|api key|insufficient credits|expired or been revoked|reconnect|link (?:it|one) again/i
-
-/**
  * approve()'s answer for a draft it held back that no judge ruled on. The
  * next run may well be judged in time, so unlike a draft the checks held
- * back, what this one read is not spent with it.
+ * back, it is not kept as held.
  */
 const UNJUDGED = Symbol('unjudged')
 
@@ -349,31 +283,26 @@ async function approve(a: Automation, draft: string, evidence: string, deadline:
 }
 
 /**
- * What became of a run's output: kept as a report and what it read spent; a
- * draft the checks held back, kept marked as held and what it read spent;
- * spent with nothing kept (quiet by choice); a PROBLEM; or a service that was
- * down or a draft nobody had time to judge.
+ * What became of a run's output: kept as a report; a draft the checks held
+ * back, kept marked as held; nothing kept (quiet by choice); a PROBLEM; or a
+ * draft nobody had time to judge.
  */
-type Delivered = 'kept' | 'held' | 'spent' | 'problem' | 'unavailable'
+type Delivered = 'kept' | 'held' | 'quiet' | 'problem' | 'unjudged'
 
 /**
  * Turn a run's output into at most one report. A lone SKIP line keeps the
  * draft from being a report whatever else it says; a marked PROBLEM is kept
  * as a problem report; the draft itself is kept once approved, or marked as
- * held with why. `spent` marks what the run read as seen, and is called once
- * a report is kept, or the run deliberately kept nothing: a plain SKIP, or a
- * draft the checks held back (the member has it, marked). A PROBLEM, or a
- * draft the tick ran out of time to judge, leaves it new for the next run,
- * with one exception: a run that wrote something unrepeatable on the strength
- * of it (a list item, a reminder) spends it whatever else happened, or the
- * next run would write it again. Says which it was.
+ * held with why. A draft the tick ran out of time to judge reaches nobody,
+ * unless the run wrote something on the strength of it (a list item, a
+ * reminder): then it is kept as held, being all there is of what the run did.
+ * Says which it was.
  */
 async function deliver(
   a: Automation,
   member: Member,
   result: AgentResult,
   evidence: string,
-  spent: () => Promise<void>,
   deadline: number,
   /** The helper whose job this was, whose name the report carries. */
   helper?: Helper,
@@ -395,15 +324,7 @@ async function deliver(
   if (skip || !rest) {
     const outcome = problems.length ? 'problem' : 'skipped'
     noteRun({ output: rest || result.text, metadata: { outcome }, ...(outcome === 'skipped' ? {} : { level: 'WARNING' as const }) })
-    // Quiet by choice is the run done with what it read. A run that could not
-    // do its job (a PROBLEM) leaves it for the next, unless it wrote on it.
-    if (problems.length === 0 || result.wrote?.length) {
-      await spent()
-      return 'spent'
-    }
-    // Counted against the stuck guard only when a problem is about what was
-    // read, not a tool whose service is down or whose link has lapsed.
-    return problems.every((line) => SERVICE_PROBLEM.test(line)) ? 'unavailable' : 'problem'
+    return problems.length ? 'problem' : 'quiet'
   }
 
   // What a groundedness evaluator filters on: this run wrote a draft and put it to the checks.
@@ -411,16 +332,14 @@ async function deliver(
   const approved = await approve(a, rest, evidence, deadline)
   if (approved === UNJUDGED) {
     noteRun({ output: rest, metadata: { outcome: 'held back unjudged' }, level: 'WARNING' })
-    // Nobody ruled on it, so what it read has reached nobody and stays new;
-    // unless the run wrote on it, when the draft is all there is of what it read.
-    if (!result.wrote?.length) return 'unavailable'
-    await spent()
+    // Nobody ruled on it, so it reaches nobody; unless the run wrote on it,
+    // when the draft is all there is of what it did.
+    if (!result.wrote?.length) return 'unjudged'
     await report(a, member, 'held', rest, { helper, detail: 'The tick ran out of time before the checks could finish, after the run had already acted on what it read.' })
     return 'held'
   }
   if ('held' in approved) {
     noteRun({ output: approved.draft, metadata: { outcome: 'held back' }, level: 'WARNING' })
-    await spent()
     const stopped = a.repeat === 'until' ? ' It found something, so it has stopped watching; ask again if it should keep watching.' : ''
     await report(a, member, 'held', approved.draft, { helper, detail: `Held back: ${approved.held}.${stopped}` })
     return 'held'
@@ -433,8 +352,6 @@ async function deliver(
     result.cutShort ? 'The output allowance cut it short, so it lost its unfinished end.' : undefined,
     a.repeat === 'until' ? UNTIL_FOUND : undefined,
   ].filter(Boolean)
-  // Spent the moment it is kept, so the bookkeeping below cannot bring it round again.
-  await spent()
   await report(a, member, 'ready', approved.kept, { helper, detail: notes.length ? notes.join(' ') : null })
   noteRun({
     output: approved.kept,
@@ -442,112 +359,6 @@ async function deliver(
     ...(result.cutShort ? { level: 'WARNING' as const } : {}),
   })
   return 'kept'
-}
-
-/**
- * How many runs in a row, and over how long, may leave the same new items
- * unspent before they are moved past. The span keeps an hourly watch from
- * skipping anything over a bad morning.
- */
-const STUCK_RUNS = 3
-const STUCK_FOR_MS = 12 * 3600_000
-/**
- * A count not added to in this long is forgotten: a failure that has stopped
- * repeating is not stuck, and a mailbox unlinked meanwhile must not have its
- * old place committed onto it when it is linked again. Longer than a week, so
- * a weekly automation's runs still count as in a row.
- */
-const STUCK_FORGOTTEN_MS = 8 * 86_400_000
-
-/** One cursor held at the same place: since when, the last counted run, how many, and the first stuck run's move. */
-type Stuck = { from: string; since: string; last: string; runs: number; move: StagedCursor }
-
-async function readStuck(a: Automation): Promise<Record<string, Stuck>> {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse((await getSetting(`unspent:${a.id}`)) || '{}')
-  } catch {
-    return {}
-  }
-  if (!parsed || typeof parsed !== 'object') return {}
-  // Anything unreadable counts as never stuck, and anything left that long as forgotten.
-  const cutoff = Date.now() - STUCK_FORGOTTEN_MS
-  return Object.fromEntries(
-    Object.entries(parsed).filter(
-      ([, v]) => typeof v?.from === 'string' && typeof v?.move?.key === 'string' && Date.parse(v?.last ?? v?.since) > cutoff,
-    ),
-  ) as Record<string, Stuck>
-}
-
-const writeStuck = (a: Automation, stuck: Record<string, Stuck>) =>
-  setSetting(`unspent:${a.id}`, Object.keys(stuck).length ? JSON.stringify(stuck) : '')
-
-/** The source and the span skipped, which is what the member can go and look at. */
-const describeMove = (m: Stuck) => {
-  const [kind, ...rest] = m.move.key.split(':')
-  const provider = rest.at(-1)
-  const what =
-    kind === 'mail_cursor' ? `mail in your linked ${provider === 'google' ? 'Gmail' : provider === 'microsoft' ? 'Outlook' : String(provider)} mailbox`
-    : 'new items'
-  const from = m.from === '-' ? 'up' : `from ${formatLocal(new Date(m.from))}`
-  return `${what} ${from} to ${formatLocal(new Date(m.move.at))}`
-}
-
-/**
- * Leaving what a run read unspent is right when the run failed for a reason
- * that passes. A failure that is the same every time (an attachment no model
- * will take) would otherwise keep every later run on the same items for good,
- * reporting nothing but the problem each time. So each cursor held at the
- * same place for STUCK_RUNS runs and STUCK_FOR_MS is moved past what the
- * first of those runs saw, and no further: anything that arrived since gets
- * its own chance. One report says so.
- */
-async function unspent(a: Automation, member: Member, staged: StagedCursor[], why: string): Promise<void> {
-  const last = new Map<string, StagedCursor>()
-  for (const s of staged) last.set(s.key, s)
-  if (last.size === 0) return
-  const now = Date.now()
-  const stuck = await readStuck(a)
-  const moved: Stuck[] = []
-  // Per cursor: a mailbox whose fetch fails some runs, and so stages nothing
-  // then, neither resets nor stands in for another held at the same place.
-  for (const s of last.values()) {
-    const from = s.prev?.at ?? '-'
-    const was = stuck[s.key]
-    const at = new Date(now).toISOString()
-    const entry: Stuck = was?.from === from ? { ...was, last: at, runs: was.runs + 1 } : { from, since: at, last: at, runs: 1, move: s }
-    if (entry.runs >= STUCK_RUNS && now - Date.parse(entry.since) >= STUCK_FOR_MS) {
-      moved.push(entry)
-      delete stuck[s.key]
-    } else {
-      stuck[s.key] = entry
-    }
-  }
-  if (moved.length) await commitCursors(moved.map((m) => m.move))
-  await writeStuck(a, stuck)
-  if (!moved.length) return
-  const runs = Math.max(...moved.map((m) => m.runs))
-  await report(
-    a,
-    member,
-    'problem',
-    `Failed on the same new items ${runs} runs running (${why}), so it has moved past them without reporting them: ` +
-      `${moved.map(describeMove).join('; ')}. The problems before this say why; anything since then is still new.`,
-  )
-}
-
-/** A run that spent what it read clears those cursors from the stuck guard. Best effort: the report is what matters. */
-async function spentClean(a: Automation, staged: StagedCursor[]): Promise<void> {
-  await commitCursors(staged)
-  try {
-    const stuck = await readStuck(a)
-    const held = staged.filter((s) => stuck[s.key])
-    if (!held.length) return
-    for (const s of held) delete stuck[s.key]
-    await writeStuck(a, stuck)
-  } catch (err) {
-    console.error('[tick] stuck guard failed:', describeError(err))
-  }
 }
 
 async function runDue(deadline: number): Promise<{ ran: number; skipped: number }> {
@@ -601,7 +412,7 @@ async function runClaimed(a: Automation, deadline: number): Promise<'ran' | 'ski
     return 'skipped' as const
   }
 
-  // An automation runs its author's own words with their mailbox and the
+  // An automation runs its author's own words with their calendar and the
   // household's read tools, and its report is theirs. With the author gone
   // or revoked, those words are nobody's or a stranger's, so it is paused
   // rather than run (deleting a member pauses theirs up front).
@@ -616,8 +427,8 @@ async function runClaimed(a: Automation, deadline: number): Promise<'ran' | 'ski
     // Whoever set it up is the run's user on every call in it, the checks
     // included, not on the writer's alone.
     const delivered = await traced({ userId: String(member.id) }, () => runCustom(a, member, deadline))
-    // It found something, kept or held, and what it read is spent: watching
-    // on would only check for good, hourly, for what has gone by.
+    // It found something, kept or held: watching on would only check for
+    // good, hourly, for what has gone by.
     if (a.repeat === 'until' && delivered === 'kept') await retire(a, 'it found what it was waiting for')
     if (a.repeat === 'until' && delivered === 'held') await retire(a, 'what it found was held back')
     return 'ran'

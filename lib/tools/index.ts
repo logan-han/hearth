@@ -1,5 +1,4 @@
 import { searchTools } from './search'
-import { mailTools } from './mail'
 import { calendarTools } from './calendar'
 import { familyCalendarTools } from './familycal'
 import { proposalTools } from './proposals'
@@ -22,7 +21,6 @@ import { noteActivity } from '../activity'
 /** Tools whose results carry text written outside the household. See ToolContext.readUntrusted. */
 const UNTRUSTED_SOURCES: ReadonlySet<string> = new Set<ToolName>([
   'web_search', 'read_url', 'read_recipe',
-  'list_email', 'new_mail', 'read_email', 'read_attachment',
   'list_calendar', 'find_free_time',
   'notion_search', 'notion_read_page', 'notion_query_database',
   'jira_search', 'jira_board_summary', 'jira_read_issue',
@@ -31,7 +29,6 @@ const UNTRUSTED_SOURCES: ReadonlySet<string> = new Set<ToolName>([
 export function buildTools(ctx: ToolContext) {
   return instrument(ctx, {
     ...searchTools,
-    ...mailTools(ctx),
     ...calendarTools(ctx),
     ...familyCalendarTools(ctx),
     ...proposalTools(ctx),
@@ -58,7 +55,7 @@ export function buildTools(ctx: ToolContext) {
  */
 const UNREPEATABLE: ReadonlySet<string> = new Set<ToolName>([
   'add_to_list', 'create_automation', 'create_calendar_event',
-  'jira_create_issue', 'jira_comment', 'jira_attach_email_file', 'notion_append_to_page',
+  'jira_create_issue', 'jira_comment', 'notion_append_to_page',
   'create_goal', 'update_goal', 'hand_off',
 ])
 
@@ -119,7 +116,7 @@ const unconfirmedAgain = (name: string) =>
   'Say it may not have happened and what to check.'
 
 const UNSEEN_LINK =
-  'Not opened: this run has read mail, a page or a file from outside the household, and this address does not ' +
+  'Not opened: this run has read a page, a calendar or a file from outside the household, and this address does not ' +
   'appear in anything it was given or read. Open a link only exactly as it appears there.'
 
 /**
@@ -199,7 +196,6 @@ export type ToolName = keyof ReturnType<typeof buildTools>
  */
 export const CUSTOM_AUTOMATION_TOOLS: ToolName[] = [
   'web_search', 'read_url', 'read_recipe', 'weather', 'recall',
-  'list_email', 'new_mail', 'read_email', 'read_attachment',
   'list_calendar', 'list_family_events', 'propose_family_event', 'list_event_proposals',
   'show_list', 'show_lists', 'add_to_list',
   'list_bank_accounts', 'list_transactions', 'spending_summary', 'budget_summary', 'recurring_payments',
@@ -215,7 +211,7 @@ export function allToolNames(): ToolName[] {
 }
 
 /**
- * Tools that change something: the calendar, a list, memory, mail, the board,
+ * Tools that change something: the calendar, a list, memory, the board,
  * a schedule. Each one that goes through is kept on its member's record of
  * what was changed.
  */
@@ -224,8 +220,8 @@ export const WRITE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   'propose_family_event', 'accept_event_proposal', 'reject_event_proposal',
   'add_to_list', 'check_off_list', 'remove_from_list', 'clear_list',
   'remember', 'forget', 'unsure', 'answer_question',
-  'draft_email', 'send_email', 'cancel_draft', 'create_calendar_event',
-  'notion_append_to_page', 'jira_create_issue', 'jira_update_issue', 'jira_move_issue', 'jira_comment', 'jira_attach_email_file',
+  'create_calendar_event',
+  'notion_append_to_page', 'jira_create_issue', 'jira_update_issue', 'jira_move_issue', 'jira_comment',
   'create_automation', 'delete_automation', 'pause_automation',
   'create_goal', 'update_goal',
   'create_helper', 'remove_helper', 'hand_off',

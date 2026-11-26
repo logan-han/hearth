@@ -107,7 +107,7 @@ describe('list_goals and goal_status', () => {
   it('lets a check-in, running as its owner, read the goal, and nobody else', async () => {
     const mine = await call(goals(), 'create_goal', { title: 'Leave my job', steps: ['Update CV'] })
     // The check-in runs as a scheduled job, as Rowan.
-    const scheduled = goals({ via: 'watcher', cursorScope: 'auto:1' })
+    const scheduled = goals({ via: 'watcher' })
     expect(((await call(scheduled, 'list_goals', {})).goals as unknown[]).length).toBe(1)
     expect(await call(scheduled, 'goal_status', { id: mine.goal_id })).toMatchObject({ title: 'Leave my job' })
     // Another member's run, or one with nobody behind it, cannot.

@@ -181,7 +181,7 @@ export function MembersForm({ initial }: { initial: MemberRow[] }) {
 
       <p className="empty" style={{ marginTop: '0.8rem' }}>
         The email is how someone signs in here, with Google or Microsoft; once they have linked a
-        mailbox they can sign in with that address too. Signed in, they link their accounts and make
+        calendar they can sign in with that address too. Signed in, they link their accounts and make
         keys for their MCP clients. Adding an address that is already here renames that person and
         changes only what you filled in; someone with no access keeps none until you Allow them.
       </p>

@@ -29,11 +29,10 @@ export default async function SystemPage() {
     <Shell session={session} here="/system" footnote={`Times are the household's, ${stats.timezone}.`}>
       <div className="strip">
         <Stat value={t.members} label="Family" note={`${t.admins} admin`} />
-        <Stat value={t.connections} label="Mailboxes linked" />
+        <Stat value={t.connections} label="Calendars linked" />
         <Stat value={t.keys} label="MCP keys" />
         <Stat value={t.events} label="On the calendar" />
         <Stat value={t.memories} label="Remembered" note="listed on Home" />
-        <Stat value={t.sent} label="Emails sent" note={t.drafts ? `${t.drafts} awaiting yes` : undefined} />
         <Stat
           value={pulse.minutesAgo === null ? 'never' : pulse.minutesAgo === 0 ? 'just now' : `${pulse.minutesAgo} min ago`}
           label="Last tick"

@@ -24,6 +24,16 @@ const fullJournal = JSON.parse(readFileSync(join(folder, 'meta/_journal.json'), 
 }
 const journal = fullJournal
 
+/** The migrations as they stood at one of them, in a folder of their own for the migrator the deploy runs. */
+function migrationsUpTo(idx: number): string {
+  const dir = mkdtempSync(join(tmpdir(), `hearth-${String(idx).padStart(4, '0')}-`))
+  mkdirSync(join(dir, 'meta'))
+  const entries = journal.entries.filter((entry) => entry.idx <= idx)
+  for (const { tag } of entries) copyFileSync(join(folder, `${tag}.sql`), join(dir, `${tag}.sql`))
+  writeFileSync(join(dir, 'meta/_journal.json'), JSON.stringify({ ...fullJournal, entries }))
+  return dir
+}
+
 describe('a database db:push built on the old advice', () => {
   it('is recorded, not rebuilt, by the next build', async () => {
     const client = new PGlite()
@@ -65,14 +75,11 @@ describe('a household on migration 0008, when the next build moves it to MCP alo
     const undated = await crypto.hashToken(junosKey)
 
     // The migrations as they stood at 0008, applied and recorded by the migrator the deploy runs.
-    const at0008 = mkdtempSync(join(tmpdir(), 'hearth-0008-'))
+    const at0008 = migrationsUpTo(8)
+    const at0010 = migrationsUpTo(10)
     const client = new PGlite()
     const db = drizzle(client)
     try {
-      mkdirSync(join(at0008, 'meta'))
-      const before = journal.entries.filter((entry) => entry.idx <= 8)
-      for (const { tag } of before) copyFileSync(join(folder, `${tag}.sql`), join(at0008, `${tag}.sql`))
-      writeFileSync(join(at0008, 'meta/_journal.json'), JSON.stringify({ ...fullJournal, entries: fullJournal.entries.filter((entry) => entry.idx <= 8) }))
       await migrate(db, { migrationsFolder: at0008 })
 
       await client.exec(`
@@ -104,10 +111,10 @@ describe('a household on migration 0008, when the next build moves it to MCP alo
           ('AMBIENT_MODE', 'x'), ('ASSISTANT_PERSONA', 'x'), ('GEMINI_API_KEY', 'x'), ('ASSISTANT_NAME', 'x');
       `)
 
-      await migrate(db, { migrationsFolder: folder })
+      await migrate(db, { migrationsFolder: at0010 })
 
       const rows = async (query: string) => (await client.query<Record<string, unknown>>(query)).rows
-      expect(await rows(`select count(*)::int as n from drizzle.__drizzle_migrations`)).toEqual([{ n: journal.entries.length }])
+      expect(await rows(`select count(*)::int as n from drizzle.__drizzle_migrations`)).toEqual([{ n: 11 }])
 
       // The key a member held is one of their keys now, and nobody without one gains one.
       expect(await rows(`select id, member_id, label, token_hash, (created_at at time zone 'UTC')::text as made, last_used_at from mcp_keys where member_id = 1`)).toEqual([
@@ -172,6 +179,36 @@ describe('a household on migration 0008, when the next build moves it to MCP alo
     } finally {
       await client.close()
       rmSync(at0008, { recursive: true, force: true })
+      rmSync(at0010, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('a household on migration 0010, when the next build drops mail', () => {
+  it('drops the drafts and every mail marker, and keeps the rest of its settings', async () => {
+    const at0010 = migrationsUpTo(10)
+    const client = new PGlite()
+    const db = drizzle(client)
+    try {
+      await migrate(db, { migrationsFolder: at0010 })
+      await client.exec(`
+        insert into members (name, email, allowed, is_admin) values ('Rowan', 'rowan@example.com', true, true);
+        insert into email_drafts (member_id, provider, recipients, subject, body) values (1, 'google', 'a@b.com', 'Hello', 'Body');
+        insert into settings (key, value) values
+          ('mail_cursor:auto:5:1:google', '{"at":"x"}'), ('mail_cursor:key:3:1:microsoft', '{}'), ('mail_cursor:brief:1:google', '{}'),
+          ('unspent:5', '{}'), ('last_tick_at', '2026-11-20T00:00:00.000Z'), ('calendar_token', 'tok'), ('signing_epoch', 'ep');
+      `)
+
+      await migrate(db, { migrationsFolder: folder })
+
+      const rows = async (query: string) => (await client.query<Record<string, unknown>>(query)).rows
+      expect(await rows(`select count(*)::int as n from drizzle.__drizzle_migrations`)).toEqual([{ n: journal.entries.length }])
+      expect(await rows(`select to_regclass('public.email_drafts') as drafts`)).toEqual([{ drafts: null }])
+      expect((await rows(`select key from settings order by key`)).map((r) => r.key)).toEqual(['calendar_token', 'last_tick_at', 'signing_epoch'])
+      expect(await rows(`select name from members`)).toEqual([{ name: 'Rowan' }])
+    } finally {
+      await client.close()
+      rmSync(at0010, { recursive: true, force: true })
     }
   })
 })

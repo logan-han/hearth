@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { PGlite } from '@electric-sql/pglite'
 import { freshDb, closeDb } from './helpers/db'
 import { getSetting } from '@/lib/db/queries'
-import { commitCursors } from '@/lib/tools/cursor'
 import type { ToolContext } from '@/lib/tools/context'
 
 const { moneyTools, budgetPosition, overBudget, NO_BUDGET, NOTHING_LEFT } = await import('@/lib/tools/money')

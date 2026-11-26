@@ -3,17 +3,6 @@ import * as jira from '@/lib/providers/jira'
 import { jiraTools } from '@/lib/tools/jira'
 import type { ToolContext } from '@/lib/tools/context'
 
-// The mailbox behind jira_attach_email_file, answering with whatever a test sets, and whose it was asked for.
-const readAttachment = vi.hoisted(() => vi.fn())
-const mailboxesOf = vi.hoisted(() => [] as number[])
-vi.mock('@/lib/providers', async (orig) => ({
-  ...(await orig<typeof import('@/lib/providers')>()),
-  clientFor: (id: number) => {
-    mailboxesOf.push(id)
-    return { readAttachment }
-  },
-}))
-
 const fetchMock = vi.fn()
 let ctx: ToolContext
 
@@ -54,7 +43,6 @@ beforeEach(() => {
   process.env.JIRA_PROJECT_KEY = 'HTL'
   vi.stubGlobal('fetch', fetchMock)
   fetchMock.mockReset()
-  mailboxesOf.length = 0
   ctx = { member: null, memberName: 'Rowan', now: new Date('2026-08-27T02:00:00Z') }
 })
 afterEach(() => vi.unstubAllGlobals())
@@ -304,78 +292,14 @@ describe('jira_update_issue', () => {
   })
 })
 
-describe('jira_attach_email_file', () => {
-  const member = { id: 3, name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false, createdAt: new Date() } as ToolContext['member']
-
-  it('fetches the attachment from the mailbox and uploads it as multipart with the XSRF opt-out header', async () => {
-    ctx = { ...ctx, member }
-    readAttachment.mockResolvedValue({ filename: 'Renewal.pdf', mimeType: 'application/pdf', size: 4, bytes: new TextEncoder().encode('%PDF') })
-    fetchMock.mockResolvedValue(json([{ id: '10001', filename: 'Renewal.pdf', size: 4 }]))
-    const r = await call('jira_attach_email_file', { key: 'HTL-352', email_id: 'm1', provider: 'google', filename: 'Renewal.pdf' })
-    expect(readAttachment).toHaveBeenCalledWith('m1', 'Renewal.pdf')
-    expect(r).toEqual({ key: 'HTL-352', attached: 'Renewal.pdf', size: 4 })
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe('https://example.atlassian.net/rest/api/3/issue/HTL-352/attachments')
-    const headers = init.headers as Record<string, string>
-    expect(headers['X-Atlassian-Token']).toBe('no-check')
-    expect(headers['content-type']).toBeUndefined()
-    expect(init.body).toBeInstanceOf(FormData)
-    const file = (init.body as FormData).get('file') as File
-    expect(file.name).toBe('Renewal.pdf')
-    expect(file.type).toBe('application/pdf')
-    expect(await file.text()).toBe('%PDF')
-  })
-
-  it('needs a known member, and hands a mailbox error back rather than throwing', async () => {
-    await expect(call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })).rejects.toThrow(/family member/)
-    ctx = { ...ctx, member }
-    readAttachment.mockRejectedValue(new Error('No attachment called "x.pdf" on that email.'))
-    expect(String((await call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })).error)).toContain('No attachment called')
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  it('surfaces a refused upload with its status', async () => {
-    ctx = { ...ctx, member }
-    readAttachment.mockResolvedValue({ filename: 'x.pdf', mimeType: 'application/pdf', size: 1, bytes: new Uint8Array([1]) })
-    fetchMock.mockResolvedValue(json({ errorMessages: ['too big'] }, 413))
-    expect(String((await call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })).error)).toContain('Jira API 413')
-  })
-
-  it('reports not configured before checking anything else', async () => {
-    delete process.env.JIRA_API_TOKEN
-    expect(String((await call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })).error)).toContain('JIRA_BASE_URL')
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  it("reads the file from the caller's own mailbox, whoever else the call names", async () => {
-    ctx = { ...ctx, member }
-    readAttachment.mockResolvedValue({ filename: 'x.pdf', mimeType: 'application/pdf', size: 1, bytes: new Uint8Array([1]) })
-    fetchMock.mockResolvedValue(json([{ id: '1', filename: 'x.pdf', size: 1 }]))
-    const tools = jiraTools(ctx) as Record<string, { execute: unknown }>
-    await (tools.jira_attach_email_file.execute as (a: unknown, o: unknown) => Promise<unknown>)({ key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf', of: 'Nobody' }, {})
-    expect(mailboxesOf).toEqual([3])
-  })
-
-  it('says only that it failed when the mailbox ran out of time, since nothing was uploaded', async () => {
-    ctx = { ...ctx, member }
-    readAttachment.mockRejectedValue(timedOut())
-    const r = await call('jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' })
-    expect(r.error).toBeDefined()
-    expect(r.maybe_done).toBeUndefined()
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
-})
-
 describe('a board write that runs out of time', () => {
   const member = { id: 3, name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false, createdAt: new Date() } as ToolContext['member']
 
   it.each([
     ['jira_create_issue', { summary: 'Pay the rates' }],
     ['jira_comment', { key: 'HTL-1', text: 'paid today' }],
-    ['jira_attach_email_file', { key: 'HTL-1', email_id: 'm1', provider: 'google', filename: 'x.pdf' }],
   ])('%s says it may have gone through, so it is checked rather than done twice', async (name, args) => {
     ctx = { ...ctx, member }
-    readAttachment.mockResolvedValue({ filename: 'x.pdf', mimeType: 'application/pdf', size: 1, bytes: new Uint8Array([1]) })
     fetchMock.mockRejectedValue(timedOut())
     const r = await call(name, args)
     expect(String(r.error)).toContain('may or may not have gone through')
@@ -502,22 +426,6 @@ describe('provider odds and ends', () => {
     delete process.env.JIRA_API_TOKEN
     await expect(jira.ping()).rejects.toThrow('JIRA_BASE_URL')
     expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  it('refuses to attach when unconfigured, without a network call', async () => {
-    delete process.env.JIRA_API_TOKEN
-    await expect(
-      jira.attachFile('HTL-1', { filename: 'x.pdf', mimeType: 'application/pdf', bytes: new Uint8Array([1]) }),
-    ).rejects.toThrow('JIRA_BASE_URL')
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  it('fills in defaults when the upload reply is sparse', async () => {
-    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => undefined, text: async () => '' })
-    const made = await jira.attachFile('HTL-1', {
-      filename: 'Notice.pdf', mimeType: 'application/pdf', bytes: new TextEncoder().encode('%PDF'),
-    })
-    expect(made).toEqual({ id: '', filename: 'Notice.pdf', size: 4 })
   })
 
   it('reads sparse ADF: text nodes without text, nodes without content or type, an empty doc', () => {

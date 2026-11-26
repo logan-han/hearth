@@ -200,34 +200,3 @@ export async function updateIssue(
   if (input.dueDate !== undefined) fields.duedate = input.dueDate
   await api(`/rest/api/3/issue/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ fields }) })
 }
-
-export type JiraAttachment = { id: string; filename: string; size: number }
-
-/**
- * Attachments are the one upload: multipart rather than JSON, and Jira wants
- * the XSRF opt-out header on it or answers 403 whatever the credentials.
- */
-export async function attachFile(key: string, file: { filename: string; mimeType: string; bytes: Uint8Array }): Promise<JiraAttachment> {
-  if (!jiraConfigured()) {
-    throw new Error('Jira is not configured (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN).')
-  }
-  const form = new FormData()
-  const bytes = file.bytes.buffer.slice(file.bytes.byteOffset, file.bytes.byteOffset + file.bytes.byteLength) as ArrayBuffer
-  form.append('file', new Blob([bytes], { type: file.mimeType }), file.filename)
-  const path = `/rest/api/3/issue/${encodeURIComponent(key)}/attachments`
-  // The upload and its answer, which together are the one write.
-  return unconfirmedOnTimeout(async () => {
-    const res = await fetch(`${baseUrl()}${path}`, {
-      method: 'POST',
-      headers: { authorization: authHeader(), accept: 'application/json', 'X-Atlassian-Token': 'no-check' },
-      body: form,
-      signal: deadline(),
-    })
-    if (!res.ok) {
-      const body = await res.text()
-      throw new Error(`Jira API ${res.status} on ${path}: ${body.slice(0, 250)}`)
-    }
-    const [made] = ((await res.json()) as Partial<JiraAttachment>[] | undefined) ?? []
-    return { id: made?.id ?? '', filename: made?.filename ?? file.filename, size: made?.size ?? file.bytes.byteLength }
-  })
-}

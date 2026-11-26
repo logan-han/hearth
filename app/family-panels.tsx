@@ -84,7 +84,7 @@ export function Proposals({
   return (
     <div className="panel">
       <p className="group-note">
-        Found in mail or a notice. Nothing here reaches the family calendar until someone says yes.
+        Found in a notice or on a page. Nothing here reaches the family calendar until someone says yes.
       </p>
       <ul className="listing doable">
         {proposals.map((p) => (
@@ -557,54 +557,6 @@ export function Goals({
           </p>
         </div>
       ))}
-      {error ? <p className="flash bad">{error}</p> : null}
-    </div>
-  )
-}
-
-/**
- * The signed-in member's own email drafts, waiting on their yes. Send here is
- * the same yes as send_email: the draft goes from their mailbox as written,
- * once, and Discard throws it away. Nobody else's drafts are shown, since
- * only the writer can send one.
- */
-export function Drafts({
-  drafts,
-}: {
-  drafts: { id: number; to: string; cc: string | null; subject: string; body: string; from: string; when: string }[]
-}) {
-  const { act, busy, error } = useFamilyActions()
-
-  return (
-    <div className="panel">
-      <p className="group-note">Your email drafts. Nothing is sent until you say yes, here or to your MCP client.</p>
-      <ul className="listing doable">
-        {drafts.map((d) => (
-          <li key={d.id}>
-            <span className="grow">
-              <span className="title">{d.subject}</span>
-              <span className="meta">
-                to {d.to}
-                {d.cc ? `, copy to ${d.cc}` : ''} · from your {d.from} · drafted {d.when}
-              </span>
-              <span className="meta draft-body">{d.body}</span>
-            </span>
-            <span className="row-acts">
-              <button
-                className="primary"
-                disabled={busy}
-                title="Send it now, as written"
-                onClick={() => confirm(`Send "${d.subject}" to ${d.to} now?`) && act({ action: 'send_draft', id: d.id })}
-              >
-                Send
-              </button>
-              <button disabled={busy} title="Throw this draft away" onClick={() => act({ action: 'discard_draft', id: d.id })}>
-                Discard
-              </button>
-            </span>
-          </li>
-        ))}
-      </ul>
       {error ? <p className="flash bad">{error}</p> : null}
     </div>
   )

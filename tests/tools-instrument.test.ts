@@ -46,7 +46,7 @@ beforeEach(async () => {
   process.env.APP_URL = 'https://hearth.example'
   client = (await freshDb()).client
   const member = await q.saveMember({ name: 'Rowan', email: 'rowan@hearth.example', allowed: true, isAdmin: false })
-  ctx = { member, memberName: 'Rowan', now: new Date(), via: 'mcp', cursorScope: 'key:1' }
+  ctx = { member, memberName: 'Rowan', now: new Date(), via: 'mcp' }
 })
 afterEach(async () => closeDb(client))
 
@@ -86,14 +86,10 @@ describe("the brief's own runner", () => {
   const brief = (c: ToolContext) =>
     ((briefTools(c) as unknown as Record<string, { execute: (a: unknown, o: unknown) => Promise<Record<string, unknown>> }>).morning_brief.execute)({}, {})
 
-  it('takes a tool that answers nothing as an empty answer, and adds its moves to those already waiting', async () => {
-    const waiting = { key: 'mail_cursor:key:1:1:google', at: new Date().toISOString(), ids: [], prev: null }
-    const run: ToolContext = { ...ctx, pendingCursors: [waiting] }
-    const r = await brief(run)
+  it('takes a tool that answers nothing as an empty answer', async () => {
+    const r = await brief(ctx)
     expect(r.weather).toEqual({})
     expect(r.how_to_read).toBeDefined()
-    // Nothing linked, so the brief staged nothing, and what was already waiting stays.
-    expect(run.pendingCursors).toEqual([waiting])
   })
 
   it('refuses a tool it cannot run rather than passing it off as quiet', async () => {

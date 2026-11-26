@@ -35,6 +35,8 @@ beforeEach(async () => {
   process.env.APP_URL = 'https://hearth.example'
   process.env.GOOGLE_CLIENT_ID = 'gid'
   process.env.GOOGLE_CLIENT_SECRET = 'gsecret'
+  process.env.GOOGLE_AGENT_CLIENT_ID = 'agent-gid'
+  process.env.GOOGLE_AGENT_CLIENT_SECRET = 'agent-gsecret'
   process.env.MS_CLIENT_ID = 'mid'
   process.env.MS_CLIENT_SECRET = 'msecret'
   delete process.env.ADMIN_EMAILS
@@ -259,9 +261,9 @@ describe('completeAuth', () => {
   })
 
   describe('signing in, which can also link a mailbox', () => {
-    const signinUrl = async (next?: string) => {
+    const signinUrl = async (next?: string, provider = 'google') => {
       const state = await signState({ purpose: 'signin', ...(next ? { next } : {}) })
-      return `https://hearth.example/api/oauth/google/callback?code=abc&state=${encodeURIComponent(state)}`
+      return `https://hearth.example/api/oauth/${provider}/callback?code=abc&state=${encodeURIComponent(state)}`
     }
 
     it('signs a recognised member in and links in one step when nothing is linked yet', async () => {
@@ -269,11 +271,24 @@ describe('completeAuth', () => {
       fetchMock.mockResolvedValueOnce(
         tokenReply({ access_token: 'a', refresh_token: 'r', id_token: idToken({ email: 'sam@hearth.example' }) }),
       )
-      const res = await completeAuth(req(await signinUrl()), 'google')
+      const res = await completeAuth(req(await signinUrl(undefined, 'microsoft')), 'microsoft')
       expect(res.status).toBe(307)
       expect(res.headers.get('location')).toBe('https://hearth.example/')
       expect((await readSession())?.email).toBe('sam@hearth.example')
-      expect((await q.connectionFor(sam.id, 'google'))!.scopes).toBeNull()
+      expect((await q.connectionFor(sam.id, 'microsoft'))!.scopes).toBeNull()
+    })
+
+    it('signs in with Google through its own client and links nothing, since Gmail is linked through the agent client', async () => {
+      const sam = await add('Sam')
+      fetchMock.mockResolvedValueOnce(
+        tokenReply({ access_token: 'a', refresh_token: 'r', id_token: idToken({ email: 'sam@hearth.example' }) }),
+      )
+      const res = await completeAuth(req(await signinUrl()), 'google')
+      expect(res.status).toBe(307)
+      expect((await readSession())?.email).toBe('sam@hearth.example')
+      expect(await q.connectionFor(sam.id, 'google')).toBeUndefined()
+      // The code goes back through the client that sent the member to Google.
+      expect(new URLSearchParams(String((fetchMock.mock.calls[0][1] as RequestInit).body)).get('client_id')).toBe('gid')
     })
 
     it('lands on the page the sign-in was started from', async () => {
@@ -305,12 +320,12 @@ describe('completeAuth', () => {
 
     it('never repoints a link at another account, or adopts one that has no email recorded against it', async () => {
       const ada = await add('Ada')
-      await q.saveConnection({ memberId: ada.id, provider: 'google', email: null, refreshToken: 'old', scopes: null })
+      await q.saveConnection({ memberId: ada.id, provider: 'microsoft', email: null, refreshToken: 'old', scopes: null })
       fetchMock.mockResolvedValueOnce(
         tokenReply({ access_token: 'a', refresh_token: 'new', id_token: idToken({ email: 'ada@hearth.example' }) }),
       )
-      await completeAuth(req(await signinUrl()), 'google')
-      expect(await q.decryptRefreshToken((await q.connectionFor(ada.id, 'google'))!)).toBe('old')
+      await completeAuth(req(await signinUrl(undefined, 'microsoft')), 'microsoft')
+      expect(await q.decryptRefreshToken((await q.connectionFor(ada.id, 'microsoft'))!)).toBe('old')
     })
 
     it('keeps the session even when the mailbox link cannot be stored', async () => {
@@ -321,7 +336,7 @@ describe('completeAuth', () => {
       fetchMock.mockResolvedValueOnce(
         tokenReply({ access_token: 'a', refresh_token: 'r', id_token: idToken({ email: 'juno@hearth.example' }) }),
       )
-      const res = await completeAuth(req(await signinUrl()), 'google')
+      const res = await completeAuth(req(await signinUrl(undefined, 'microsoft')), 'microsoft')
       expect(res.status).toBe(307)
       expect(res.headers.get('location')).toBe('https://hearth.example/')
       expect(console.error).toHaveBeenCalledWith('[oauth] sign-in could not store the connection:', expect.anything())
@@ -415,6 +430,10 @@ describe('access tokens', () => {
     // Microsoft asking for a fresh sign-in or consent is the same: only the member can fix it.
     clearTokenCache()
     fetchMock.mockResolvedValueOnce({ ok: false, status: 400, text: async () => '{"error":"interaction_required"}' })
+    await expect(accessTokenFor(m.id, 'google')).rejects.toBeInstanceOf(ReconnectNeededError)
+
+    // So is a refresh token another client was issued, which only a new link through this one replaces.
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 401, text: async () => '{"error":"unauthorized_client","error_description":"Unauthorized"}' })
     await expect(accessTokenFor(m.id, 'google')).rejects.toBeInstanceOf(ReconnectNeededError)
 
     // Anything else stays the error it was.
